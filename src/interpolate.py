@@ -96,9 +96,9 @@ def shift_spectra_linear(
     Example:
         >>> from dataset import SpectrumDataset
         >>> B = 32  # Batch size
-        >>> dataset = SpectrumDataset(n_specs=100, wavemin=5000, wavemax=5050, data_dtype=torch.float32, batch_size=B)
+        >>> dataset = SpectrumDataset(n_specs=100, wavemin=5000, wavemax=5050, data_dtype=torch.float32)
         >>> batch_yobs = dataset.spectra
-        >>> batch_wave = dataset.b_wavegrid  # [B, n_pixel]
+        >>> batch_wave = dataset.wavegrid.unsqueeze(0).expand(B, -1).contiguous()  # [B, n_pixel]
         >>> batch_voffset = torch.from_numpy(np.random.uniform(-3, 3, size=(B, 1))).cuda()
         >>> velocities = batch_voffset.view(-1, 1)
         >>> batch_yaug, extrap_mask = shift_spectra_linear(
@@ -236,12 +236,14 @@ if __name__ == "__main__":
 
     B = 32  # Taille du batch
     dataset = SpectrumDataset(
-        n_specs=100, wavemin=5000, wavemax=5050, data_dtype=torch.float32, batch_size=B
+        n_specs=100, wavemin=5000, wavemax=5050, data_dtype=torch.float32
     )
 
     batch_yobs = dataset.spectra[:B]  # [B, n_pixel]
 
-    batch_wave = dataset.b_wavegrid  # [B, n_pixel]
+    batch_wave = (
+        dataset.wavegrid.unsqueeze(0).expand(B, -1).contiguous()
+    )  # [B, n_pixel]
     batch_yaug_lin, batch_voffset_lin = augment_spectra_uniform(
         batch_yobs=batch_yobs,
         batch_wave=batch_wave,

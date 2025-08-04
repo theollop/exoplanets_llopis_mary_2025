@@ -4,6 +4,41 @@
     <img src="https://img.shields.io/badge/Datalumina-Project%20Template-2856f7" alt="Datalumina Project" />
 </a>
 
+## Installation de l'environnement
+
+### Installation automatique
+```bash
+# Rendre le script exécutable
+chmod +x setup_env.sh
+
+# Exécuter le script d'installation
+./setup_env.sh
+```
+
+### Installation manuelle
+```bash
+# Créer et activer l'environnement virtuel
+python3 -m venv venv
+source venv/bin/activate
+
+# Installer PyTorch avec CUDA 12.0
+pip3 install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu120
+
+# Installer les dépendances
+pip install -r requirements.txt
+
+# Installer le projet en mode développement
+pip install -e .
+
+# (Optionnel) Installer torchcubicspline pour l'interpolation par spline cubique
+pip install git+https://github.com/patrick-kidger/torchcubicspline.git
+```
+
+### Activation de l'environnement
+```bash
+source venv/bin/activate
+```
+
 ## Cookiecutter Data Science
 This project template is a simplified version of the [Cookiecutter Data Science](https://cookiecutter-data-science.drivendata.org) template, created to suit the needs of Datalumina and made available as a GitHub template.
 

@@ -1,2 +1,29 @@
+# Core scientific computing
+numpy
+pandas
+
+# PyTorch with CUDA 12.0 support - install separately with:
+# pip3 install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu120
+# torch
+# torchvision 
+# torchaudio
+
+# TorchCubicSpline - install from GitHub (optional, only needed for cubic spline interpolation):
+# pip install git+https://github.com/patrick-kidger/torchcubicspline.git
+# torchcubicspline
+
+# GPU utilities
+pynvml
+
+# Visualization
+matplotlib
+
+# Progress bars and console output
+rich
+
+# Jupyter and development
 ipykernel
 python-dotenv
+
+# Astronomy
+astropy

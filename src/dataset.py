@@ -2,8 +2,8 @@ import numpy as np
 import pandas as pd
 import torch
 from torch.utils.data import Dataset, DataLoader
-from src.utils import get_free_memory
-from src.interpolate import augment_spectra_uniform
+from .utils import get_free_memory
+from .interpolate import augment_spectra_uniform
 
 ##############################################################################
 ##############################################################################
@@ -25,7 +25,9 @@ class SpectrumDataset(Dataset):
         wavemin=None,
         wavemax=None,
         data_dtype=torch.float32,
-        batch_size=16,
+        dataset_filepath="data/rv_datachallenge/Sun_B57001_E61001_planet-FallChallenge1/HARPN/STAR1136_HPN_flux_YVA.npy",
+        material_filepath="data/rv_datachallenge/Sun_B57001_E61001_planet-FallChallenge1/HARPN/STAR1136_HPN_Analyse_material.p",
+        summary_filepath="data/rv_datachallenge/Sun_B57001_E61001_planet-FallChallenge1/HARPN/STAR1136_HPN_Analyse_summary.csv",
     ):
         print("Initialisation du SpectrumDataset...")
         self.init_data(
@@ -33,14 +35,16 @@ class SpectrumDataset(Dataset):
             wavemin=wavemin,
             wavemax=wavemax,
             data_dtype=data_dtype,
-            batch_size=batch_size,
+            dataset_filepath=dataset_filepath,
+            material_filepath=material_filepath,
+            summary_filepath=summary_filepath,
         )
         print(self)
         print("Déplacement des données vers le GPU si disponible...")
-        print("CUDA disponible:", get_free_memory() / 1e9, "GB")
+        print(f"CUDA disponible: {get_free_memory() / 1e9:.3f} GB")
         self.move_to_cuda()
         print("Dataset initialisé avec succès.")
-        print("CUDA disponible:", get_free_memory() / 1e9, "GB")
+        print(f"CUDA disponible: {get_free_memory() / 1e9:.3f} GB")
 
     def __len__(self):
         return self.spectra.shape[0]
@@ -68,9 +72,11 @@ class SpectrumDataset(Dataset):
         wavemin=None,
         wavemax=None,
         data_dtype=torch.float32,
-        batch_size=16,
+        dataset_filepath="/home/tliopis/Codes/lagrange_llopis_mary_2025/data/rv_datachallenge/Sun_B57001_E61001_planet-FallChallenge1/HARPN/STAR1136_HPN_flux_YVA.npy",
+        material_filepath="/home/tliopis/Codes/lagrange_llopis_mary_2025/data/rv_datachallenge/Sun_B57001_E61001_planet-FallChallenge1/HARPN/STAR1136_HPN_Analyse_material.p",
+        summary_filepath="/home/tliopis/Codes/lagrange_llopis_mary_2025/data/rv_datachallenge/Sun_B57001_E61001_planet-FallChallenge1/HARPN/STAR1136_HPN_Analyse_summary.csv",
     ):
-        filepath = "/home/tliopis/Codes/lagrange_llopis_mary_2025/data/rv_datachallenge/Sun_B57001_E61001_planet-FallChallenge1/HARPN/STAR1136_HPN_flux_YVA.npy"
+        dataset_filepath = "/home/tliopis/Codes/lagrange_llopis_mary_2025/data/rv_datachallenge/Sun_B57001_E61001_planet-FallChallenge1/HARPN/STAR1136_HPN_flux_YVA.npy"
 
         analyse_material = np.load(
             "/home/tliopis/Codes/lagrange_llopis_mary_2025/data/rv_datachallenge/Sun_B57001_E61001_planet-FallChallenge1/HARPN/STAR1136_HPN_Analyse_material.p",
@@ -95,7 +101,7 @@ class SpectrumDataset(Dataset):
 
         if n_specs is None:
             n_specs = analyse_summary.shape[0]
-        data = np.load(filepath)
+        data = np.load(dataset_filepath)
         data = data[:n_specs, wave_mask]
 
         self.spectra = torch.tensor(data).to(dtype=data_dtype).contiguous()
@@ -108,8 +114,12 @@ class SpectrumDataset(Dataset):
         )
         self.n_specs = n_specs
         self.n_pixels = wavegrid.shape[0]
-        self.batch_size = batch_size
-        self.b_wavegrid = self.wavegrid.expand(batch_size, -1).contiguous()
+        self.data_dtype = data_dtype
+        self.wavemin = wavemin
+        self.wavemax = wavemax
+        self.dataset_filepath = dataset_filepath
+        self.material_filepath = material_filepath
+        self.summary_filepath = summary_filepath
 
     def move_to_cuda(self):
         """
@@ -119,9 +129,23 @@ class SpectrumDataset(Dataset):
             self.spectra = self.spectra.cuda()
             self.wavegrid = self.wavegrid.cuda()
             self.template = self.template.cuda()
-            self.b_wavegrid = self.b_wavegrid.cuda()
         else:
             print("CUDA n'est pas disponible, les données restent sur le CPU.")
+
+    def to_dict(self):
+        """
+        Retourne un dict contenant tout ce qu’il faut pour
+        recharger le dataset dans les mêmes conditions.
+        """
+        return {
+            "n_specs": self.n_specs,
+            "wavemin": float(self.wavemin),
+            "wavemax": float(self.wavemax),
+            "data_dtype": self.data_dtype,
+            "dataset_filepath": self.dataset_filepath,
+            "material_filepath": self.material_filepath,
+            "summary_filepath": self.summary_filepath,
+        }
 
 
 # * -- Fonction de collate pour le DataLoader (simplifie la vie) --
@@ -180,60 +204,11 @@ def generate_collate_fn(
     return collate_fn
 
 
-def get_dataloader(
-    n_specs=None,
-    wavemin=None,
-    wavemax=None,
-    data_dtype=torch.float32,
-    batch_size=16,
-    shuffle=True,
-    collate_fn=None,
-    vmin=-3,
-    vmax=3,
-    interpolate="linear",
-    extrapolate="linear",
-    out_dtype=torch.float32,
-):
-    """
-    Crée un DataLoader pour le dataset donné.
+if __name__ == "__main__":
+    dataset = SpectrumDataset()
 
-    Args:
-        n_specs (int): Nombre de spectres à charger.
-        wavemin (float): Longueur d'onde minimale.
-        wavemax (float): Longueur d'onde maximale.
-        data_dtype (torch.dtype): Type de données des spectres.
-        batch_size (int): Taille du batch.
-        shuffle (bool): Si True, les données seront mélangées.
-        collate_fn (callable): Fonction de collate personnalisée.
-        vmin (float): Vitesse minimale pour l'augmentation des spectres.
-        vmax (float): Vitesse maximale pour l'augmentation des spectres.
-        interpolate (str): Méthode d'interpolation à utiliser.
-        extrapolate (str): Méthode d'extrapolation à utiliser.
-        out_dtype (torch.dtype): Type de données de sortie des spectres augmentés.
-
-    Returns:
-        DataLoader: Un DataLoader configuré pour le dataset.
-    """
-
-    dataset = SpectrumDataset(
-        n_specs=n_specs,
-        wavemin=wavemin,
-        wavemax=wavemax,
-        data_dtype=data_dtype,
-        batch_size=batch_size,
-    )
-
-    return DataLoader(
-        dataset,
-        batch_size=batch_size,
-        shuffle=shuffle,
-        collate_fn=collate_fn
-        or generate_collate_fn(
-            dataset,
-            vmin=vmin,
-            vmax=vmax,
-            interpolate=interpolate,
-            extrapolate=extrapolate,
-            out_dtype=out_dtype,
-        ),
+    dataset_metadata = dataset.to_dict()
+    print("Metadata du dataset:", dataset_metadata)
+    new_dataset = SpectrumDataset(
+        **dataset_metadata,  # Recharger le dataset avec les mêmes paramètres
     )

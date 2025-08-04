@@ -1,6 +1,9 @@
 import torch
 import torch.nn as nn
 from src.interpolate import shift_spectra_linear
+import os
+import torch.optim as optim
+from typing import Optional
 
 ##############################################################################
 ##############################################################################
@@ -272,59 +275,97 @@ class RVEstimator(nn.Module):
 class AESTRA(nn.Module):
     """
     Modèle combiné :
-    - phase='rv'   → on n’exécute que RVEstimator
-    - phase='spend'→ on n’exécute que SPENDER
+    - phase='rvonly'   → on n’exécute que RVEstimator
     - phase='joint'→ on exécute les deux et renvoie (y_prime, rv_pred, s…)
     """
 
-    def __init__(self, n_pixels, S=3, dropout=0.0):
+    def __init__(
+        self,
+        n_pixels,
+        b_obs,
+        b_rest,
+        S=3,
+        sigma_v=1.0,
+        sigma_c=1.0,
+        sigma_y=1.0,
+        k_reg_init=1.0,
+        cycle_length=1000,  # Nombre d'itérations pour le cycle de régularisation
+        dropout=0.0,
+        device="cuda",  # ⚠️ NOUVEAU: Paramètre device explicite
+    ):
+        """
+        Args:
+            n_pixels (int): Nombre de pixels du spectre d'entrée.
+            S (int): Dimension de l'espace latent pour SPENDER.
+            dropout (float): Taux de dropout pour les couches MLP.
+            b_obs (torch.Tensor): Spectre b_obs de référence pour les observations (b_obs dans l'article). [n_pixels] (tensor non pas un paramètre celui-ci est converti ensuite en paramètre)
+            b_rest (torch.Tensor): Spectre b_rest de référence pour les observations (b_rest dans l'article). [n_pixels] (tensor non pas un paramètre celui-ci est converti ensuite en paramètre)
+            device (str): Device à utiliser ("cuda" ou "cpu")
+        """
         super().__init__()
-        self.spender = SPENDER(n_pixels, S=S).cuda()
-        self.rvestimator = RVEstimator(n_pixels, dropout=dropout).cuda()
+        
+        # ⚠️ CORRECTION: Création des modules sans forcer .cuda()
+        self.device = device
+        self.spender = SPENDER(n_pixels, S=S)
+        self.rvestimator = RVEstimator(n_pixels, dropout=dropout)
+        
+        # Déplacement vers le device approprié seulement si CUDA est disponible
+        if device == "cuda" and torch.cuda.is_available():
+            self.spender = self.spender.cuda()
+            self.rvestimator = self.rvestimator.cuda()
 
-        # Paramètre trainable manquant pour b_rest (template rest-frame)
-        self.b_rest = nn.Parameter(torch.zeros(n_pixels)).cuda()
-
+        self.b_obs = nn.Parameter(b_obs, requires_grad=False)
+        self.b_rest = nn.Parameter(b_rest, requires_grad=True)
         # phase par défaut
         self.phase = "joint"
+        self.sigma_v = sigma_v
+        self.sigma_c = sigma_c
+        self.sigma_y = sigma_y
+        self.k_reg_init = k_reg_init
+        self.cycle_length = cycle_length
 
     def set_phase(self, phase: str):
-        assert phase in ("rv", "spend", "joint")
+        assert phase in ("rvonly", "joint")
         self.phase = phase
         print(f"Phase set to: {self.phase}")
 
         # on gèle l’autre module
-        if phase == "rv":
+        if phase == "rvonly":
             for p in self.spender.parameters():
                 p.requires_grad = False
             for p in self.rvestimator.parameters():
                 p.requires_grad = True
-        elif phase == "spend":
-            for p in self.spender.parameters():
-                p.requires_grad = True
-            for p in self.rvestimator.parameters():
-                p.requires_grad = False
         else:  # joint
             for p in self.spender.parameters():
                 p.requires_grad = True
             for p in self.rvestimator.parameters():
                 p.requires_grad = True
 
+    def set_b_spectra_trainable(self, b_obs_trainable=False, b_rest_trainable=True):
+        """
+        Définit si les spectres b_obs et b_rest sont entraînables.(par défaut b_obs non entraînable et b_rest entraînable dans l'article)
+        Args:
+            b_obs_trainable (bool): Si True, b_obs est entraînable.
+            b_rest_trainable (bool): Si True, b_rest est entraînable.
+        """
+        self.b_obs.requires_grad = b_obs_trainable
+        self.b_rest.requires_grad = b_rest_trainable
+        print(
+            f"b_obs trainable: {b_obs_trainable}, b_rest trainable: {b_rest_trainable}"
+        )
+
     def get_losses(
         self,
         batch,
-        batch_template,
-        b_wavegrid,
         extrapolate="linear",
         batch_weights=None,
+        iteration_count=None,
     ):
         """
         Calcule les pertes en fonction de la phase du modèle.
 
         Args:
             batch: tuple contenant (batch_yobs, batch_yaug, batch_voffset_true, batch_wavegrid)
-            batch_template: le template de référence pour les observations
-            b_wavegrid: grille de longueurs d'onde batchée pour l'interpolation
             extrapolate: méthode d'extrapolation pour le shift Doppler
             batch_weights: poids pour la perte FID (facultatif)
         """
@@ -336,8 +377,9 @@ class AESTRA(nn.Module):
             "rv": torch.tensor(0),
         }
 
-        batch_vobs_pred, batch_vaug_pred = get_rvestimator_pred(
-            self.rvestimator, batch_yobs, batch_yaug, batch_template
+        batch_vobs_pred, batch_vaug_pred = self.get_rvestimator_pred(
+            batch_yobs=batch_yobs,
+            batch_yaug=batch_yaug,
         )
 
         batch_voffset_pred = batch_vaug_pred - batch_vobs_pred
@@ -345,15 +387,14 @@ class AESTRA(nn.Module):
         losses["rv"] = loss_rv(
             batch_voffset_true=batch_voffset_true,
             batch_voffset_pred=batch_voffset_pred,
+            sigma_v=self.sigma_v,
         )
 
         if self.phase == "joint":
-            batch_yobs_prime, batch_yact, batch_yact_aug, s, s_aug = get_spender_pred(
-                spender=self.spender,
-                batch=batch,
-                batch_template=batch_template,
-                batch_brest=self.b_rest.unsqueeze(0),
-                b_wavegrid=b_wavegrid,
+            batch_yobs_prime, batch_yact, _, s, s_aug = self.get_spender_pred(
+                batch_yobs=batch_yobs,
+                batch_yaug=batch_yaug,
+                batch_wavegrid=batch_wavegrid,
                 batch_vobs_pred=batch_vobs_pred,
                 extrapolate=extrapolate,
             )
@@ -363,49 +404,50 @@ class AESTRA(nn.Module):
                 batch_yobs=batch_yobs,
                 batch_weights=batch_weights,
             )
-            losses["c"] = loss_c(s, s_aug)
-            losses["reg"] = loss_reg(batch_yact, k_reg=0.0)
+            losses["c"] = loss_c(s, s_aug, sigma_c=self.sigma_c)
+            losses["reg"] = loss_reg(
+                batch_yact,
+                k_reg_init=self.k_reg_init,
+                sigma_y=self.sigma_y,
+                iteration_count=iteration_count,
+                cycle_length=self.cycle_length,
+            )
 
         return losses
 
+    def get_rvestimator_pred(self, batch_yobs, batch_yaug):
+        batch_robs = batch_yobs - self.b_obs.unsqueeze(0)
+        batch_raug = batch_yaug - self.b_obs.unsqueeze(0)
 
-def get_rvestimator_pred(rvestimator, batch_yobs, batch_yaug, batch_template):
-    batch_robs = batch_yobs - batch_template
-    batch_raug = batch_yaug - batch_template
+        batch_vobs_pred = self.rvestimator(batch_robs)
+        batch_vaug_pred = self.rvestimator(batch_raug)
 
-    batch_vobs_pred = rvestimator(batch_robs)
-    batch_vaug_pred = rvestimator(batch_raug)
+        return batch_vobs_pred, batch_vaug_pred
 
-    return batch_vobs_pred, batch_vaug_pred
+    def get_spender_pred(
+        self,
+        batch_yobs,
+        batch_yaug,
+        batch_wavegrid,
+        batch_vobs_pred,
+        extrapolate="linear",
+    ):
+        batch_robs = batch_yobs - self.b_obs.unsqueeze(0)
+        batch_raug = batch_yaug - self.b_obs.unsqueeze(0)
 
+        batch_yact, s = self.spender(batch_robs)
+        batch_yact_aug, s_aug = self.spender(batch_raug)
 
-def get_spender_pred(
-    spender,
-    batch,
-    batch_template,
-    batch_brest,
-    b_wavegrid,
-    batch_vobs_pred,
-    extrapolate="linear",
-):
-    batch_yobs, batch_yaug, batch_voffset_true, batch_wavegrid = batch
+        batch_yrest = self.b_rest.unsqueeze(0) + batch_yact
 
-    batch_robs = batch_yobs - batch_template
-    batch_raug = batch_yaug - batch_template
+        batch_yobs_prime = shift_spectra_linear(
+            spectra=batch_yrest,
+            wavegrid=batch_wavegrid,
+            velocities=batch_vobs_pred,
+            extrapolate=extrapolate,
+        )
 
-    batch_yact, s = spender(batch_robs)
-    batch_yact_aug, s_aug = spender(batch_raug)
-
-    batch_yrest = batch_brest + batch_yact
-
-    batch_yobs_prime = shift_spectra_linear(
-        spectra=batch_yrest,
-        wavegrid=b_wavegrid,
-        velocities=batch_vobs_pred,
-        extrapolate=extrapolate,
-    )
-
-    return batch_yobs_prime, batch_yact, batch_yact_aug, s, s_aug
+        return batch_yobs_prime, batch_yact, batch_yact_aug, s, s_aug
 
 
 def loss_rv(batch_voffset_true, batch_voffset_pred, sigma_v=1.0):
@@ -425,5 +467,85 @@ def loss_c(s, s_aug, sigma_c=1.0):
     return torch.mean(torch.sigmoid((s - s_aug) ** 2 / (S * sigma_c**2)) - 0.5)
 
 
-def loss_reg(batch_yact, k_reg, sigma_y=1.0):
-    return (k_reg / sigma_y**2) * torch.mean(batch_yact**2)
+def get_k_reg(k_reg_init: float, iteration_count: int = None, cycle_length: int = 1000):
+    """
+    Retourne la valeur de k_reg en fonction du nombre d'itérations.
+    La valeur de k_reg augmente linéairement de 0 à 1 sur un cycle de cycle_length itérations.
+    """
+    if iteration_count is None or cycle_length == 0:
+        return k_reg_init
+
+    k_reg = (iteration_count % cycle_length) / cycle_length
+    return k_reg
+
+
+def loss_reg(
+    batch_yact, k_reg_init, sigma_y=1.0, iteration_count=None, cycle_length=1000
+):
+    current_k_reg = get_k_reg(k_reg_init, iteration_count, cycle_length)
+    return (current_k_reg / sigma_y**2) * torch.mean(batch_yact**2)
+
+
+def save_checkpoint(
+    model: AESTRA,
+    optimizer: optim.Optimizer,
+    path: str,
+    scheduler: Optional[optim.lr_scheduler._LRScheduler] = None,
+):
+    """
+    Sauvegarde minimaliste :
+     - model_state_dict
+     - optimizer_state_dict
+     - scheduler_state_dict (optionnel)
+     - model.phase
+    """
+    ckpt = {
+        "model_state_dict": model.state_dict(),
+        "optimizer_state_dict": optimizer.state_dict(),
+        "model_phase": model.phase,
+    }
+    if scheduler is not None:
+        ckpt["scheduler_state_dict"] = scheduler.state_dict()
+        ckpt["scheduler_class"] = scheduler.__class__.__name__
+
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    torch.save(ckpt, path)
+    print(f"✅ Checkpoint saved to {path}")
+
+
+def load_checkpoint(
+    path: str,
+    model: AESTRA,
+    optimizer: optim.Optimizer,
+    scheduler: Optional[optim.lr_scheduler._LRScheduler] = None,
+    device: Optional[str] = None,
+) -> Optional[optim.lr_scheduler._LRScheduler]:
+    """
+    Recharge :
+     - les poids dans `model`
+     - l’état dans `optimizer`
+     - (éventuellement) dans `scheduler`
+     - la phase dans `model.phase`
+    Nécessite que `model`, `optimizer` (et `scheduler`, si présent dans le ckpt)
+    aient déjà été instanciés AVANT l’appel.
+    """
+    if device is None:
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+    ckpt = torch.load(path, map_location=device)
+
+    model.load_state_dict(ckpt["model_state_dict"])
+    model.set_phase(ckpt.get("model_phase", "joint"))
+    optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+
+    if scheduler is not None and "scheduler_state_dict" in ckpt:
+        scheduler.load_state_dict(ckpt["scheduler_state_dict"])
+        print(f"✅ Scheduler state restored ({ckpt['scheduler_class']})")
+    else:
+        scheduler = None
+
+    print(f"✅ Loaded checkpoint from {path}  (phase={model.phase})")
+    return scheduler
+
+
+if __name__ == "__main__":
+    pass
