@@ -425,33 +425,54 @@ def main():
     else:
         # Nouvelle expérience
         config = load_config(args.cfg_name)
+        console.log("✅ Configuration chargée avec succès")
+
         current_phase = None
         start_epoch = 0
 
+        console.log("🔧 Début de la création du dataset...")
+        console.log(f"📁 data_root_dir: {config.get('data_root_dir', 'data')}")
+
         # Création du dataset
-        dataset = SpectrumDataset(
-            n_specs=config.get("n_specs", None),
-            wavemin=config.get("wavemin", None),
-            wavemax=config.get("wavemax", None),
-            data_dtype=getattr(torch, config.get("data_dtype", "float32")),
-            data_root_dir=config.get("data_root_dir", "data"),
-        )
+        try:
+            dataset = SpectrumDataset(
+                n_specs=config.get("n_specs", None),
+                wavemin=config.get("wavemin", None),
+                wavemax=config.get("wavemax", None),
+                data_dtype=getattr(torch, config.get("data_dtype", "float32")),
+                data_root_dir=config.get("data_root_dir", "data"),
+            )
+            console.log("✅ Dataset créé avec succès")
+        except Exception as e:
+            console.log(f"❌ Erreur lors de la création du dataset: {e}")
+            raise
+
+        console.log("🤖 Début de la création du modèle...")
 
         # Création du modèle
-        model = AESTRA(
-            n_pixels=dataset.n_pixels,
-            S=config["latent_dim"],
-            sigma_v=config["sigma_v"],
-            sigma_c=config["sigma_c"],
-            sigma_y=config["sigma_y"],
-            k_reg_init=config["k_reg_init"],
-            b_obs=dataset.template,
-            b_rest=dataset.spectra.mean(dim=0),
-            device=args.device,  # ⚠️ NOUVEAU: Passer le device explicitement
-        )
+        try:
+            model = AESTRA(
+                n_pixels=dataset.n_pixels,
+                S=config["latent_dim"],
+                sigma_v=config["sigma_v"],
+                sigma_c=config["sigma_c"],
+                sigma_y=config["sigma_y"],
+                k_reg_init=config["k_reg_init"],
+                b_obs=dataset.template,
+                b_rest=dataset.spectra.mean(dim=0),
+                device=args.device,  # ⚠️ NOUVEAU: Passer le device explicitement
+            )
+            console.log("✅ Modèle créé avec succès")
+        except Exception as e:
+            console.log(f"❌ Erreur lors de la création du modèle: {e}")
+            raise
 
         if torch.cuda.is_available():
+            console.log("🚀 Déplacement du modèle vers le GPU...")
             model = model.cuda()
+            console.log("✅ Modèle sur GPU")
+        else:
+            console.log("⚠️  CUDA non disponible, utilisation du CPU")
 
         console.log("🆕 Starting new experiment")
 
