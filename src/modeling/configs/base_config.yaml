@@ -8,14 +8,16 @@
 # --------------------------------------------------------------------------
 # Données
 # --------------------------------------------------------------------------
-n_specs: 200              # Nombre de spectres à charger
+n_specs: 1000              # Nombre de spectres à charger
 wavemin: 5000.0           # Longueur d'onde minimale (nm)
-wavemax: 5010.0           # Longueur d'onde maximale (nm)
+wavemax: 5050.0           # Longueur d'onde maximale (nm)
 data_dtype: float32       # Type numpy/torch du tableau des spectres
 
 dataset_filepath: "data/rv_datachallenge/Sun_B57001_E61001_planet-FallChallenge1/HARPN/STAR1136_HPN_flux_YVA.npy"
 material_filepath: "data/rv_datachallenge/Sun_B57001_E61001_planet-FallChallenge1/HARPN/STAR1136_HPN_Analyse_material.p"
 summary_filepath: "data/rv_datachallenge/Sun_B57001_E61001_planet-FallChallenge1/HARPN/STAR1136_HPN_Analyse_summary.csv"
+
+checkpoint_every: 100       # Fréquence de sauvegarde des checkpoints (en epochs)
 
 # --------------------------------------------------------------------------
 # DataLoader
@@ -48,7 +50,7 @@ b_rest_trainable: true    # Spectre template (repos) entraînable ?
 # --------------------------------------------------------------------------
 # Plotting
 # --------------------------------------------------------------------------
-plot_every: 50            # Fréquence de plotting (en epochs)
+plot_every: 100            # Fréquence de plotting (en epochs)
 plot_dir: "reports/figures"  # Répertoire pour sauver les plots
 
 # --------------------------------------------------------------------------
@@ -62,7 +64,7 @@ plot_ultra_zoom: true     # Activer le zoom ultra-précis pour l'analyse Doppler
 # Logging des losses
 # --------------------------------------------------------------------------
 save_losses_csv: true     # Sauver les losses dans un fichier CSV
-csv_save_every: 10        # Fréquence de sauvegarde CSV (en epochs)
+csv_save_every: 100       # Fréquence de sauvegarde CSV (en epochs)
 csv_dir: "reports/logs"   # Répertoire pour les fichiers CSV
 
 # --------------------------------------------------------------------------
@@ -75,7 +77,7 @@ phases:
     n_epochs: 200
     optimizer: "torch.optim.Adam"                # Chemin complet de la classe
     optimizer_kwargs:
-      lr: 0.001
+      lr: 0.0001
       weight_decay: 0.0
     b_obs_trainable: false
     b_rest_trainable: false
@@ -89,7 +91,7 @@ phases:
     n_epochs: 200
     optimizer: "torch.optim.Adam"
     optimizer_kwargs:
-      lr: 0.001
+      lr: 0.0001
       weight_decay: 0.0
     b_obs_trainable: false
     b_rest_trainable: true
@@ -97,5 +99,5 @@ phases:
     scheduler_kwargs:
       step_size: 50
       gamma: 0.7
-    plot_spectra_every: 20     # Plot des spectres toutes les X epochs (0 = désactivé)
+    plot_spectra_every: 200     # Plot des spectres toutes les X epochs (0 = désactivé)
     spectra_plot_dir: "reports/spectra"  # Répertoire pour les plots de spectres

@@ -303,12 +303,12 @@ class AESTRA(nn.Module):
             device (str): Device à utiliser ("cuda" ou "cpu")
         """
         super().__init__()
-        
+
         # ⚠️ CORRECTION: Création des modules sans forcer .cuda()
         self.device = device
         self.spender = SPENDER(n_pixels, S=S)
         self.rvestimator = RVEstimator(n_pixels, dropout=dropout)
-        
+
         # Déplacement vers le device approprié seulement si CUDA est disponible
         if device == "cuda" and torch.cuda.is_available():
             self.spender = self.spender.cuda()

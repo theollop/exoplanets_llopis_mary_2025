@@ -354,7 +354,7 @@ def train_phase(
                 )
 
             # Sauvegarde périodique (tous les 50 epochs)
-            if (epoch + 1) % 50 == 0:
+            if (epoch + 1) % config.get("checkpoint_every", 50) == 0:
                 save_experiment_checkpoint(
                     model,
                     optimizer,

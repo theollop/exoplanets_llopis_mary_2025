@@ -17,7 +17,7 @@ def clear_gpu_memory():
     """
     # Force le garbage collection Python
     gc.collect()
-    
+
     # Vide le cache CUDA si disponible
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
@@ -30,21 +30,21 @@ def get_gpu_memory_info():
     """
     if not torch.cuda.is_available():
         return {"error": "CUDA not available"}
-        
+
     pynvml.nvmlInit()
     handle = pynvml.nvmlDeviceGetHandleByIndex(0)
     info = pynvml.nvmlDeviceGetMemoryInfo(handle)
     pynvml.nvmlShutdown()
-    
-    total_mb = info.total / (1024 ** 2)
-    used_mb = info.used / (1024 ** 2)
-    free_mb = info.free / (1024 ** 2)
-    
+
+    total_mb = info.total / (1024**2)
+    used_mb = info.used / (1024**2)
+    free_mb = info.free / (1024**2)
+
     return {
         "total_mb": total_mb,
         "used_mb": used_mb,
         "free_mb": free_mb,
-        "usage_percent": (used_mb / total_mb) * 100
+        "usage_percent": (used_mb / total_mb) * 100,
     }
 
 

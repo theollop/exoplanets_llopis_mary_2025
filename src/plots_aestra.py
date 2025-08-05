@@ -397,11 +397,12 @@ def plot_aestra_analysis(
     del batch_yobs, batch_yaug, batch_voffset, batch_wavegrid
     del batch_robs, batch_raug, batch_yact, batch_yact_aug, batch_s, batch_s_aug
     del batch_yrest, batch_vencode, batch_yobsprime
-    
+
     # Force le garbage collection
     import gc
+
     gc.collect()
-    
+
     # Libère le cache GPU si disponible
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
