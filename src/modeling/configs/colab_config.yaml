@@ -8,7 +8,7 @@
 # --------------------------------------------------------------------------
 # Données
 # --------------------------------------------------------------------------
-data_root_dir: "/content/exoplanets_llopis_mary_2025/data"  # Répertoire racine pour Colab
+data_root_dir: "/content/drive/MyDrive/PFE/data"  # Répertoire racine pour Colab
 wavemin: 5000.0           # Longueur d'onde minimale (nm)
 wavemax: 5050.0           # Longueur d'onde maximale (nm)
 data_dtype: float32       # Type numpy/torch du tableau des spectres
@@ -47,7 +47,7 @@ b_rest_trainable: true    # Spectre template (repos) entraînable ?
 # Plotting
 # --------------------------------------------------------------------------
 plot_every: 10            # Fréquence des plots de losses (en epochs)
-plot_dir: "/content/drive/MyDrive/aestra_results/figures"  # Sauvegarde sur Google Drive
+plot_dir: "/content/drive/MyDrive/PFE/figures"  # Sauvegarde sur Google Drive
 
 # --------------------------------------------------------------------------
 # Phases d'entraînement
@@ -58,22 +58,22 @@ training_phases:
     losses: ["rv"]
     lr: 0.001
     plot_spectra_every: 50
-    spectra_plot_dir: "/content/drive/MyDrive/aestra_results/spectra"
+    spectra_plot_dir: "/content/drive/MyDrive/PFE/spectra"
 
   joint:
     epochs: 100  
     losses: ["rv", "fid", "c"]
     lr: 0.0005
     plot_spectra_every: 25
-    spectra_plot_dir: "/content/drive/MyDrive/aestra_results/spectra"
+    spectra_plot_dir: "/content/drive/MyDrive/PFE/spectra"
 
 # --------------------------------------------------------------------------
 # CSV Logging
 # --------------------------------------------------------------------------
 csv_save_every: 25        # Sauvegarder CSV tous les 25 epochs
-csv_dir: "/content/drive/MyDrive/aestra_results/logs"  # Répertoire pour les logs CSV
+csv_dir: "/content/drive/MyDrive/PFE/logs"  # Répertoire pour les logs CSV
 
 # --------------------------------------------------------------------------
 # Checkpoints et modèles sauvegardés  
 # --------------------------------------------------------------------------
-model_save_dir: "/content/drive/MyDrive/aestra_results/models"  # Sauvegarder sur Google Drive
+model_save_dir: "/content/drive/MyDrive/PFE/models"  # Sauvegarder sur Google Drive
