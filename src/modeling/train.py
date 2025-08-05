@@ -17,6 +17,7 @@ import torch
 import csv
 from datetime import datetime
 from torch.utils.data import DataLoader
+from torch.cuda.amp import GradScaler, autocast
 from rich.console import Console
 from rich.progress import (
     Progress,
@@ -36,7 +37,16 @@ console = Console()
 
 
 def save_experiment_checkpoint(
-    model, optimizer, scheduler, dataset, config, cfg_name, epoch, phase_name, path=None
+    model,
+    optimizer,
+    scheduler,
+    dataset,
+    config,
+    cfg_name,
+    epoch,
+    phase_name,
+    scaler=None,
+    path=None,
 ):
     """
     Sauvegarde complète d'une expérience avec config et dataset.
@@ -50,6 +60,7 @@ def save_experiment_checkpoint(
         cfg_name: Nom de l'expérience (ex: "exp0")
         epoch: Numéro d'epoch actuel
         phase_name: Nom de la phase actuelle
+        scaler: Le GradScaler pour mixed precision (peut être None)
         path: Chemin de sauvegarde (optionnel)
     """
     if path is None:
@@ -70,6 +81,10 @@ def save_experiment_checkpoint(
         }
     )
 
+    # Sauvegarde de l'état du scaler si la mixed precision est activée
+    if scaler is not None:
+        ckpt["scaler_state_dict"] = scaler.state_dict()
+
     torch.save(ckpt, path)
     console.log(f"💾 Experiment checkpoint saved: {path}")
 
@@ -79,7 +94,7 @@ def load_experiment_checkpoint(path, device="cuda"):
     Charge un checkpoint d'expérience complet.
 
     Returns:
-        dict: Contient model, optimizer, scheduler, dataset, config, cfg_name, epoch
+        dict: Contient model, optimizer, scheduler, dataset, config, cfg_name, epoch, scaler_state_dict
     """
     console.log(f"📂 Loading experiment checkpoint: {path}")
 
@@ -123,6 +138,9 @@ def load_experiment_checkpoint(path, device="cuda"):
         "epoch": ckpt["epoch"],
         "current_phase": ckpt.get("current_phase", "joint"),  # Phase actuelle
         "checkpoint_data": ckpt,
+        "scaler_state_dict": ckpt.get(
+            "scaler_state_dict", None
+        ),  # État du scaler pour mixed precision
     }
 
 
@@ -219,10 +237,33 @@ def create_optimizer_and_scheduler(model, phase_config):
     return optimizer, scheduler
 
 
+def create_grad_scaler(config):
+    """Crée le GradScaler pour la mixed precision selon la configuration."""
+    if not config.get("use_mixed_precision", False) or not config.get(
+        "grad_scaler_enabled", False
+    ):
+        return None
+
+    if not torch.cuda.is_available():
+        console.log("⚠️  Mixed precision désactivée : CUDA non disponible")
+        return None
+
+    scaler = GradScaler(
+        init_scale=config.get("grad_scaler_init_scale", 65536.0),
+        growth_factor=config.get("grad_scaler_growth_factor", 2.0),
+        backoff_factor=config.get("grad_scaler_backoff_factor", 0.5),
+        growth_interval=config.get("grad_scaler_growth_interval", 2000),
+        enabled=True,
+    )
+
+    console.log("🚀 Mixed precision activée avec GradScaler")
+    return scaler
+
+
 def train_phase(
     model, dataset, dataloader, phase_config, config, cfg_name, start_epoch=0
 ):
-    """Entraîne le modèle pour une phase donnée."""
+    """Entraîne le modèle pour une phase donnée avec support de la mixed precision."""
     phase_name = phase_config["name"]
     n_epochs = phase_config["n_epochs"]
 
@@ -236,6 +277,18 @@ def train_phase(
 
     # Création optimiseur et scheduler
     optimizer, scheduler = create_optimizer_and_scheduler(model, phase_config)
+
+    # Création du GradScaler pour mixed precision
+    scaler = create_grad_scaler(config)
+    use_mixed_precision = (
+        config.get("use_mixed_precision", False) and scaler is not None
+    )
+    autocast_enabled = config.get("autocast_enabled", True) and use_mixed_precision
+
+    if use_mixed_precision:
+        console.log(f"🔧 Mixed precision activée pour la phase '{phase_name}'")
+    else:
+        console.log(f"🔧 Précision standard (float32) pour la phase '{phase_name}'")
 
     # Historique des losses pour plotting
     losses_history = {"rv": [], "fid": [], "c": [], "reg": [], "total": [], "lr": []}
@@ -271,19 +324,37 @@ def train_phase(
                 # ⚠️ CRITIQUE: Reset gradients à chaque batch
                 optimizer.zero_grad()
 
-                losses = model.get_losses(
-                    batch=batch,
-                    extrapolate="linear",
-                    batch_weights=None,
-                    iteration_count=it,
-                )
+                # Forward pass avec ou sans autocast selon la configuration
+                if autocast_enabled:
+                    with autocast():
+                        losses = model.get_losses(
+                            batch=batch,
+                            extrapolate="linear",
+                            batch_weights=None,
+                            iteration_count=it,
+                        )
+                        # Calculer la loss totale pour ce batch
+                        total_batch_loss = sum(losses.values())
+                else:
+                    losses = model.get_losses(
+                        batch=batch,
+                        extrapolate="linear",
+                        batch_weights=None,
+                        iteration_count=it,
+                    )
+                    # Calculer la loss totale pour ce batch
+                    total_batch_loss = sum(losses.values())
 
-                # Calculer la loss totale pour ce batch
-                total_batch_loss = sum(losses.values())
-
-                # ⚠️ CRITIQUE: Backward et step à chaque batch pour libérer la mémoire
-                total_batch_loss.backward()
-                optimizer.step()
+                # Backward pass avec ou sans scaler
+                if use_mixed_precision and scaler is not None:
+                    # Mixed precision backward pass
+                    scaler.scale(total_batch_loss).backward()
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    # Standard backward pass
+                    total_batch_loss.backward()
+                    optimizer.step()
 
                 # Accumulation des losses (avec detach pour éviter les gradients)
                 with torch.no_grad():
@@ -368,6 +439,7 @@ def train_phase(
                     cfg_name,
                     epoch + 1,
                     phase_name,
+                    scaler,
                 )
                 # ⚠️ CRITIQUE: Nettoyage de la mémoire GPU après sauvegarde
                 clear_gpu_memory()
