@@ -182,18 +182,28 @@ def augment_spectra_uniform(
 ):
     """
     Augmente les spectres en appliquant un décalage Doppler uniforme selon la méthode AESTRA.
+
+    Supporte la conversion vers torch.float16 (half precision) pour économiser la mémoire GPU.
+
     Args:
         batch_yobs (torch.Tensor): Spectres observés, de forme [B, n_pixel].
         batch_wave (torch.Tensor): Grille de longueurs d'onde, de forme [B, n_pixel].
         vmin (float): Vitesse minimale de décalage Doppler.
         vmax (float): Vitesse maximale de décalage Doppler.
-        interpolate (str): Méthode d'interpolation à utiliser ('linear' ou 'cubic'). -> cubic utilise la méthode d'AESTRA mais différences minimes avec linéaire et beaucoup plus lent.
+        interpolate (str): Méthode d'interpolation à utiliser ('linear' ou 'cubic').
+            -> cubic utilise la méthode d'AESTRA mais différences minimes avec linéaire et beaucoup plus lent.
         extrapolate (str): Méthode d'extrapolation à utiliser si la grille de longueurs d'onde est en dehors des limites des spectres.
         out_dtype (torch.dtype): Type de données de sortie des spectres augmentés.
+            - torch.float16: Half precision (économise ~50% de mémoire GPU)
+            - torch.float32: Single precision (par défaut)
+            - torch.float64: Double precision
     Returns:
         torch.Tensor: Spectres augmentés, de forme [B, n_pixel] de type out_dtype.
         torch.Tensor: Vitesse de décalage Doppler appliquée, de forme [B] de type out_dtype.
 
+    Note:
+        L'utilisation de torch.float16 peut réduire significativement l'utilisation mémoire GPU
+        mais peut introduire une légère perte de précision numérique. Idéal pour les gros batches.
 
     todo: éventuellement ajouter une option permettant de couper les valeurs extrapolées des spectres mais pour de petites vitesses l'extrapolation n'est pas très importante.
     """
@@ -224,10 +234,16 @@ def augment_spectra_uniform(
     else:
         raise ValueError("interpolate doit être 'linear' ou 'cubic'")
 
-    if out_dtype == torch.float32:
+    if out_dtype == torch.float16:
+        return batch_yaug.half(), batch_voffset.squeeze(-1).half()
+    elif out_dtype == torch.float32:
         return batch_yaug.float(), batch_voffset.squeeze(-1).float()
     elif out_dtype == torch.float64:
         return batch_yaug.double(), batch_voffset.squeeze(-1).double()
+    else:
+        raise ValueError(
+            f"Type de sortie non supporté: {out_dtype}. Utilisez torch.float16, torch.float32 ou torch.float64."
+        )
 
 
 if __name__ == "__main__":

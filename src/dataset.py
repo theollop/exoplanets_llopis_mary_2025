@@ -56,13 +56,22 @@ class SpectrumDataset(Dataset):
         return self.spectra[idx]
 
     def __repr__(self):
+        dtype_info = ""
+        if self.data_dtype == torch.float16:
+            dtype_info = " (HALF PRECISION - économie mémoire ~50%)"
+        elif self.data_dtype == torch.float32:
+            dtype_info = " (SINGLE PRECISION - standard)"
+        elif self.data_dtype == torch.float64:
+            dtype_info = " (DOUBLE PRECISION - haute précision)"
+
         return (
             f"\n======== SpectrumDataset ========\n"
             f"n_specs={self.spectra.shape[0]}, n_pixels={self.spectra.shape[1]}\n"
-            f"spectra_shape={self.spectra.shape} | {self.spectra.dtype}\n"
+            f"spectra_shape={self.spectra.shape} | {self.spectra.dtype}{dtype_info}\n"
             f"wavegrid_shape={self.wavegrid.shape} | {self.wavegrid.dtype}\n"
             f"template_shape={self.template.shape} | {self.template.dtype}\n"
             f"jdb_shape={self.jdb.shape} | {self.jdb.dtype})\n"
+            f"Memory footprint: ~{self._estimate_memory_usage():.2f} MB\n"
             f"======== End of SpectrumDataset ========\n"
         )
 
@@ -116,6 +125,22 @@ class SpectrumDataset(Dataset):
         self.wavemin = wavemin
         self.wavemax = wavemax
 
+    def _estimate_memory_usage(self):
+        """
+        Estime l'utilisation mémoire du dataset en MB.
+        """
+
+        def tensor_memory_mb(tensor):
+            return tensor.numel() * tensor.element_size() / (1024 * 1024)
+
+        total_memory = 0
+        total_memory += tensor_memory_mb(self.spectra)
+        total_memory += tensor_memory_mb(self.wavegrid)
+        total_memory += tensor_memory_mb(self.template)
+        total_memory += tensor_memory_mb(self.jdb)
+
+        return total_memory
+
     def move_to_cuda(self):
         """
         Déplace les données du dataset vers le GPU si disponible.
@@ -126,6 +151,37 @@ class SpectrumDataset(Dataset):
             self.template = self.template.cuda()
         else:
             print("CUDA n'est pas disponible, les données restent sur le CPU.")
+
+    def convert_dtype(self, new_dtype):
+        """
+        Convertit le dataset vers un nouveau type de données.
+
+        Args:
+            new_dtype (torch.dtype): Nouveau type de données (ex: torch.float16, torch.float32)
+
+        Returns:
+            SpectrumDataset: Nouveau dataset avec le type de données converti
+        """
+        print(f"Conversion du dataset de {self.data_dtype} vers {new_dtype}...")
+
+        old_memory = self._estimate_memory_usage()
+
+        # Conversion des tenseurs
+        self.spectra = self.spectra.to(dtype=new_dtype)
+        self.wavegrid = self.wavegrid.to(dtype=new_dtype)
+        self.template = self.template.to(dtype=new_dtype)
+        self.jdb = self.jdb.to(dtype=new_dtype)
+        self.data_dtype = new_dtype
+
+        new_memory = self._estimate_memory_usage()
+        memory_savings = ((old_memory - new_memory) / old_memory) * 100
+
+        print("Conversion terminée:")
+        print(f"  Mémoire avant: {old_memory:.2f} MB")
+        print(f"  Mémoire après: {new_memory:.2f} MB")
+        print(f"  Économie: {memory_savings:.1f}%")
+
+        return self
 
     def to_dict(self):
         """

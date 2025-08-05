@@ -292,6 +292,7 @@ class AESTRA(nn.Module):
         cycle_length=1000,  # Nombre d'itérations pour le cycle de régularisation
         dropout=0.0,
         device="cuda",  # ⚠️ NOUVEAU: Paramètre device explicite
+        dtype=torch.float32,  # ⚠️ NOUVEAU: Paramètre dtype pour la précision
     ):
         """
         Args:
@@ -301,11 +302,13 @@ class AESTRA(nn.Module):
             b_obs (torch.Tensor): Spectre b_obs de référence pour les observations (b_obs dans l'article). [n_pixels] (tensor non pas un paramètre celui-ci est converti ensuite en paramètre)
             b_rest (torch.Tensor): Spectre b_rest de référence pour les observations (b_rest dans l'article). [n_pixels] (tensor non pas un paramètre celui-ci est converti ensuite en paramètre)
             device (str): Device à utiliser ("cuda" ou "cpu")
+            dtype (torch.dtype): Type de données pour les poids du modèle (torch.float16, torch.float32, torch.float64)
         """
         super().__init__()
 
         # ⚠️ CORRECTION: Création des modules sans forcer .cuda()
         self.device = device
+        self.dtype = dtype
         self.spender = SPENDER(n_pixels, S=S)
         self.rvestimator = RVEstimator(n_pixels, dropout=dropout)
 
@@ -314,8 +317,12 @@ class AESTRA(nn.Module):
             self.spender = self.spender.cuda()
             self.rvestimator = self.rvestimator.cuda()
 
-        self.b_obs = nn.Parameter(b_obs, requires_grad=False)
-        self.b_rest = nn.Parameter(b_rest, requires_grad=True)
+        # Conversion vers le dtype spécifié
+        self.spender = self.spender.to(dtype=dtype)
+        self.rvestimator = self.rvestimator.to(dtype=dtype)
+
+        self.b_obs = nn.Parameter(b_obs.to(dtype=dtype), requires_grad=False)
+        self.b_rest = nn.Parameter(b_rest.to(dtype=dtype), requires_grad=True)
         # phase par défaut
         self.phase = "joint"
         self.sigma_v = sigma_v
@@ -353,6 +360,27 @@ class AESTRA(nn.Module):
         print(
             f"b_obs trainable: {b_obs_trainable}, b_rest trainable: {b_rest_trainable}"
         )
+
+    def convert_dtype(self, new_dtype):
+        """
+        Convertit le modèle vers un nouveau type de données.
+
+        Args:
+            new_dtype (torch.dtype): Nouveau type de données (torch.float16, torch.float32, torch.float64)
+        """
+        old_dtype = self.dtype
+        self.dtype = new_dtype
+
+        # Conversion des modules
+        self.spender = self.spender.to(dtype=new_dtype)
+        self.rvestimator = self.rvestimator.to(dtype=new_dtype)
+
+        # Conversion des paramètres b_obs et b_rest
+        self.b_obs.data = self.b_obs.data.to(dtype=new_dtype)
+        self.b_rest.data = self.b_rest.data.to(dtype=new_dtype)
+
+        print(f"Modèle converti de {old_dtype} vers {new_dtype}")
+        return self
 
     def get_losses(
         self,

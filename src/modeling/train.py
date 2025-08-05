@@ -105,6 +105,9 @@ def load_experiment_checkpoint(path, device="cuda"):
         b_obs=dataset.template,
         b_rest=dataset.spectra.mean(dim=0),
         device=device,  # ⚠️ NOUVEAU: Passer le device explicitement
+        dtype=getattr(
+            torch, config.get("model_dtype", "float32")
+        ),  # ⚠️ NOUVEAU: Support dtype modèle
     )
     model.load_state_dict(ckpt["model_state_dict"])
     model.set_phase(ckpt.get("model_phase", "joint"))
@@ -488,6 +491,9 @@ def main(cfg_name=None, checkpoint=None, device="cuda"):
                 b_obs=dataset.template,
                 b_rest=dataset.spectra.mean(dim=0),
                 device=args.device,  # ⚠️ NOUVEAU: Passer le device explicitement
+                dtype=getattr(
+                    torch, config.get("model_dtype", "float32")
+                ),  # ⚠️ NOUVEAU: Support dtype modèle
             )
             console.log("✅ Modèle créé avec succès")
         except Exception as e:
