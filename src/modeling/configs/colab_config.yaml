@@ -1,14 +1,14 @@
-# base_config.yaml
+# colab_config.yaml
 # =================
 #
-# Fichier unique de config pour tout le pipeline d'entraînement.
-# Modifie ces valeurs pour tes expériences, puis relance simplement train.py.
+# Configuration spéciale pour Google Colab
+# Utilise /content/exoplanets_llopis_mary_2025 comme répertoire racine des données
 
 
 # --------------------------------------------------------------------------
 # Données
 # --------------------------------------------------------------------------
-data_root_dir: "data"     # Répertoire racine des données (peut être modifié pour Colab)
+data_root_dir: "/content/exoplanets_llopis_mary_2025/data"  # Répertoire racine pour Colab
 wavemin: 5000.0           # Longueur d'onde minimale (nm)
 wavemax: 5050.0           # Longueur d'onde maximale (nm)
 data_dtype: float32       # Type numpy/torch du tableau des spectres
@@ -46,54 +46,34 @@ b_rest_trainable: true    # Spectre template (repos) entraînable ?
 # --------------------------------------------------------------------------
 # Plotting
 # --------------------------------------------------------------------------
-plot_every: 100            # Fréquence de plotting (en epochs)
-plot_dir: "reports/figures"  # Répertoire pour sauver les plots
-
-# --------------------------------------------------------------------------
-# Plotting des spectres avec raies G2
-# --------------------------------------------------------------------------
-zoom_window_angstrom: 10  # Taille de la fenêtre de zoom en Angstrom
-n_line_zoom_plots: 6      # Nombre de plots de raies zoomées dans la mosaïque
-plot_ultra_zoom: true     # Activer le zoom ultra-précis pour l'analyse Doppler
-
-# --------------------------------------------------------------------------
-# Logging des losses
-# --------------------------------------------------------------------------
-save_losses_csv: true     # Sauver les losses dans un fichier CSV
-csv_save_every: 100       # Fréquence de sauvegarde CSV (en epochs)
-csv_dir: "reports/logs"   # Répertoire pour les fichiers CSV
+plot_every: 10            # Fréquence des plots de losses (en epochs)
+plot_dir: "/content/drive/MyDrive/aestra_results/figures"  # Sauvegarde sur Google Drive
 
 # --------------------------------------------------------------------------
 # Phases d'entraînement
 # --------------------------------------------------------------------------
-# Liste d'étapes séquentielles, chacune avec ses propres optimiseur,
-# hyperparamètres de scheduler et réglages de trainabilité.
-phases:
-  - name: rvonly
-    n_epochs: 200
-    optimizer: "torch.optim.Adam"                # Chemin complet de la classe
-    optimizer_kwargs:
-      lr: 0.0001
-      weight_decay: 0.0
-    b_obs_trainable: false
-    b_rest_trainable: false
-    # scheduler: "torch.optim.lr_scheduler.StepLR"
-    # scheduler_kwargs:
-    #   step_size: 50
-    #   gamma: 0.5
+training_phases:
+  rvonly:
+    epochs: 100
+    losses: ["rv"]
+    lr: 0.001
+    plot_spectra_every: 50
+    spectra_plot_dir: "/content/drive/MyDrive/aestra_results/spectra"
 
+  joint:
+    epochs: 100  
+    losses: ["rv", "fid", "c"]
+    lr: 0.0005
+    plot_spectra_every: 25
+    spectra_plot_dir: "/content/drive/MyDrive/aestra_results/spectra"
 
-  - name: joint
-    n_epochs: 200
-    optimizer: "torch.optim.Adam"
-    optimizer_kwargs:
-      lr: 0.0001
-      weight_decay: 0.0
-    b_obs_trainable: false
-    b_rest_trainable: true
-    scheduler: "torch.optim.lr_scheduler.StepLR"
-    scheduler_kwargs:
-      step_size: 50
-      gamma: 0.7
-    plot_spectra_every: 200     # Plot des spectres toutes les X epochs (0 = désactivé)
-    spectra_plot_dir: "reports/spectra"  # Répertoire pour les plots de spectres
+# --------------------------------------------------------------------------
+# CSV Logging
+# --------------------------------------------------------------------------
+csv_save_every: 25        # Sauvegarder CSV tous les 25 epochs
+csv_dir: "/content/drive/MyDrive/aestra_results/logs"  # Répertoire pour les logs CSV
+
+# --------------------------------------------------------------------------
+# Checkpoints et modèles sauvegardés  
+# --------------------------------------------------------------------------
+model_save_dir: "/content/drive/MyDrive/aestra_results/models"  # Sauvegarder sur Google Drive

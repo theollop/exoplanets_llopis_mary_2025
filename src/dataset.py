@@ -25,11 +25,18 @@ class SpectrumDataset(Dataset):
         wavemin=None,
         wavemax=None,
         data_dtype=torch.float32,
-        dataset_filepath="data/rv_datachallenge/Sun_B57001_E61001_planet-FallChallenge1/HARPN/STAR1136_HPN_flux_YVA.npy",
-        material_filepath="data/rv_datachallenge/Sun_B57001_E61001_planet-FallChallenge1/HARPN/STAR1136_HPN_Analyse_material.p",
-        summary_filepath="data/rv_datachallenge/Sun_B57001_E61001_planet-FallChallenge1/HARPN/STAR1136_HPN_Analyse_summary.csv",
+        data_root_dir="data",
     ):
         print("Initialisation du SpectrumDataset...")
+
+        # Stocker le répertoire racine pour la sauvegarde
+        self.data_root_dir = data_root_dir
+
+        # Construction des chemins à partir du répertoire racine
+        dataset_filepath = f"{data_root_dir}/rv_datachallenge/Sun_B57001_E61001_planet-FallChallenge1/HARPN/STAR1136_HPN_flux_YVA.npy"
+        material_filepath = f"{data_root_dir}/rv_datachallenge/Sun_B57001_E61001_planet-FallChallenge1/HARPN/STAR1136_HPN_Analyse_material.p"
+        summary_filepath = f"{data_root_dir}/rv_datachallenge/Sun_B57001_E61001_planet-FallChallenge1/HARPN/STAR1136_HPN_Analyse_summary.csv"
+
         self.init_data(
             n_specs=n_specs,
             wavemin=wavemin,
@@ -142,9 +149,7 @@ class SpectrumDataset(Dataset):
             "wavemin": float(self.wavemin),
             "wavemax": float(self.wavemax),
             "data_dtype": self.data_dtype,
-            "dataset_filepath": self.dataset_filepath,
-            "material_filepath": self.material_filepath,
-            "summary_filepath": self.summary_filepath,
+            "data_root_dir": self.data_root_dir,
         }
 
 

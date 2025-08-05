@@ -343,6 +343,7 @@ def train_phase(
                     epoch + 1,
                     spectra_plot_dir,
                     zoom_line=True,
+                    data_root_dir=config.get("data_root_dir", "data"),
                 )
 
             # Sauvegarde CSV périodique
@@ -433,9 +434,7 @@ def main():
             wavemin=config.get("wavemin", None),
             wavemax=config.get("wavemax", None),
             data_dtype=getattr(torch, config.get("data_dtype", "float32")),
-            dataset_filepath=config.get("dataset_filepath", None),
-            material_filepath=config.get("material_filepath", None),
-            summary_filepath=config.get("summary_filepath", None),
+            data_root_dir=config.get("data_root_dir", "data"),
         )
 
         # Création du modèle

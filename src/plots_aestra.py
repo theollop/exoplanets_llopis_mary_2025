@@ -150,6 +150,7 @@ def plot_aestra_analysis(
     plot_dir: str,
     sample_idx: Optional[int] = None,
     zoom_line: bool = False,
+    data_root_dir: str = "data",
 ) -> None:
     """
     Plot complet d'analyse AESTRA selon le papier de référence.
@@ -170,8 +171,9 @@ def plot_aestra_analysis(
         phase_name: Phase d'entraînement
         epoch: Époch actuelle
         plot_dir: Répertoire de sauvegarde
-        device: Device (cpu/cuda)
         sample_idx: Index de l'échantillon (None pour aléatoire)
+        zoom_line: Activer le zoom sur une raie spectrale
+        data_root_dir: Répertoire racine des données (par défaut "data")
     """
     os.makedirs(plot_dir, exist_ok=True)
 
@@ -179,7 +181,7 @@ def plot_aestra_analysis(
     batch_yobs, batch_yaug, batch_voffset, batch_wavegrid = batch
     batch_size = batch_yobs.shape[0]
 
-    g2mask = np.loadtxt("data/rv_datachallenge/masks/G2_mask.txt")
+    g2mask = np.loadtxt(f"{data_root_dir}/rv_datachallenge/masks/G2_mask.txt")
     line_positions, line_weights = g2mask[:, 0], g2mask[:, 1]
     wavegrid = batch_wavegrid[0].detach().cpu().numpy()
     line_weights = line_weights[
@@ -419,12 +421,14 @@ def plot_ultra_precise_doppler(
     plot_dir: str,
     device: str = "cpu",
     ultra_zoom_window: float = 0.2,  # Angstroms - PLUS petit que 0.5Å
+    data_root_dir: str = "data",
 ) -> None:
     """
     Zoom ultra-précis encore plus serré pour visualiser les décalages Doppler.
 
     Args:
         ultra_zoom_window: Fenêtre de zoom en Angstroms (0.2Å par défaut, très serré)
+        data_root_dir: Répertoire racine des données (par défaut "data")
     """
     from src.spectral_lines import find_best_lines_for_doppler
 
@@ -442,7 +446,7 @@ def plot_ultra_precise_doppler(
     # Trouver la meilleure raie
     wave_min, wave_max = wavegrid.min(), wavegrid.max()
     try:
-        mask_filepath = "data/rv_datachallenge/masks/G2_mask.txt"
+        mask_filepath = f"{data_root_dir}/rv_datachallenge/masks/G2_mask.txt"
         selected_lines = find_best_lines_for_doppler(
             mask_filepath, (wave_min, wave_max), 1
         )
