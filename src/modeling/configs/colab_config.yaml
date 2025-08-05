@@ -52,7 +52,7 @@ plot_dir: "/content/drive/MyDrive/PFE/figures"  # Sauvegarde sur Google Drive
 # --------------------------------------------------------------------------
 # Phases d'entraînement
 # --------------------------------------------------------------------------
-training_phases:
+phases:
   rvonly:
     epochs: 100
     losses: ["rv"]
