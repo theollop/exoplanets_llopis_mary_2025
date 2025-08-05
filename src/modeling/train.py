@@ -396,17 +396,44 @@ def train_phase(
         )
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Entraînement AESTRA avec config YAML")
-    parser.add_argument(
-        "--cfg_name", help="Nom de l'expérience (ex: exp0)", default="base_config"
-    )
-    parser.add_argument(
-        "--checkpoint", help="Chemin vers un checkpoint pour reprendre l'entraînement"
-    )
-    parser.add_argument("--device", default="cuda", help="Device à utiliser (cuda/cpu)")
+def main(cfg_name=None, checkpoint=None, device="cuda"):
+    """
+    Fonction principale d'entraînement AESTRA.
 
-    args = parser.parse_args()
+    Args:
+        cfg_name: Nom de la configuration (ex: "base_config", "colab_config")
+        checkpoint: Chemin vers un checkpoint pour reprendre l'entraînement
+        device: Device à utiliser ("cuda" ou "cpu")
+    """
+    # Si aucun argument n'est fourni, utiliser argparse pour la ligne de commande
+    if cfg_name is None:
+        parser = argparse.ArgumentParser(
+            description="Entraînement AESTRA avec config YAML"
+        )
+        parser.add_argument(
+            "--cfg_name", help="Nom de l'expérience (ex: exp0)", default="base_config"
+        )
+        parser.add_argument(
+            "--checkpoint",
+            help="Chemin vers un checkpoint pour reprendre l'entraînement",
+        )
+        parser.add_argument(
+            "--device", default="cuda", help="Device à utiliser (cuda/cpu)"
+        )
+
+        args = parser.parse_args()
+        cfg_name = args.cfg_name
+        checkpoint = args.checkpoint or checkpoint
+        device = args.device
+    else:
+        # Création d'un objet args simulé pour compatibilité avec le reste du code
+        class Args:
+            def __init__(self, cfg_name, checkpoint, device):
+                self.cfg_name = cfg_name
+                self.checkpoint = checkpoint
+                self.device = device
+
+        args = Args(cfg_name, checkpoint, device)
 
     console.rule(f"[bold blue]AESTRA Training - Experiment: {args.cfg_name}[/]")
 
