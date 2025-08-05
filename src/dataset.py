@@ -32,19 +32,12 @@ class SpectrumDataset(Dataset):
         # Stocker le répertoire racine pour la sauvegarde
         self.data_root_dir = data_root_dir
 
-        # Construction des chemins à partir du répertoire racine
-        dataset_filepath = f"{data_root_dir}/rv_datachallenge/Sun_B57001_E61001_planet-FallChallenge1/HARPN/STAR1136_HPN_flux_YVA.npy"
-        material_filepath = f"{data_root_dir}/rv_datachallenge/Sun_B57001_E61001_planet-FallChallenge1/HARPN/STAR1136_HPN_Analyse_material.p"
-        summary_filepath = f"{data_root_dir}/rv_datachallenge/Sun_B57001_E61001_planet-FallChallenge1/HARPN/STAR1136_HPN_Analyse_summary.csv"
-
         self.init_data(
             n_specs=n_specs,
             wavemin=wavemin,
             wavemax=wavemax,
             data_dtype=data_dtype,
-            dataset_filepath=dataset_filepath,
-            material_filepath=material_filepath,
-            summary_filepath=summary_filepath,
+            data_root_dir=data_root_dir,
         )
         print(self)
         print("Déplacement des données vers le GPU si disponible...")
