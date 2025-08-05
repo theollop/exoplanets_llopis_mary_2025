@@ -16,6 +16,5 @@ setup(
         "ipykernel",
         "python-dotenv",
         "astropy",
-        "torchcubicspline @ git+https://github.com/patrick-kidger/torchcubicspline.git",
     ],
 )
