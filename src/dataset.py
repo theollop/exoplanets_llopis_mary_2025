@@ -79,14 +79,12 @@ class SpectrumDataset(Dataset):
         wavemin=None,
         wavemax=None,
         data_dtype=torch.float32,
-        dataset_filepath="/home/tliopis/Codes/lagrange_llopis_mary_2025/data/rv_datachallenge/Sun_B57001_E61001_planet-FallChallenge1/HARPN/STAR1136_HPN_flux_YVA.npy",
-        material_filepath="/home/tliopis/Codes/lagrange_llopis_mary_2025/data/rv_datachallenge/Sun_B57001_E61001_planet-FallChallenge1/HARPN/STAR1136_HPN_Analyse_material.p",
-        summary_filepath="/home/tliopis/Codes/lagrange_llopis_mary_2025/data/rv_datachallenge/Sun_B57001_E61001_planet-FallChallenge1/HARPN/STAR1136_HPN_Analyse_summary.csv",
+        data_root_dir="data",
     ):
-        dataset_filepath = "/home/tliopis/Codes/lagrange_llopis_mary_2025/data/rv_datachallenge/Sun_B57001_E61001_planet-FallChallenge1/HARPN/STAR1136_HPN_flux_YVA.npy"
+        dataset_filepath = f"{data_root_dir}/rv_datachallenge/Sun_B57001_E61001_planet-FallChallenge1/HARPN/STAR1136_HPN_flux_YVA.npy"
 
         analyse_material = np.load(
-            "/home/tliopis/Codes/lagrange_llopis_mary_2025/data/rv_datachallenge/Sun_B57001_E61001_planet-FallChallenge1/HARPN/STAR1136_HPN_Analyse_material.p",
+            f"{data_root_dir}/rv_datachallenge/Sun_B57001_E61001_planet-FallChallenge1/HARPN/STAR1136_HPN_Analyse_material.p",
             allow_pickle=True,
         )
 
@@ -94,7 +92,7 @@ class SpectrumDataset(Dataset):
         template = analyse_material["stellar_template"].to_numpy()
 
         analyse_summary = pd.read_csv(
-            "/home/tliopis/Codes/lagrange_llopis_mary_2025/data/rv_datachallenge/Sun_B57001_E61001_planet-FallChallenge1/HARPN/STAR1136_HPN_Analyse_summary.csv"
+            f"{data_root_dir}/rv_datachallenge/Sun_B57001_E61001_planet-FallChallenge1/HARPN/STAR1136_HPN_Analyse_summary.csv"
         )
 
         if wavemin is None:
@@ -124,9 +122,6 @@ class SpectrumDataset(Dataset):
         self.data_dtype = data_dtype
         self.wavemin = wavemin
         self.wavemax = wavemax
-        self.dataset_filepath = dataset_filepath
-        self.material_filepath = material_filepath
-        self.summary_filepath = summary_filepath
 
     def move_to_cuda(self):
         """
