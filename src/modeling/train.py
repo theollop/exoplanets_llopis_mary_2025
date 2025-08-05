@@ -429,13 +429,13 @@ def main():
 
         # Création du dataset
         dataset = SpectrumDataset(
-            n_specs=config["n_specs"],
-            wavemin=config["wavemin"],
-            wavemax=config["wavemax"],
-            data_dtype=getattr(torch, config["data_dtype"]),
-            dataset_filepath=config["dataset_filepath"],
-            material_filepath=config["material_filepath"],
-            summary_filepath=config["summary_filepath"],
+            n_specs=config.get("n_specs", None),
+            wavemin=config.get("wavemin", None),
+            wavemax=config.get("wavemax", None),
+            data_dtype=getattr(torch, config.get("data_dtype", "float32")),
+            dataset_filepath=config.get("dataset_filepath", None),
+            material_filepath=config.get("material_filepath", None),
+            summary_filepath=config.get("summary_filepath", None),
         )
 
         # Création du modèle

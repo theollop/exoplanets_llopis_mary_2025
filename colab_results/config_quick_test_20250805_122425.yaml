@@ -1,0 +1,52 @@
+M_aug: 1
+b_obs_trainable: false
+b_rest_trainable: true
+batch_size: 8
+checkpoint_every: 5
+csv_dir: colab_results/logs
+csv_save_every: 5
+cycle_length: 1000
+data_dtype: float32
+dataset_filepath: data/rv_datachallenge/Sun_B57001_E61001_planet-FallChallenge1/HARPN/STAR1136_HPN_flux_YVA.npy
+extrapolate: linear
+interpolate: linear
+k_reg_init: 0.0
+latent_dim: 3
+material_filepath: data/rv_datachallenge/Sun_B57001_E61001_planet-FallChallenge1/HARPN/STAR1136_HPN_Analyse_material.p
+n_specs: 100
+out_dtype: float32
+phases:
+- b_obs_trainable: false
+  b_rest_trainable: false
+  n_epochs: 2
+  name: rvonly
+  optimizer: torch.optim.Adam
+  optimizer_kwargs:
+    lr: 0.001
+    weight_decay: 0.0
+- b_obs_trainable: false
+  b_rest_trainable: true
+  n_epochs: 2
+  name: joint
+  optimizer: torch.optim.Adam
+  optimizer_kwargs:
+    lr: 0.0005
+    weight_decay: 0.0
+  plot_spectra_every: 2
+  scheduler: torch.optim.lr_scheduler.StepLR
+  scheduler_kwargs:
+    gamma: 0.7
+    step_size: 10
+  spectra_plot_dir: colab_results/figures
+plot_dir: colab_results/figures
+plot_every: 5
+save_losses_csv: true
+shuffle: false
+sigma_c: 0.0001
+sigma_v: 0.3
+sigma_y: 1
+summary_filepath: data/rv_datachallenge/Sun_B57001_E61001_planet-FallChallenge1/HARPN/STAR1136_HPN_Analyse_summary.csv
+vmax: 3
+vmin: -3
+wavemax: 5010.0
+wavemin: 5000.0

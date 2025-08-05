@@ -8,7 +8,6 @@
 # --------------------------------------------------------------------------
 # Données
 # --------------------------------------------------------------------------
-n_specs: 1000              # Nombre de spectres à charger
 wavemin: 5000.0           # Longueur d'onde minimale (nm)
 wavemax: 5050.0           # Longueur d'onde maximale (nm)
 data_dtype: float32       # Type numpy/torch du tableau des spectres
