@@ -141,18 +141,25 @@ def plot_rv_periodogram_juxtaposed(
 
             # === MILIEU : DEUX SÉRIES TEMPORELLES CÔTE À CÔTE ===
 
-            # Série temporelle RV originales (gauche)
+            # Calcul d'une échelle Y commune pour une meilleure comparaison
+            all_rv_values = np.concatenate([rv_values, rv_corrected])
+            y_min = np.min(all_rv_values) * 1.1
+            y_max = np.max(all_rv_values) * 1.1
+
+            # Série temporelle RV originales (gauche, centré)
             ax2 = plt.subplot(3, 3, 4)
             ax2.plot(times, rv_values, "bo-", markersize=1.5, linewidth=0.5)
             ax2.set_ylabel("RV originales (m/s)")
             ax2.set_title(f"RV originales\n(std = {np.std(rv_values):.4f} m/s)")
+            ax2.set_ylim(y_min, y_max)
             ax2.grid(True, alpha=0.3)
 
-            # Série temporelle RV décorrélées (droite)
-            ax3 = plt.subplot(3, 3, 6)
+            # Série temporelle RV décorrélées (droite, centré)
+            ax3 = plt.subplot(3, 3, 5)
             ax3.plot(times, rv_corrected, "ro-", markersize=1.5, linewidth=0.5)
             ax3.set_ylabel("RV décorrélées (m/s)")
             ax3.set_title(f"RV décorrélées\n(std = {np.std(rv_corrected):.4f} m/s)")
+            ax3.set_ylim(y_min, y_max)
             ax3.grid(True, alpha=0.3)
 
             # === EN BAS : 3 ZOOMS PLANÈTES AVEC LES DEUX COURBES ===
@@ -550,7 +557,6 @@ def extract_latent_vectors_and_rv(
 def compute_rv_periodogram(
     model,
     dataset,
-    star_name=None,
     batch_size=4,
     remove_outliers=None,
     decorrelate_rv=False,
@@ -562,7 +568,6 @@ def compute_rv_periodogram(
     Args:
         model: Modèle AESTRA entraîné
         dataset: Dataset contenant les spectres et les temps JDB
-        star_name: Nom de l'étoile pour identifier le fichier de transit (optionnel)
         batch_size: Taille des batches pour le traitement (défaut 64)
         remove_outliers: Liste des indices à supprimer (défaut [334, 464])
         decorrelate_rv: Si True, applique la décorrélation des RV avec l'espace latent
@@ -1138,6 +1143,666 @@ def _create_activity_mosaic_plot(results, save_path, show_plot):
 
 
 # =============================================================================
+# LATENT PERIODOGRAM ANALYSIS - Analyse du périodogramme des composantes latentes
+# =============================================================================
+
+
+def compute_latent_periodogram(
+    latent_vectors, times, component_indices=None, max_period_factor=3
+):
+    """
+    Calcule le périodogramme pour chaque composante du vecteur latent.
+
+    Args:
+        latent_vectors: Vecteurs latents (N, D) où N=nombre de spectres, D=dimension latente
+        times: Temps correspondants (N,)
+        component_indices: Indices des composantes à analyser (None pour toutes)
+        max_period_factor: Facteur pour la période maximum (défaut 3 = 1/3 de la durée totale)
+
+    Returns:
+        dict: Dictionnaire contenant periods, power_matrix, component_indices, times
+    """
+    n_spectra, latent_dim = latent_vectors.shape
+
+    if component_indices is None:
+        component_indices = list(range(latent_dim))
+    else:
+        component_indices = [i for i in component_indices if 0 <= i < latent_dim]
+
+    print(
+        f"Calcul du périodogramme pour {len(component_indices)} composantes latentes..."
+    )
+
+    # Définition de la grille de périodes (identique à compute_rv_periodogram)
+    min_period = 1.0  # 1 jour minimum
+    max_period = (times.max() - times.min()) / max_period_factor
+    periods = np.logspace(np.log10(min_period), np.log10(max_period), 10000)
+    frequencies = 1.0 / periods
+
+    # Calcul du périodogramme pour chaque composante
+    power_matrix = np.zeros((len(component_indices), len(periods)))
+
+    for i, comp_idx in enumerate(component_indices):
+        component_values = latent_vectors[:, comp_idx]
+
+        # Calcul du périodogramme Lomb-Scargle
+        ls = LombScargle(times, component_values)
+        power = ls.power(frequencies)
+        power_matrix[i, :] = power
+
+        if (i + 1) % 10 == 0 or i == 0 or i == len(component_indices) - 1:
+            print(f"  Composante {comp_idx}: périodogramme calculé")
+
+    print(f"✅ Périodogrammes calculés pour {len(component_indices)} composantes")
+
+    return {
+        "periods": periods,
+        "power_matrix": power_matrix,
+        "component_indices": component_indices,
+        "times": times,
+        "latent_vectors": latent_vectors,
+    }
+
+
+def analyze_latent_periodogram_peaks(
+    periodogram_data, known_periods=None, threshold_ratio=0.1, top_n_components=None
+):
+    """
+    Analyse les pics significatifs dans les périodogrammes des composantes latentes.
+
+    Args:
+        periodogram_data: Résultat de compute_latent_periodogram
+        known_periods: Périodes connues des planètes pour comparaison
+        threshold_ratio: Ratio du pic maximum pour définir le seuil (défaut 0.1)
+        top_n_components: Nombre de composantes les plus significatives à retourner
+
+    Returns:
+        dict: Analyse des pics pour chaque composante
+    """
+    periods = periodogram_data["periods"]
+    power_matrix = periodogram_data["power_matrix"]
+    component_indices = periodogram_data["component_indices"]
+
+    results = {
+        "component_analysis": {},
+        "ranking": [],
+        "known_periods": known_periods,
+        "summary": {},
+    }
+
+    print("Analyse des pics significatifs...")
+
+    for i, comp_idx in enumerate(component_indices):
+        power = power_matrix[i, :]
+        max_power = np.max(power)
+        threshold = threshold_ratio * max_power
+
+        # Identification des pics
+        peak_indices = np.where(power > threshold)[0]
+
+        if len(peak_indices) > 0:
+            peak_periods = periods[peak_indices]
+            peak_powers = power[peak_indices]
+
+            # Tri par puissance décroissante
+            sorted_indices = np.argsort(peak_powers)[::-1][:10]  # Top 10 pics
+
+            component_peaks = []
+            for j, idx in enumerate(sorted_indices):
+                period = peak_periods[idx]
+                power_val = peak_powers[idx]
+
+                # Recherche de correspondance avec périodes connues
+                closest_known = None
+                if known_periods is not None:
+                    distances = np.abs(known_periods - period)
+                    closest_idx = np.argmin(distances)
+                    closest_period = known_periods[closest_idx]
+                    relative_diff = np.abs(period - closest_period) / closest_period
+
+                    if relative_diff < 0.1:  # Tolérance de 10%
+                        closest_known = {
+                            "period": closest_period,
+                            "difference": period - closest_period,
+                            "relative_diff": relative_diff,
+                        }
+
+                component_peaks.append(
+                    {
+                        "rank": j + 1,
+                        "period": period,
+                        "power": power_val,
+                        "relative_power": power_val / max_power,
+                        "closest_known": closest_known,
+                    }
+                )
+
+            results["component_analysis"][comp_idx] = {
+                "max_power": max_power,
+                "n_peaks": len(peak_indices),
+                "peaks": component_peaks,
+                "significance": max_power,  # Score de significance global
+            }
+
+            # Ajout au ranking global
+            results["ranking"].append(
+                {
+                    "component": comp_idx,
+                    "max_power": max_power,
+                    "best_period": periods[np.argmax(power)],
+                    "n_significant_peaks": len(component_peaks),
+                }
+            )
+
+    # Tri du ranking par puissance maximum
+    results["ranking"] = sorted(
+        results["ranking"], key=lambda x: x["max_power"], reverse=True
+    )
+
+    # Sélection des top composantes si demandé
+    if top_n_components is not None:
+        results["top_components"] = results["ranking"][:top_n_components]
+
+    # Résumé global
+    results["summary"] = {
+        "total_components": len(component_indices),
+        "components_with_peaks": len(results["component_analysis"]),
+        "most_significant_component": results["ranking"][0]["component"]
+        if results["ranking"]
+        else None,
+        "avg_peaks_per_component": np.mean(
+            [data["n_peaks"] for data in results["component_analysis"].values()]
+        )
+        if results["component_analysis"]
+        else 0,
+    }
+
+    print(
+        f"✅ Analyse terminée: {results['summary']['components_with_peaks']} composantes avec des pics significatifs"
+    )
+
+    return results
+
+
+def plot_latent_periodogram_overview(
+    periodogram_data,
+    analysis_results=None,
+    n_top_components=6,
+    save_path=None,
+    show_plot=False,
+):
+    """
+    Crée un plot d'ensemble des périodogrammes des composantes latentes les plus significatives.
+
+    Args:
+        periodogram_data: Résultat de compute_latent_periodogram
+        analysis_results: Résultat de analyze_latent_periodogram_peaks (optionnel)
+        n_top_components: Nombre de composantes à afficher
+        save_path: Chemin de sauvegarde
+        show_plot: Afficher le plot
+
+    Returns:
+        bool: True si le plot a été créé avec succès
+    """
+    periods = periodogram_data["periods"]
+    power_matrix = periodogram_data["power_matrix"]
+    component_indices = periodogram_data["component_indices"]
+
+    # Sélection des composantes à afficher
+    if analysis_results and "ranking" in analysis_results:
+        # Utiliser le ranking pour sélectionner les composantes les plus significatives
+        top_components = [
+            comp["component"] for comp in analysis_results["ranking"][:n_top_components]
+        ]
+        display_indices = [
+            component_indices.index(comp)
+            for comp in top_components
+            if comp in component_indices
+        ]
+    else:
+        # Sélection par puissance maximum
+        max_powers = np.max(power_matrix, axis=1)
+        top_indices = np.argsort(max_powers)[::-1][:n_top_components]
+        display_indices = top_indices
+        top_components = [component_indices[i] for i in display_indices]
+
+    # Configuration de la figure
+    n_cols = min(3, len(display_indices))
+    n_rows = (len(display_indices) + n_cols - 1) // n_cols
+
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(6 * n_cols, 4 * n_rows))
+    if n_rows == 1 and n_cols == 1:
+        axes = [axes]
+    elif n_rows == 1 or n_cols == 1:
+        axes = axes.flatten()
+    else:
+        axes = axes.flatten()
+
+    fig.suptitle(
+        f"Périodogrammes des composantes latentes les plus significatives\n"
+        f"Top {len(display_indices)} composantes sur {len(component_indices)} total",
+        fontsize=14,
+        fontweight="bold",
+    )
+
+    known_periods = analysis_results.get("known_periods") if analysis_results else None
+
+    for plot_idx, (display_idx, comp_idx) in enumerate(
+        zip(display_indices, top_components)
+    ):
+        if plot_idx >= len(axes):
+            break
+
+        ax = axes[plot_idx]
+        power = power_matrix[display_idx, :]
+
+        # Plot du périodogramme
+        ax.semilogx(periods, power, "b-", linewidth=1.0, alpha=0.8)
+
+        # Marquage des périodes connues si disponibles
+        if known_periods is not None:
+            for i, period in enumerate(known_periods):
+                if periods.min() <= period <= periods.max():
+                    ax.axvline(
+                        period,
+                        color="red",
+                        linestyle="--",
+                        alpha=0.7,
+                        linewidth=1,
+                        label=f"P{i + 1}: {period:.1f}d" if i < 3 else None,
+                    )
+
+        # Marquage du pic principal
+        max_idx = np.argmax(power)
+        max_period = periods[max_idx]
+        max_power = power[max_idx]
+        ax.plot(
+            max_period, max_power, "ro", markersize=6, label=f"Max: {max_period:.1f}d"
+        )
+
+        ax.set_xlabel("Période (jours)")
+        ax.set_ylabel("Puissance LS")
+        ax.set_title(f"Composante latente {comp_idx}\n(Power max: {max_power:.4f})")
+        ax.grid(True, alpha=0.3)
+        ax.legend(fontsize=8)
+
+    # Masquer les axes vides
+    for plot_idx in range(len(display_indices), len(axes)):
+        axes[plot_idx].set_visible(False)
+
+    plt.tight_layout()
+
+    # Sauvegarde
+    if save_path:
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        plt.savefig(save_path, dpi=300, bbox_inches="tight")
+        print(f"Périodogrammes des composantes latentes sauvegardés: {save_path}")
+
+    if show_plot:
+        plt.show()
+    else:
+        plt.close()
+
+    return True
+
+
+def plot_latent_periodogram_zoom(
+    periodogram_data,
+    analysis_results,
+    component_idx,
+    known_periods=None,
+    save_path=None,
+    show_plot=False,
+):
+    """
+    Crée un plot détaillé avec zooms sur les pics d'intérêt pour une composante latente spécifique.
+    Utilise le même layout que plot_rv_periodogram_juxtaposed.
+
+    Args:
+        periodogram_data: Résultat de compute_latent_periodogram
+        analysis_results: Résultat de analyze_latent_periodogram_peaks
+        component_idx: Index de la composante latente à analyser
+        known_periods: Périodes connues des planètes
+        save_path: Chemin de sauvegarde
+        show_plot: Afficher le plot
+
+    Returns:
+        bool: True si le plot a été créé avec succès
+    """
+    periods = periodogram_data["periods"]
+    power_matrix = periodogram_data["power_matrix"]
+    component_indices = periodogram_data["component_indices"]
+    times = periodogram_data["times"]
+    latent_vectors = periodogram_data["latent_vectors"]
+
+    # Vérification que la composante existe
+    if component_idx not in component_indices:
+        print(f"❌ Composante {component_idx} non trouvée dans les données")
+        return False
+
+    matrix_idx = component_indices.index(component_idx)
+    power = power_matrix[matrix_idx, :]
+    component_values = latent_vectors[:, component_idx]
+
+    # Récupération de l'analyse pour cette composante
+    comp_analysis = analysis_results["component_analysis"].get(component_idx, {})
+
+    if known_periods is None:
+        known_periods = analysis_results.get("known_periods", [])
+
+    # Layout identique à plot_rv_periodogram_juxtaposed
+    if known_periods is not None and len(known_periods) > 0:
+        fig = plt.figure(figsize=(18, 14))
+
+        # === TOUT EN HAUT : PÉRIODOGRAMME COMPLET ===
+        ax1 = plt.subplot(3, 3, (1, 3))  # Occupe toute la première ligne
+        ax1.semilogx(
+            periods,
+            power,
+            "b-",
+            linewidth=1.0,
+            label=f"Composante latente {component_idx}",
+        )
+        ax1.set_ylabel("Puissance LS")
+        ax1.set_title(f"Périodogramme - Composante latente {component_idx}")
+        ax1.grid(True, alpha=0.3)
+
+        # Marquer les périodes connues
+        for i, period in enumerate(known_periods):
+            if periods.min() <= period <= periods.max():
+                ax1.axvline(
+                    period,
+                    color="orange",
+                    linestyle="--",
+                    alpha=0.8,
+                    linewidth=2,
+                    label=f"Planète {i + 1}: {period:.1f}d" if i < 3 else None,
+                )
+        ax1.legend()
+
+        # === MILIEU : SÉRIE TEMPORELLE DE LA COMPOSANTE ===
+        ax2 = plt.subplot(3, 3, (4, 6))  # Occupe toute la deuxième ligne
+        ax2.plot(times, component_values, "go-", markersize=1.5, linewidth=0.5)
+        ax2.set_ylabel(f"Valeur composante {component_idx}")
+        ax2.set_xlabel("JDB")
+        ax2.set_title(
+            f"Série temporelle - Composante latente {component_idx}\n(std = {np.std(component_values):.4f})"
+        )
+        ax2.grid(True, alpha=0.3)
+
+        # === EN BAS : 3 ZOOMS PLANÈTES ===
+        zoom_positions = [7, 8, 9]  # Dernière ligne
+        for i, period in enumerate(known_periods[:3]):
+            if periods.min() <= period <= periods.max() and i < 3:
+                ax_zoom = plt.subplot(3, 3, zoom_positions[i])
+
+                zoom_factor = 0.2  # ±20% autour de la période
+                period_min = period * (1 - zoom_factor)
+                period_max = period * (1 + zoom_factor)
+
+                # Masque pour le zoom
+                zoom_mask = (periods >= period_min) & (periods <= period_max)
+
+                if np.any(zoom_mask):
+                    ax_zoom.plot(
+                        periods[zoom_mask],
+                        power[zoom_mask],
+                        "b-",
+                        linewidth=1.5,
+                        label=f"Comp. {component_idx}",
+                    )
+
+                    # Ligne de la période théorique
+                    ax_zoom.axvline(
+                        period,
+                        color="orange",
+                        linestyle="--",
+                        alpha=0.8,
+                        linewidth=2,
+                    )
+
+                    ax_zoom.set_xlabel("Période (jours)")
+                    ax_zoom.set_ylabel("Puissance LS")
+                    ax_zoom.set_title(f"Planète {i + 1}: {period:.1f}d")
+                    ax_zoom.grid(True, alpha=0.3)
+                    ax_zoom.legend(fontsize=8)
+
+                    # Trouver et marquer le pic local
+                    if len(periods[zoom_mask]) > 0:
+                        local_max_idx = np.argmax(power[zoom_mask])
+                        local_max_period = periods[zoom_mask][local_max_idx]
+                        local_max_power = power[zoom_mask][local_max_idx]
+                        ax_zoom.plot(
+                            local_max_period, local_max_power, "bo", markersize=6
+                        )
+
+    else:
+        # Layout simple sans zooms
+        fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(16, 10))
+
+        # Périodogramme
+        ax1.semilogx(
+            periods, power, "b-", linewidth=0.8, label=f"Composante {component_idx}"
+        )
+        ax1.set_ylabel("Puissance LS")
+        ax1.set_title(f"Périodogramme - Composante latente {component_idx}")
+        ax1.grid(True, alpha=0.3)
+        ax1.legend()
+
+        # Série temporelle
+        ax2.plot(times, component_values, "go-", markersize=3, linewidth=0.5)
+        ax2.set_ylabel(f"Valeur composante {component_idx}")
+        ax2.set_xlabel("JDB")
+        ax2.set_title(f"Série temporelle (std = {np.std(component_values):.4f})")
+        ax2.grid(True, alpha=0.3)
+
+        # Analyse des pics
+        if comp_analysis and "peaks" in comp_analysis:
+            peaks_text = "Pics principaux:\n"
+            for peak in comp_analysis["peaks"][:5]:  # Top 5 pics
+                peaks_text += f"P={peak['period']:.1f}d (pow={peak['power']:.4f})\n"
+            ax3.text(
+                0.1,
+                0.9,
+                peaks_text,
+                transform=ax3.transAxes,
+                fontsize=10,
+                verticalalignment="top",
+            )
+
+        ax3.set_title("Analyse des pics")
+        ax3.set_xlim(0, 1)
+        ax3.set_ylim(0, 1)
+        ax3.axis("off")
+
+        # Statistiques
+        stats_text = "Statistiques:\n"
+        stats_text += f"Puissance max: {np.max(power):.4f}\n"
+        stats_text += f"Période du pic: {periods[np.argmax(power)]:.1f}d\n"
+        stats_text += f"Std composante: {np.std(component_values):.4f}\n"
+        if comp_analysis:
+            stats_text += f"Nb pics significatifs: {comp_analysis.get('n_peaks', 0)}\n"
+
+        ax4.text(
+            0.1,
+            0.9,
+            stats_text,
+            transform=ax4.transAxes,
+            fontsize=10,
+            verticalalignment="top",
+        )
+        ax4.set_title("Statistiques")
+        ax4.set_xlim(0, 1)
+        ax4.set_ylim(0, 1)
+        ax4.axis("off")
+
+    plt.tight_layout()
+
+    # Sauvegarde
+    if save_path:
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        plt.savefig(save_path, dpi=300, bbox_inches="tight")
+        print(f"Zoom périodogramme composante {component_idx} sauvegardé: {save_path}")
+
+    if show_plot:
+        plt.show()
+    else:
+        plt.close()
+
+    return True
+
+
+def analyze_latent_periodograms_from_checkpoint(
+    checkpoint_path="models/aestra_colab_config_final.pth",
+    star_name="STAR1136",
+    component_indices=None,  # None pour toutes les composantes
+    n_top_components=6,  # Nombre de composantes à analyser en détail
+    save_dir=None,  # Sera déterminé automatiquement depuis l'expérience
+    show_plots=False,
+    data_root_dir="data",
+    remove_outliers=None,
+    exp_dirs=None,  # Répertoires d'expérience pour l'organisation automatique
+):
+    """
+    Fonction complète pour analyser les périodogrammes des composantes latentes depuis un checkpoint.
+
+    Args:
+        checkpoint_path: Chemin vers le checkpoint du modèle
+        star_name: Nom de l'étoile pour chercher les périodes connues
+        component_indices: Indices des composantes à analyser (None pour toutes)
+        n_top_components: Nombre de composantes les plus significatives à analyser en détail
+        save_dir: Répertoire pour sauvegarder les figures
+        show_plots: Afficher les figures ou non
+        data_root_dir: Répertoire racine des données
+        remove_outliers: Liste des indices à supprimer
+        exp_dirs: Répertoires d'expérience
+
+    Returns:
+        dict: Résultats complets de l'analyse
+    """
+    print("=" * 60)
+    print("ANALYSE DES PÉRIODOGRAMMES DES COMPOSANTES LATENTES")
+    print("=" * 60)
+
+    # Chargement du modèle et du dataset
+    exp_data = load_experiment_checkpoint(checkpoint_path, data_root_dir=data_root_dir)
+    model = exp_data["model"]
+    dataset = exp_data["dataset"]
+    cfg_name = exp_data["cfg_name"]
+
+    print(f"Modèle chargé: {cfg_name}")
+    print(f"Dataset: {len(dataset)} spectres, {dataset.n_pixels} pixels")
+
+    # Détermination automatique du répertoire de sauvegarde
+    if save_dir is None:
+        if exp_dirs is not None:
+            save_dir = exp_dirs["figures"]
+        else:
+            auto_exp_dirs = detect_experiment_directories_from_checkpoint(
+                checkpoint_path
+            )
+            if auto_exp_dirs is not None:
+                save_dir = auto_exp_dirs["figures"]
+            else:
+                save_dir = "reports/figures"
+
+    # Extraction des vecteurs latents
+    print("\n🔍 Extraction des vecteurs latents...")
+    latent_s, rv_values, _, _, _ = extract_latent_vectors_and_rv(
+        model=model,
+        dataset=dataset,
+        batch_size=4,
+        remove_outliers=remove_outliers,
+        decorrelate_rv=False,
+    )
+
+    # Récupération des temps
+    if remove_outliers is None:
+        remove_outliers = [334, 464]
+
+    n_specs = len(dataset)
+    valid_indices = [i for i in range(n_specs) if i not in remove_outliers]
+    all_times = dataset.jdb.cpu().numpy()
+    times = all_times[valid_indices]
+
+    # Récupération des périodes connues
+    known_periods = get_transit_periods(star_name, data_root_dir=data_root_dir)
+
+    # Calcul des périodogrammes des composantes latentes
+    print("\n📊 Calcul des périodogrammes des composantes latentes...")
+    periodogram_data = compute_latent_periodogram(
+        latent_vectors=latent_s,
+        times=times,
+        component_indices=component_indices,
+    )
+
+    # Analyse des pics
+    print("\n🎯 Analyse des pics significatifs...")
+    analysis_results = analyze_latent_periodogram_peaks(
+        periodogram_data=periodogram_data,
+        known_periods=known_periods,
+        top_n_components=n_top_components,
+    )
+
+    # Création des plots
+    print("\n🎨 Création des visualisations...")
+
+    # 1. Plot d'ensemble des composantes les plus significatives
+    overview_path = os.path.join(save_dir, "latent_periodograms_overview.png")
+    plot_latent_periodogram_overview(
+        periodogram_data=periodogram_data,
+        analysis_results=analysis_results,
+        n_top_components=n_top_components,
+        save_path=overview_path,
+        show_plot=show_plots,
+    )
+
+    # 2. Plots détaillés pour les composantes les plus significatives
+    zoom_paths = []
+    if "top_components" in analysis_results:
+        for comp_data in analysis_results["top_components"][:3]:  # Top 3 composantes
+            comp_idx = comp_data["component"]
+            zoom_path = os.path.join(
+                save_dir, f"latent_periodogram_zoom_comp_{comp_idx}.png"
+            )
+
+            plot_latent_periodogram_zoom(
+                periodogram_data=periodogram_data,
+                analysis_results=analysis_results,
+                component_idx=comp_idx,
+                known_periods=known_periods,
+                save_path=zoom_path,
+                show_plot=show_plots,
+            )
+            zoom_paths.append(zoom_path)
+
+    # Préparation des résultats
+    results = {
+        "periodogram_data": periodogram_data,
+        "analysis_results": analysis_results,
+        "known_periods": known_periods,
+        "latent_dim": latent_s.shape[1],
+        "n_spectra": latent_s.shape[0],
+        "overview_plot": overview_path,
+        "zoom_plots": zoom_paths,
+        "most_significant_component": analysis_results["summary"][
+            "most_significant_component"
+        ],
+        "components_with_peaks": analysis_results["summary"]["components_with_peaks"],
+    }
+
+    print("\n✅ Analyse terminée!")
+    print(f"📐 Dimension latente: {results['latent_dim']}D")
+    print(f"📊 Composantes avec pics significatifs: {results['components_with_peaks']}")
+    if results["most_significant_component"] is not None:
+        print(
+            f"🎯 Composante la plus significative: {results['most_significant_component']}"
+        )
+
+    return results
+
+
+# =============================================================================
 # HIGH-LEVEL ANALYSIS FUNCTIONS - Fonctions d'analyse haut niveau
 # =============================================================================
 
@@ -1588,8 +2253,22 @@ def full_analysis_from_checkpoint(
     )
     results["periodogram"] = periodogram_analysis
 
-    # 5. Analyse des signaux d'activité pour les raies importantes
-    print("\n5. Analyse des signaux d'activité pour les raies importantes...")
+    # 5. Analyse des périodogrammes des composantes latentes
+    print("\n5. Analyse des périodogrammes des composantes latentes...")
+    latent_periodogram_analysis = analyze_latent_periodograms_from_checkpoint(
+        checkpoint_path=checkpoint_path,
+        star_name=star_name,
+        n_top_components=6,
+        save_dir=save_dir,
+        show_plots=show_plots,
+        data_root_dir=data_root_dir,
+        remove_outliers=remove_outliers,
+        exp_dirs={"figures": save_dir} if exp_dirs is None else exp_dirs,
+    )
+    results["latent_periodogram"] = latent_periodogram_analysis
+
+    # 6. Analyse des signaux d'activité pour les raies importantes
+    print("\n6. Analyse des signaux d'activité pour les raies importantes...")
     activity_analysis = analyze_activity_signals_from_checkpoint(
         checkpoint_path=checkpoint_path,
         n_spectra=4,
@@ -1630,6 +2309,17 @@ def full_analysis_from_checkpoint(
         )
     if results["periodogram"]["known_periods"] is not None:
         print(f"Périodes connues: {results['periodogram']['known_periods']}")
+
+    # Nouvelles informations sur les composantes latentes
+    if "latent_periodogram" in results:
+        print(
+            f"Composantes latentes avec pics significatifs: {results['latent_periodogram']['components_with_peaks']}"
+        )
+        if results["latent_periodogram"]["most_significant_component"] is not None:
+            print(
+                f"Composante latente la plus significative: {results['latent_periodogram']['most_significant_component']}"
+            )
+
     if results["activity_signals"] is not None:
         n_analyzed_spectra = len(results["activity_signals"]["selected_spectra"])
         n_analyzed_lines = len(results["activity_signals"]["selected_lines"])
@@ -1667,7 +2357,7 @@ def main(
         remove_outliers: Liste des indices à supprimer (défaut [334, 464])
         decorrelate_rv: Appliquer la décorrélation des RV
         data_root_dir: Répertoire racine des données
-        analysis_type: Type d'analyse ("full", "periodogram", "latent", "activity")
+        analysis_type: Type d'analyse ("full", "periodogram", "latent", "activity", "latent_periodogram")
 
     Returns:
         dict: Résultats de l'analyse
@@ -1717,7 +2407,7 @@ def main(
         )
         parser.add_argument(
             "--analysis_type",
-            choices=["full", "periodogram", "latent", "activity"],
+            choices=["full", "periodogram", "latent", "activity", "latent_periodogram"],
             default="full",
             help="Type d'analyse à effectuer",
         )
@@ -1810,9 +2500,22 @@ def main(
                 remove_outliers=remove_outliers,
             )
 
+        elif analysis_type == "latent_periodogram":
+            print("\n📊 Analyse des périodogrammes des composantes latentes...")
+            results = analyze_latent_periodograms_from_checkpoint(
+                checkpoint_path=checkpoint_path,
+                star_name=star_name,
+                show_plots=show_plots,
+                data_root_dir=data_root_dir,
+                remove_outliers=remove_outliers,
+            )
+
+        else:
+            raise ValueError(f"Type d'analyse inconnu: {analysis_type}")
+
         print(f"\n✅ Analyse '{analysis_type}' terminée avec succès!")
 
-        # Affichage du résumé pour l'analyse complète
+        # Affichage du résumé selon le type d'analyse
         if analysis_type == "full" and "periodogram" in results:
             print(
                 f"🎯 Meilleure période détectée: {results['periodogram']['best_period']:.2f} jours"
@@ -1825,6 +2528,16 @@ def main(
                     f"📊 Nombre de spectres analysés: {results['latent_space']['n_spectra']}"
                 )
 
+        elif analysis_type == "latent_periodogram":
+            print(f"📐 Dimension latente: {results['latent_dim']}D")
+            print(
+                f"📊 Composantes avec pics significatifs: {results['components_with_peaks']}"
+            )
+            if results["most_significant_component"] is not None:
+                print(
+                    f"🎯 Composante la plus significative: {results['most_significant_component']}"
+                )
+
         return results
 
     except Exception as e:
@@ -1835,7 +2548,8 @@ def main(
 if __name__ == "__main__":
     # Appel de la fonction main pour l'exécution en ligne de commande
     main(
-        checkpoint_path="experiments/aestra_local_experiment/models/aestra_base_config_final.pth"
+        checkpoint_path="experiments/aestra_local_experiment/models/aestra_base_config_final.pth",
+        show_plots=False,
     )
 
 
@@ -1923,6 +2637,95 @@ activity_results = analyze_activity_signals_mosaic(
     spectrum_indices=[42, 123, 256]  # Spectres spécifiques
 )
 
+# 7. NOUVELLES FONCTIONS - Analyse des périodogrammes des composantes latentes
+
+# Analyse complète des périodogrammes des composantes latentes
+latent_periodogram_results = analyze_latent_periodograms_from_checkpoint(
+    checkpoint_path="models/aestra_colab_config_final.pth",
+    star_name="STAR1136",
+    n_top_components=8,  # Analyser les 8 composantes les plus significatives
+    show_plots=True,
+    remove_outliers=[334, 464]
+)
+
+# Utilisation modulaire des nouvelles fonctions
+import numpy as np
+from astropy.timeseries import LombScargle
+
+# Récupération des temps
+n_specs = len(dataset)
+valid_indices = [i for i in range(n_specs) if i not in [334, 464]]
+all_times = dataset.jdb.cpu().numpy()
+times = all_times[valid_indices]
+
+# Calcul des périodogrammes pour toutes les composantes latentes
+periodogram_data = compute_latent_periodogram(
+    latent_vectors=latent_s,
+    times=times,
+    component_indices=None,  # Toutes les composantes
+)
+
+# Analyse des pics significatifs
+known_periods = get_transit_periods("STAR1136")
+analysis_results = analyze_latent_periodogram_peaks(
+    periodogram_data=periodogram_data,
+    known_periods=known_periods,
+    threshold_ratio=0.1,  # Pics > 10% du maximum
+    top_n_components=6
+)
+
+# Visualisation d'ensemble des composantes les plus significatives
+plot_latent_periodogram_overview(
+    periodogram_data=periodogram_data,
+    analysis_results=analysis_results,
+    n_top_components=6,
+    save_path="reports/figures/latent_periodograms_overview.png",
+    show_plot=True
+)
+
+# Analyse détaillée d'une composante spécifique (par exemple, la plus significative)
+if analysis_results["most_significant_component"] is not None:
+    most_significant = analysis_results["most_significant_component"]
+    plot_latent_periodogram_zoom(
+        periodogram_data=periodogram_data,
+        analysis_results=analysis_results,
+        component_idx=most_significant,
+        known_periods=known_periods,
+        save_path=f"reports/figures/latent_periodogram_zoom_comp_{most_significant}.png",
+        show_plot=True
+    )
+
 # Périodes connues
 known_periods = get_transit_periods("STAR1136")
+
+# 8. Analyse spécialisée pour des composantes spécifiques
+specific_components = [0, 1, 2, 5, 10]  # Analyser des composantes spécifiques
+periodogram_data_specific = compute_latent_periodogram(
+    latent_vectors=latent_s,
+    times=times,
+    component_indices=specific_components,
+)
+
+analysis_specific = analyze_latent_periodogram_peaks(
+    periodogram_data=periodogram_data_specific,
+    known_periods=known_periods,
+    top_n_components=3
+)
+
+# Créer des zooms pour chaque composante d'intérêt
+for comp_idx in specific_components[:3]:  # Top 3 seulement
+    plot_latent_periodogram_zoom(
+        periodogram_data=periodogram_data_specific,
+        analysis_results=analysis_specific,
+        component_idx=comp_idx,
+        known_periods=known_periods,
+        save_path=f"reports/figures/latent_zoom_comp_{comp_idx}.png",
+        show_plot=False
+    )
+
+print("Résumé de l'analyse des composantes latentes:")
+print(f"- Dimension latente totale: {latent_s.shape[1]}D")
+print(f"- Composantes avec pics significatifs: {analysis_results['summary']['components_with_peaks']}")
+print(f"- Composante la plus significative: {analysis_results['summary']['most_significant_component']}")
+print(f"- Nombre moyen de pics par composante: {analysis_results['summary']['avg_peaks_per_component']:.1f}")
 """
