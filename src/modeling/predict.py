@@ -1672,15 +1672,19 @@ def main(
     Returns:
         dict: Résultats de l'analyse
     """
-    import argparse
     import os
+    import sys
 
     # Configuration par défaut des outliers
     if remove_outliers is None:
         remove_outliers = [334, 464]
 
-    # Gestion des arguments via argparse si appelé en ligne de commande
-    if cfg_name is None:
+    # Gestion des arguments via argparse SEULEMENT si appelé en ligne de commande
+    # (pas dans un notebook)
+    if cfg_name is None and checkpoint_path is None and len(sys.argv) > 1:
+        # Mode ligne de commande détecté
+        import argparse
+
         parser = argparse.ArgumentParser(
             description="Analyse AESTRA avec auto-détection des checkpoints"
         )
