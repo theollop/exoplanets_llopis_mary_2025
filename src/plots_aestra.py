@@ -725,6 +725,7 @@ def plot_latent_space_3d(
     rv_values,
     save_path=None,  # Sera déterminé automatiquement depuis l'expérience
     show_plot=False,
+    decorrelated=False,
 ):
     """
     Crée un plot 3D de l'espace latent avec projections 2D, coloré selon les valeurs RV.
@@ -771,7 +772,9 @@ def plot_latent_space_3d(
     ax_3d.set_xlabel("S₁")
     ax_3d.set_ylabel("S₂")
     ax_3d.set_zlabel("S₃")
-    ax_3d.set_title("Espace latent 3D coloré par V_encode [m/s]")
+    ax_3d.set_title(
+        f"Espace latent 3D coloré par V_encode [m/s] {'DECORRELATED' if decorrelated else ''}"
+    )
 
     # Colorbar pour le plot 3D
     cbar_3d = plt.colorbar(scatter_3d, ax=ax_3d, shrink=0.6)

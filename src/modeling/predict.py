@@ -1329,18 +1329,24 @@ def analyze_latent_space_from_checkpoint(
         decorrelate_rv=decorrelate_rv,
     )
 
-    # Choix des RV à utiliser pour la visualisation
-    rv_for_plot = (
-        rv_corrected if decorrelate_rv and rv_corrected is not None else rv_values
-    )
-
     # Création du plot 3D si possible
     plot_created = plot_latent_space_3d(
         latent_s=latent_s,
-        rv_values=rv_for_plot,
+        rv_values=rv_values,
         save_path=save_path,
         show_plot=show_plot,
     )
+    if decorrelate_rv and rv_corrected is not None:
+        base_path = save_path.replace(".png", "")
+        corrected_save_path = f"{base_path}_corrected.png"
+
+        plot_latent_space_3d(
+            latent_s=latent_s,
+            rv_values=rv_corrected,
+            save_path=corrected_save_path,
+            show_plot=show_plot,
+            decorrelated=True,
+        )
 
     # Retour des résultats
     results = {
@@ -1640,28 +1646,193 @@ def full_analysis_from_checkpoint(
 # =============================================================================
 
 
+def main(
+    cfg_name=None,
+    checkpoint_path=None,
+    star_name="STAR1136",
+    show_plots=True,
+    remove_outliers=None,
+    decorrelate_rv=True,
+    data_root_dir="data",
+    analysis_type="full",
+):
+    """
+    Fonction principale d'analyse AESTRA compatible avec les notebooks.
+
+    Args:
+        cfg_name: Nom de la configuration (ex: "colab_config", "base_config")
+        checkpoint_path: Chemin vers le checkpoint (optionnel, auto-détecté si cfg_name fourni)
+        star_name: Nom de l'étoile à analyser
+        show_plots: Afficher les plots interactifs
+        remove_outliers: Liste des indices à supprimer (défaut [334, 464])
+        decorrelate_rv: Appliquer la décorrélation des RV
+        data_root_dir: Répertoire racine des données
+        analysis_type: Type d'analyse ("full", "periodogram", "latent", "activity")
+
+    Returns:
+        dict: Résultats de l'analyse
+    """
+    import argparse
+    import os
+
+    # Configuration par défaut des outliers
+    if remove_outliers is None:
+        remove_outliers = [334, 464]
+
+    # Gestion des arguments via argparse si appelé en ligne de commande
+    if cfg_name is None:
+        parser = argparse.ArgumentParser(
+            description="Analyse AESTRA avec auto-détection des checkpoints"
+        )
+        parser.add_argument(
+            "--cfg_name",
+            help="Nom de l'expérience (ex: colab_config)",
+            default="base_config",
+        )
+        parser.add_argument(
+            "--checkpoint_path", help="Chemin vers un checkpoint spécifique (optionnel)"
+        )
+        parser.add_argument(
+            "--star_name", default="STAR1136", help="Nom de l'étoile à analyser"
+        )
+        parser.add_argument(
+            "--show_plots", action="store_true", help="Afficher les plots interactifs"
+        )
+        parser.add_argument(
+            "--no_remove_outliers",
+            action="store_true",
+            help="Ne pas supprimer les outliers par défaut",
+        )
+        parser.add_argument(
+            "--no_decorrelate",
+            action="store_true",
+            help="Ne pas appliquer la décorrélation des RV",
+        )
+        parser.add_argument(
+            "--data_root_dir", default="data", help="Répertoire racine des données"
+        )
+        parser.add_argument(
+            "--analysis_type",
+            choices=["full", "periodogram", "latent", "activity"],
+            default="full",
+            help="Type d'analyse à effectuer",
+        )
+
+        args = parser.parse_args()
+        cfg_name = args.cfg_name
+        checkpoint_path = args.checkpoint_path or checkpoint_path
+        star_name = args.star_name
+        show_plots = args.show_plots
+        remove_outliers = [] if args.no_remove_outliers else remove_outliers
+        decorrelate_rv = not args.no_decorrelate
+        data_root_dir = args.data_root_dir
+        analysis_type = args.analysis_type
+
+    print(f"🔍 AESTRA Analysis - Experiment: {cfg_name}")
+    print(f"📊 Analysis type: {analysis_type}")
+    print(f"⭐ Star: {star_name}")
+    print(f"🚫 Remove outliers: {remove_outliers}")
+    print(f"🔧 Decorrelate RV: {decorrelate_rv}")
+
+    # Auto-détection du checkpoint si non fourni
+    if checkpoint_path is None:
+        # Essayer plusieurs chemins possibles
+        possible_paths = [
+            f"experiments/aestra_{cfg_name}_experiment/models/aestra_{cfg_name}_final.pth",
+            f"experiments/aestra_{cfg_name}/models/aestra_{cfg_name}_final.pth",
+            f"models/aestra_{cfg_name}_final.pth",
+            f"models/aestra_{cfg_name}_phase_joint_epoch_200.pth",
+            f"models/aestra_{cfg_name}_phase_joint_epoch_100.pth",
+        ]
+
+        for path in possible_paths:
+            if os.path.exists(path):
+                checkpoint_path = path
+                print(f"✅ Checkpoint auto-détecté: {checkpoint_path}")
+                break
+
+        if checkpoint_path is None:
+            raise FileNotFoundError(
+                f"Aucun checkpoint trouvé pour {cfg_name}. Chemins testés:\n"
+                + "\n".join(f"  - {p}" for p in possible_paths)
+            )
+    else:
+        print(f"📂 Checkpoint fourni: {checkpoint_path}")
+
+    # Vérification de l'existence du checkpoint
+    if not os.path.exists(checkpoint_path):
+        raise FileNotFoundError(f"Checkpoint non trouvé: {checkpoint_path}")
+
+    # Exécution de l'analyse selon le type demandé
+    try:
+        if analysis_type == "full":
+            print("\n🚀 Lancement de l'analyse complète...")
+            results = full_analysis_from_checkpoint(
+                checkpoint_path=checkpoint_path,
+                star_name=star_name,
+                show_plots=show_plots,
+                data_root_dir=data_root_dir,
+                remove_outliers=remove_outliers,
+                decorrelate_rv=decorrelate_rv,
+            )
+
+        elif analysis_type == "periodogram":
+            print("\n📈 Analyse du périodogramme RV...")
+            results = analyze_rv_periodogram_from_checkpoint(
+                checkpoint_path=checkpoint_path,
+                star_name=star_name,
+                show_plot=show_plots,
+                data_root_dir=data_root_dir,
+                remove_outliers=remove_outliers,
+                decorrelate_rv=decorrelate_rv,
+            )
+
+        elif analysis_type == "latent":
+            print("\n🎯 Analyse de l'espace latent...")
+            results = analyze_latent_space_from_checkpoint(
+                checkpoint_path=checkpoint_path,
+                show_plot=show_plots,
+                data_root_dir=data_root_dir,
+                remove_outliers=remove_outliers,
+                decorrelate_rv=decorrelate_rv,
+            )
+
+        elif analysis_type == "activity":
+            print("\n🌟 Analyse des signaux d'activité...")
+            results = analyze_activity_signals_from_checkpoint(
+                checkpoint_path=checkpoint_path,
+                show_plot=show_plots,
+                data_root_dir=data_root_dir,
+                remove_outliers=remove_outliers,
+            )
+
+        print(f"\n✅ Analyse '{analysis_type}' terminée avec succès!")
+
+        # Affichage du résumé pour l'analyse complète
+        if analysis_type == "full" and "periodogram" in results:
+            print(
+                f"🎯 Meilleure période détectée: {results['periodogram']['best_period']:.2f} jours"
+            )
+            if "latent_space" in results:
+                print(
+                    f"📐 Dimension de l'espace latent: {results['latent_space']['latent_dim']}D"
+                )
+                print(
+                    f"📊 Nombre de spectres analysés: {results['latent_space']['n_spectra']}"
+                )
+
+        return results
+
+    except Exception as e:
+        print(f"❌ Erreur lors de l'analyse: {str(e)}")
+        raise
+
+
 if __name__ == "__main__":
-    # Exemple d'utilisation - analyse complète
-    checkpoint_path = (
-        "experiments/aestra_local_experiment/models/aestra_base_config_final.pth"
+    # Appel de la fonction main pour l'exécution en ligne de commande
+    main(
+        checkpoint_path="experiments/aestra_local_experiment/models/aestra_base_config_final.pth"
     )
-
-    # Analyse complète avec suppression des outliers par défaut
-    results = full_analysis_from_checkpoint(
-        checkpoint_path=checkpoint_path,
-        star_name="STAR1136",
-        save_dir="experiments/aestra_local_experiment/figures",
-        show_plots=True,
-        remove_outliers=[334, 464],  # Suppression des outliers par défaut
-        decorrelate_rv=True,
-    )
-
-    print("\n✅ Analyse terminée. Résultats sauvegardés dans reports/figures/")
-    print(
-        f"Meilleure période détectée: {results['periodogram']['best_period']:.2f} jours"
-    )
-    print(f"Dimension de l'espace latent: {results['latent_space']['latent_dim']}D")
-    print(f"Nombre de spectres analysés: {results['latent_space']['n_spectra']}")
 
 
 # =============================================================================
