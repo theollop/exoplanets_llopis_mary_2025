@@ -10,15 +10,15 @@
 # --------------------------------------------------------------------------
 data_root_dir: "/content/drive/MyDrive/PFE/data"     # Répertoire racine des données (peut être modifié pour Colab)
 wavemin: 5000.0           # Longueur d'onde minimale (nm)
-wavemax: 5050.0           # Longueur d'onde maximale (nm)
+wavemax: 5500.0           # Longueur d'onde maximale (nm)
 data_dtype: float32       # Type numpy/torch du tableau des spectres (float16/float32/float64)
 
-checkpoint_every: 100       # Fréquence de sauvegarde des checkpoints (en epochs)
+checkpoint_every: 20       # Fréquence de sauvegarde des checkpoints (en epochs)
 
 # --------------------------------------------------------------------------
 # DataLoader
 # --------------------------------------------------------------------------
-batch_size: 64            # Nombre d'échantillons par batch
+batch_size: 32            # Nombre d'échantillons par batch
 shuffle: false            # True pour mélanger à chaque epoch
 
 # --------------------------------------------------------------------------
@@ -57,24 +57,24 @@ grad_scaler_backoff_factor: 0.5 # Facteur de réduction du scaler
 grad_scaler_growth_interval: 2000 # Intervalle de croissance du scaler
 
 # --------------------------------------------------------------------------
-# Plotting
+# Output Organization
 # --------------------------------------------------------------------------
-plot_every: 100            # Fréquence de plotting (en epochs)
-plot_dir: "/content/drive/MyDrive/PFE/reports/figures"  # Répertoire pour sauver les plots
-
-# --------------------------------------------------------------------------
-# Plotting des spectres avec raies G2
-# --------------------------------------------------------------------------
-zoom_window_angstrom: 10  # Taille de la fenêtre de zoom en Angstrom
-n_line_zoom_plots: 6      # Nombre de plots de raies zoomées dans la mosaïque
-plot_ultra_zoom: true     # Activer le zoom ultra-précis pour l'analyse Doppler
+output_root_dir: "/content/drive/MyDrive/PFE/experiments"                                # Répertoire racine pour tous les outputs (local)
+# Pour Colab, changer vers: "/content/drive/MyDrive/PFE/experiments"
+experiment_name: "aestra_colab_experiment"                 # Nom de l'expérience (créera un sous-dossier)
+# Structure créée automatiquement :
+# output_root_dir/experiment_name/
+# ├── models/          # Checkpoints et modèles finaux
+# ├── figures/         # Plots d'entraînement
+# ├── spectra/         # Plots de spectres
+# ├── logs/            # Fichiers CSV des losses
+# └── config.yaml      # Copie de la configuration utilisée
 
 # --------------------------------------------------------------------------
 # Logging des losses
 # --------------------------------------------------------------------------
 save_losses_csv: true     # Sauver les losses dans un fichier CSV
-csv_save_every: 100       # Fréquence de sauvegarde CSV (en epochs)
-csv_dir: "/content/drive/MyDrive/PFE/reports/logs"   # Répertoire pour les fichiers CSV
+csv_save_every: 20       # Fréquence de sauvegarde CSV (en epochs)
 
 # --------------------------------------------------------------------------
 # Phases d'entraînement
@@ -83,7 +83,7 @@ csv_dir: "/content/drive/MyDrive/PFE/reports/logs"   # Répertoire pour les fich
 # hyperparamètres de scheduler et réglages de trainabilité.
 phases:
   - name: rvonly
-    n_epochs: 200
+    n_epochs: 40
     optimizer: "torch.optim.Adam"                # Chemin complet de la classe
     optimizer_kwargs:
       lr: 0.0001
@@ -97,7 +97,7 @@ phases:
 
 
   - name: joint
-    n_epochs: 200
+    n_epochs: 100
     optimizer: "torch.optim.Adam"
     optimizer_kwargs:
       lr: 0.0001
@@ -108,5 +108,4 @@ phases:
     scheduler_kwargs:
       step_size: 50
       gamma: 0.7
-    plot_spectra_every: 200     # Plot des spectres toutes les X epochs (0 = désactivé)
-    spectra_plot_dir: "/content/drive/MyDrive/PFE/reports/spectra"  # Répertoire pour les plots de spectres
+    plot_spectra_every: 10     # Plot des spectres toutes les X epochs (0 = désactivé)

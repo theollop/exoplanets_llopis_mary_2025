@@ -36,6 +36,48 @@ from src.plots_aestra import plot_losses, plot_aestra_analysis
 console = Console()
 
 
+def setup_experiment_directories(config, config_name):
+    """
+    Crée la structure de dossiers pour une expérience d'entraînement.
+
+    Args:
+        config: Configuration de l'expérience
+        config_name: Nom du fichier de configuration
+
+    Returns:
+        dict: Dictionnaire avec les chemins des dossiers créés
+    """
+    # Nom de l'expérience depuis la config ou défaut
+    experiment_name = config.get("experiment_name", f"experiment_{config_name}")
+    output_root = config.get("output_root_dir", "experiments")
+
+    # Dossier principal de l'expérience
+    exp_dir = os.path.join(output_root, experiment_name)
+
+    # Structure des sous-dossiers
+    subdirs = {
+        "experiment_dir": exp_dir,
+        "models_dir": os.path.join(exp_dir, "models"),
+        "figures_dir": os.path.join(exp_dir, "figures"),
+        "spectra_dir": os.path.join(exp_dir, "spectra"),
+        "logs_dir": os.path.join(exp_dir, "logs"),
+    }
+
+    # Créer tous les dossiers
+    for dir_path in subdirs.values():
+        os.makedirs(dir_path, exist_ok=True)
+
+    # Sauvegarder la configuration utilisée dans le dossier d'expérience
+    config_save_path = os.path.join(exp_dir, f"{config_name}_config.yaml")
+    with open(config_save_path, "w") as f:
+        yaml.dump(config, f, default_flow_style=False, indent=2)
+
+    console.print(f"📁 Structure d'expérience créée dans: {exp_dir}")
+    console.print(f"📋 Configuration sauvegardée: {config_save_path}")
+
+    return subdirs
+
+
 def save_experiment_checkpoint(
     model,
     optimizer,
@@ -47,6 +89,7 @@ def save_experiment_checkpoint(
     phase_name,
     scaler=None,
     path=None,
+    exp_dirs=None,
 ):
     """
     Sauvegarde complète d'une expérience avec config et dataset.
@@ -62,9 +105,17 @@ def save_experiment_checkpoint(
         phase_name: Nom de la phase actuelle
         scaler: Le GradScaler pour mixed precision (peut être None)
         path: Chemin de sauvegarde (optionnel)
+        exp_dirs: Dictionnaire des dossiers d'expérience
     """
     if path is None:
-        path = f"models/aestra_{cfg_name}_phase_{phase_name}_epoch_{epoch}.pth"
+        if exp_dirs is not None:
+            path = os.path.join(
+                exp_dirs["models_dir"],
+                f"aestra_{cfg_name}_phase_{phase_name}_epoch_{epoch}.pth",
+            )
+        else:
+            # Fallback vers l'ancien système
+            path = f"models/aestra_{cfg_name}_phase_{phase_name}_epoch_{epoch}.pth"
 
     # Sauvegarde du checkpoint standard
     save_checkpoint(model, optimizer, path, scheduler)
@@ -263,7 +314,14 @@ def create_grad_scaler(config):
 
 
 def train_phase(
-    model, dataset, dataloader, phase_config, config, cfg_name, start_epoch=0
+    model,
+    dataset,
+    dataloader,
+    phase_config,
+    config,
+    cfg_name,
+    start_epoch=0,
+    exp_dirs=None,
 ):
     """Entraîne le modèle pour une phase donnée avec support de la mixed precision."""
     phase_name = phase_config["name"]
@@ -400,7 +458,11 @@ def train_phase(
                 "plot_every", 0
             )  # Par défaut pas de plots (0 = désactivé)
             if plot_every > 0 and (epoch + 1) % plot_every == 0:
-                plot_dir = config.get("plot_dir", "reports/figures")
+                plot_dir = (
+                    exp_dirs["figures_dir"]
+                    if exp_dirs
+                    else config.get("plot_dir", "reports/figures")
+                )
                 plot_losses(
                     losses_history, cfg_name, phase_name, epoch + 1, plot_dir, console
                 )
@@ -408,8 +470,10 @@ def train_phase(
             # Plots de spectres périodiques
             plot_spectra_every = phase_config.get("plot_spectra_every", 0)
             if plot_spectra_every > 0 and (epoch + 1) % plot_spectra_every == 0:
-                spectra_plot_dir = phase_config.get(
-                    "spectra_plot_dir", "reports/spectra"
+                spectra_plot_dir = (
+                    exp_dirs["spectra_dir"]
+                    if exp_dirs
+                    else phase_config.get("spectra_plot_dir", "reports/spectra")
                 )
                 plot_aestra_analysis(
                     batch,
@@ -425,7 +489,11 @@ def train_phase(
             # Sauvegarde CSV périodique
             csv_save_every = config.get("csv_save_every", 0)  # Par défaut pas de CSV
             if csv_save_every > 0 and (epoch + 1) % csv_save_every == 0:
-                csv_dir = config.get("csv_dir", "reports/logs")
+                csv_dir = (
+                    exp_dirs["logs_dir"]
+                    if exp_dirs
+                    else config.get("csv_dir", "reports/logs")
+                )
                 save_losses_to_csv(
                     losses_history, cfg_name, phase_name, epoch + 1, csv_dir, config
                 )
@@ -442,6 +510,7 @@ def train_phase(
                     epoch + 1,
                     phase_name,
                     scaler,
+                    exp_dirs=exp_dirs,
                 )
                 # ⚠️ CRITIQUE: Nettoyage de la mémoire GPU après sauvegarde
                 clear_gpu_memory()
@@ -462,12 +531,18 @@ def train_phase(
     # Plot final de la phase
     plot_every = config.get("plot_every", 0)
     if plot_every > 0:
-        plot_dir = config.get("plot_dir", "reports/figures")
+        plot_dir = (
+            exp_dirs["figures_dir"]
+            if exp_dirs
+            else config.get("plot_dir", "reports/figures")
+        )
         plot_losses(losses_history, cfg_name, phase_name, n_epochs, plot_dir, console)
 
     # Sauvegarde CSV finale de la phase
     if config.get("save_losses_csv", False):
-        csv_dir = config.get("csv_dir", "reports/logs")
+        csv_dir = (
+            exp_dirs["logs_dir"] if exp_dirs else config.get("csv_dir", "reports/logs")
+        )
         save_losses_to_csv(
             losses_history, cfg_name, phase_name, n_epochs, csv_dir, config
         )
@@ -524,12 +599,18 @@ def main(cfg_name=None, checkpoint=None, device="cuda"):
         start_epoch = exp_data["epoch"]
         current_phase = exp_data["current_phase"]
 
+        # Récupérer la structure de dossiers depuis la config
+        exp_dirs = setup_experiment_directories(config, args.cfg_name)
+
         console.log(f"🔄 Resuming from epoch {start_epoch}, phase '{current_phase}'")
 
     else:
         # Nouvelle expérience
         config = load_config(args.cfg_name)
         console.log("✅ Configuration chargée avec succès")
+
+        # Configuration de la structure de dossiers pour l'expérience
+        exp_dirs = setup_experiment_directories(config, args.cfg_name)
 
         current_phase = None
         start_epoch = 0
@@ -619,6 +700,7 @@ def main(cfg_name=None, checkpoint=None, device="cuda"):
                     config,
                     args.cfg_name,
                     start_epoch,
+                    exp_dirs,
                 )
                 phase_found = True
 
@@ -632,6 +714,7 @@ def main(cfg_name=None, checkpoint=None, device="cuda"):
                         config,
                         args.cfg_name,
                         0,
+                        exp_dirs,
                     )
                 break
 
@@ -641,17 +724,37 @@ def main(cfg_name=None, checkpoint=None, device="cuda"):
             )
             for phase_config in config["phases"]:
                 train_phase(
-                    model, dataset, dataloader, phase_config, config, args.cfg_name, 0
+                    model,
+                    dataset,
+                    dataloader,
+                    phase_config,
+                    config,
+                    args.cfg_name,
+                    0,
+                    exp_dirs,
                 )
     else:
         # Nouvel entraînement - toutes les phases depuis le début
         for phase_config in config["phases"]:
             train_phase(
-                model, dataset, dataloader, phase_config, config, args.cfg_name, 0
+                model,
+                dataset,
+                dataloader,
+                phase_config,
+                config,
+                args.cfg_name,
+                0,
+                exp_dirs,
             )
 
     # Sauvegarde finale
-    final_path = f"models/aestra_{args.cfg_name}_final.pth"
+    if "exp_dirs" in locals():
+        final_path = os.path.join(
+            exp_dirs["models_dir"], f"aestra_{args.cfg_name}_final.pth"
+        )
+    else:
+        final_path = f"models/aestra_{args.cfg_name}_final.pth"
+
     # Pour la sauvegarde finale, on sauve juste le modèle et la config
     ckpt = {
         "model_state_dict": model.state_dict(),

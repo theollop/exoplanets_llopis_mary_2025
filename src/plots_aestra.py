@@ -723,7 +723,7 @@ def plot_activity_perturbation(
 def plot_latent_space_3d(
     latent_s,
     rv_values,
-    save_path="reports/figures/latent_space_3d.png",
+    save_path=None,  # Sera déterminé automatiquement depuis l'expérience
     show_plot=False,
 ):
     """
@@ -733,7 +733,7 @@ def plot_latent_space_3d(
     Args:
         latent_s: Array numpy des vecteurs latents (N, D)
         rv_values: Array numpy des valeurs RV correspondantes (N,)
-        save_path: Chemin pour sauvegarder la figure
+        save_path: Chemin pour sauvegarder la figure (None pour utiliser le répertoire par défaut)
         show_plot: Afficher la figure ou non
 
     Returns:
@@ -745,6 +745,10 @@ def plot_latent_space_3d(
     if latent_s.shape[1] < 3:
         print(f"⚠️  L'espace latent n'est que {latent_s.shape[1]}D, plot 3D impossible")
         return False
+
+    # Détermination automatique du chemin de sauvegarde si non fourni
+    if save_path is None:
+        save_path = "reports/figures/latent_space_3d.png"
 
     # Prendre les 3 premières dimensions
     s1, s2, s3 = latent_s[:, 0], latent_s[:, 1], latent_s[:, 2]
@@ -773,7 +777,39 @@ def plot_latent_space_3d(
     cbar_3d = plt.colorbar(scatter_3d, ax=ax_3d, shrink=0.6)
     cbar_3d.set_label("V_encode [m/s]")
 
-    # Projections 2D
+    # Fonction pour calculer et tracer la corrélation
+    def add_correlation_analysis(ax, x_data, y_data, x_label, y_label):
+        """Ajoute la corrélation et la droite de régression à un subplot."""
+        # Calcul de la corrélation de Pearson
+        correlation = np.corrcoef(x_data, y_data)[0, 1]
+
+        # Régression linéaire (polyfit de degré 1)
+        slope, intercept = np.polyfit(x_data, y_data, 1)
+
+        # Points pour tracer la droite de régression
+        x_range = np.linspace(x_data.min(), x_data.max(), 100)
+        y_fit = slope * x_range + intercept
+
+        # Tracer la droite de régression en rouge pointillé
+        ax.plot(
+            x_range,
+            y_fit,
+            "r--",
+            linewidth=2,
+            alpha=0.8,
+            label=f"R={correlation:.3f}, slope={slope:.3f}",
+        )
+
+        # Mise à jour du titre avec la corrélation
+        current_title = ax.get_title()
+        ax.set_title(f"{current_title}\nR={correlation:.3f}")
+
+        # Ajout de la légende
+        ax.legend(fontsize=8, loc="best")
+
+        return correlation, slope
+
+    # Projections 2D avec corrélations
     # Projection S1 vs S2
     ax_12 = fig.add_subplot(2, 3, 2)
     ax_12.scatter(
@@ -783,6 +819,7 @@ def plot_latent_space_3d(
     ax_12.set_ylabel("S₂")
     ax_12.set_title("Projection S₁-S₂")
     ax_12.grid(True, alpha=0.3)
+    corr_12, slope_12 = add_correlation_analysis(ax_12, s1, s2, "S₁", "S₂")
 
     # Projection S1 vs S3
     ax_13 = fig.add_subplot(2, 3, 3)
@@ -793,6 +830,7 @@ def plot_latent_space_3d(
     ax_13.set_ylabel("S₃")
     ax_13.set_title("Projection S₁-S₃")
     ax_13.grid(True, alpha=0.3)
+    corr_13, slope_13 = add_correlation_analysis(ax_13, s1, s3, "S₁", "S₃")
 
     # Projection S2 vs S3
     ax_23 = fig.add_subplot(2, 3, 6)
@@ -803,6 +841,7 @@ def plot_latent_space_3d(
     ax_23.set_ylabel("S₃")
     ax_23.set_title("Projection S₂-S₃")
     ax_23.grid(True, alpha=0.3)
+    corr_23, slope_23 = add_correlation_analysis(ax_23, s2, s3, "S₂", "S₃")
 
     # Histogramme des valeurs RV
     ax_hist = fig.add_subplot(2, 3, 5)
@@ -823,7 +862,12 @@ def plot_latent_space_3d(
     ax_hist.grid(True, alpha=0.3)
     ax_hist.legend(fontsize=8)
 
-    # Statistiques textuelles simplifiées
+    # Calcul des corrélations avec les valeurs RV
+    corr_s1_rv = np.corrcoef(s1, rv_values)[0, 1]
+    corr_s2_rv = np.corrcoef(s2, rv_values)[0, 1]
+    corr_s3_rv = np.corrcoef(s3, rv_values)[0, 1]
+
+    # Statistiques textuelles avec corrélations
     stats_text = f"""Statistiques:
 N spectres: {len(rv_values)}
 RV:
@@ -831,7 +875,17 @@ RV:
   Max: {np.max(rv_values):.3f} m/s
   Mean: {np.mean(rv_values):.3f} m/s
   Std: {np.std(rv_values):.3f} m/s
-Dim latente: {latent_s.shape[1]}D"""
+Dim latente: {latent_s.shape[1]}D
+
+Corrélations entre dimensions:
+  S₁-S₂: R={corr_12:.3f}
+  S₁-S₃: R={corr_13:.3f}
+  S₂-S₃: R={corr_23:.3f}
+
+Corrélations avec RV:
+  S₁-RV: R={corr_s1_rv:.3f}
+  S₂-RV: R={corr_s2_rv:.3f}
+  S₃-RV: R={corr_s3_rv:.3f}"""
 
     ax_hist.text(
         0.05,
@@ -864,24 +918,128 @@ def plot_rv_periodogram(
     rv_values,
     times,
     known_periods=None,
-    save_path="reports/figures/rv_periodogram_with_known_periods.png",
+    save_path=None,  # Sera déterminé automatiquement depuis l'expérience
     show_plot=False,
+    periods_corr=None,
+    power_corr=None,
+    rv_corrected=None,
+    decorrelate_applied=False,
 ):
     """
     Trace le périodogramme des vitesses radiales avec des zooms sur les périodes d'intérêt.
+    Supporte la comparaison entre RV originales et décorrélées.
 
     Args:
-        periods: Périodes en jours
-        power: Puissance du périodogramme
-        rv_values: Valeurs de vitesses radiales
+        periods: Périodes en jours (RV originales)
+        power: Puissance du périodogramme (RV originales)
+        rv_values: Valeurs de vitesses radiales originales
         times: Temps JDB
         known_periods: Liste des périodes connues des planètes (optionnel)
-        save_path: Chemin pour sauvegarder la figure
+        save_path: Chemin pour sauvegarder la figure (None pour utiliser le répertoire par défaut)
         show_plot: Afficher la figure ou non
+        periods_corr: Périodes pour RV décorrélées (optionnel)
+        power_corr: Puissance pour RV décorrélées (optionnel)
+        rv_corrected: RV décorrélées (optionnel)
+        decorrelate_applied: Si True, affiche la comparaison entre original et décorrélé
     """
 
+    # Détermination automatique du chemin de sauvegarde si non fourni
+    if save_path is None:
+        save_path = "reports/figures/rv_periodogram_with_known_periods.png"
+
     # Création de la figure avec plusieurs sous-graphiques
-    if known_periods is not None and len(known_periods) > 0:
+    if decorrelate_applied and power_corr is not None:
+        # Mode comparaison avec décorrélation et zooms sur périodes connues
+        fig = plt.figure(figsize=(20, 16))
+
+        # 1. Périodogrammes superposés (haut, large)
+        ax1 = plt.subplot(4, 3, (1, 3))
+        ax1.semilogx(periods, power, "b-", linewidth=1.0, label="RV originales")
+        ax1.semilogx(
+            periods_corr, power_corr, "r-", linewidth=1.0, label="RV décorrélées"
+        )
+        ax1.set_xlabel("Période (jours)")
+        ax1.set_ylabel("Puissance LS")
+        ax1.set_title("Comparaison des périodogrammes - RV originales vs décorrélées")
+        ax1.grid(True, alpha=0.3)
+        ax1.legend()
+
+        # Marquer les périodes connues
+        if known_periods is not None and len(known_periods) > 0:
+            for i, period in enumerate(known_periods):
+                if periods.min() <= period <= periods.max():
+                    ax1.axvline(
+                        period,
+                        color="green",
+                        linestyle="--",
+                        alpha=0.8,
+                        linewidth=2,
+                        label=f"Planète {i + 1}: {period:.1f}j" if i < 3 else "",
+                    )
+            if len(known_periods) <= 3:
+                ax1.legend()
+
+        # 2. Zooms sur les périodes connues (ligne du milieu)
+        if known_periods is not None and len(known_periods) > 0:
+            for i, period in enumerate(known_periods[:3]):  # Max 3 zooms
+                ax_zoom = plt.subplot(4, 3, 4 + i)
+
+                # Fenêtre de zoom : ±20% autour de la période
+                zoom_min = period * 0.8
+                zoom_max = period * 1.2
+                zoom_mask = (periods >= zoom_min) & (periods <= zoom_max)
+                zoom_mask_corr = (periods_corr >= zoom_min) & (periods_corr <= zoom_max)
+
+                if np.any(zoom_mask) and np.any(zoom_mask_corr):
+                    ax_zoom.plot(
+                        periods[zoom_mask],
+                        power[zoom_mask],
+                        "b-",
+                        linewidth=1.5,
+                        label="Original",
+                    )
+                    ax_zoom.plot(
+                        periods_corr[zoom_mask_corr],
+                        power_corr[zoom_mask_corr],
+                        "r-",
+                        linewidth=1.5,
+                        label="Décorrélé",
+                    )
+                    ax_zoom.axvline(
+                        period, color="green", linestyle="--", alpha=0.8, linewidth=2
+                    )
+                    ax_zoom.set_xlabel("Période (jours)")
+                    ax_zoom.set_ylabel("Puissance LS")
+                    ax_zoom.set_title(f"Zoom Planète {i + 1}: {period:.1f}j")
+                    ax_zoom.grid(True, alpha=0.3)
+                    if i == 0:
+                        ax_zoom.legend(fontsize=8)
+
+        # 3. RV originales vs temps (bas gauche)
+        ax2 = plt.subplot(4, 2, 7)
+        ax2.plot(times, rv_values, "b-", linewidth=0.8, alpha=0.8)
+        ax2.scatter(
+            times[::20], rv_values[::20], c="blue", s=10, alpha=0.6
+        )  # Points espacés
+        ax2.set_xlabel("Temps (JDB)")
+        ax2.set_ylabel("RV originales (m/s)")
+        ax2.set_title(f"RV originales vs temps\n(std = {np.std(rv_values):.4f} m/s)")
+        ax2.grid(True, alpha=0.3)
+
+        # 4. RV décorrélées vs temps (bas droite)
+        ax3 = plt.subplot(4, 2, 8)
+        ax3.plot(times, rv_corrected, "r-", linewidth=0.8, alpha=0.8)
+        ax3.scatter(
+            times[::20], rv_corrected[::20], c="red", s=10, alpha=0.6
+        )  # Points espacés
+        ax3.set_xlabel("Temps (JDB)")
+        ax3.set_ylabel("RV décorrélées (m/s)")
+        ax3.set_title(
+            f"RV décorrélées vs temps\n(std = {np.std(rv_corrected):.4f} m/s)"
+        )
+        ax3.grid(True, alpha=0.3)
+
+    elif known_periods is not None and len(known_periods) > 0:
         fig = plt.figure(figsize=(18, 14))
 
         # Graphique principal du périodogramme
@@ -977,11 +1135,6 @@ def plot_rv_periodogram(
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
     plt.savefig(save_path, dpi=300, bbox_inches="tight")
     print(f"Périodogramme sauvegardé: {save_path}")
-
-    if show_plot:
-        plt.show()
-    else:
-        plt.close()
 
     if show_plot:
         plt.show()
