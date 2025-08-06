@@ -5,13 +5,15 @@ Ce module contient les fonctions de visualisation optimisées pour AESTRA :
 - Plotting des losses d'entraînement
 - Visualisation des spectres selon le papier AESTRA
 - Zoom ultra-précis pour l'analyse Doppler
+- Plot 3D de l'espace latent
+- Périodogramme des vitesses radiales
 """
 
 import os
 import numpy as np
 import matplotlib.pyplot as plt
 import torch
-from typing import Optional, Tuple
+from typing import Optional
 from src.interpolate import shift_spectra_linear
 
 
@@ -716,6 +718,270 @@ def plot_activity_perturbation(
     if save_path:
         plt.savefig(save_path, dpi=300, bbox_inches="tight")
         print(f"Figure 2 sauvegardée: {save_path}")
+
+
+def plot_latent_space_3d(
+    latent_s,
+    rv_values,
+    save_path="reports/figures/latent_space_3d.png",
+    show_plot=False,
+):
+    """
+    Crée un plot 3D de l'espace latent avec projections 2D, coloré selon les valeurs RV.
+    Ne fonctionne que si les vecteurs latents sont 3D ou plus.
+
+    Args:
+        latent_s: Array numpy des vecteurs latents (N, D)
+        rv_values: Array numpy des valeurs RV correspondantes (N,)
+        save_path: Chemin pour sauvegarder la figure
+        show_plot: Afficher la figure ou non
+
+    Returns:
+        bool: True si le plot a été créé, False si l'espace latent n'est pas 3D
+    """
+    print(f"Dimension de l'espace latent: {latent_s.shape[1]}")
+
+    # Vérifier si l'espace latent est au moins 3D
+    if latent_s.shape[1] < 3:
+        print(f"⚠️  L'espace latent n'est que {latent_s.shape[1]}D, plot 3D impossible")
+        return False
+
+    # Prendre les 3 premières dimensions
+    s1, s2, s3 = latent_s[:, 0], latent_s[:, 1], latent_s[:, 2]
+
+    # Utilisation directe des valeurs RV (les outliers sont déjà supprimés en amont)
+    print(f"RV range: [{np.min(rv_values):.3f}, {np.max(rv_values):.3f}] m/s")
+    print(f"Nombre de spectres: {len(rv_values)}")
+
+    # Création de la figure avec 4 sous-plots (1 en 3D + 3 projections 2D)
+    fig = plt.figure(figsize=(20, 15))
+
+    # Plot 3D principal (occupant la partie gauche)
+    ax_3d = fig.add_subplot(2, 3, (1, 4), projection="3d")
+
+    # Scatter plot 3D coloré selon les valeurs RV
+    scatter_3d = ax_3d.scatter(
+        s1, s2, s3, c=rv_values, cmap="viridis", s=20, alpha=0.7, edgecolors="none"
+    )
+
+    ax_3d.set_xlabel("S₁")
+    ax_3d.set_ylabel("S₂")
+    ax_3d.set_zlabel("S₃")
+    ax_3d.set_title("Espace latent 3D coloré par V_encode [m/s]")
+
+    # Colorbar pour le plot 3D
+    cbar_3d = plt.colorbar(scatter_3d, ax=ax_3d, shrink=0.6)
+    cbar_3d.set_label("V_encode [m/s]")
+
+    # Projections 2D
+    # Projection S1 vs S2
+    ax_12 = fig.add_subplot(2, 3, 2)
+    ax_12.scatter(
+        s1, s2, c=rv_values, cmap="viridis", s=15, alpha=0.7, edgecolors="none"
+    )
+    ax_12.set_xlabel("S₁")
+    ax_12.set_ylabel("S₂")
+    ax_12.set_title("Projection S₁-S₂")
+    ax_12.grid(True, alpha=0.3)
+
+    # Projection S1 vs S3
+    ax_13 = fig.add_subplot(2, 3, 3)
+    ax_13.scatter(
+        s1, s3, c=rv_values, cmap="viridis", s=15, alpha=0.7, edgecolors="none"
+    )
+    ax_13.set_xlabel("S₁")
+    ax_13.set_ylabel("S₃")
+    ax_13.set_title("Projection S₁-S₃")
+    ax_13.grid(True, alpha=0.3)
+
+    # Projection S2 vs S3
+    ax_23 = fig.add_subplot(2, 3, 6)
+    ax_23.scatter(
+        s2, s3, c=rv_values, cmap="viridis", s=15, alpha=0.7, edgecolors="none"
+    )
+    ax_23.set_xlabel("S₂")
+    ax_23.set_ylabel("S₃")
+    ax_23.set_title("Projection S₂-S₃")
+    ax_23.grid(True, alpha=0.3)
+
+    # Histogramme des valeurs RV
+    ax_hist = fig.add_subplot(2, 3, 5)
+
+    # Histogramme des valeurs RV
+    ax_hist.hist(
+        rv_values,
+        bins=50,
+        alpha=0.8,
+        color="skyblue",
+        edgecolor="black",
+        label="Distribution RV",
+    )
+
+    ax_hist.set_xlabel("V_encode [m/s]")
+    ax_hist.set_ylabel("Fréquence")
+    ax_hist.set_title("Distribution des vitesses radiales")
+    ax_hist.grid(True, alpha=0.3)
+    ax_hist.legend(fontsize=8)
+
+    # Statistiques textuelles simplifiées
+    stats_text = f"""Statistiques:
+N spectres: {len(rv_values)}
+RV:
+  Min: {np.min(rv_values):.3f} m/s
+  Max: {np.max(rv_values):.3f} m/s
+  Mean: {np.mean(rv_values):.3f} m/s
+  Std: {np.std(rv_values):.3f} m/s
+Dim latente: {latent_s.shape[1]}D"""
+
+    ax_hist.text(
+        0.05,
+        0.95,
+        stats_text,
+        transform=ax_hist.transAxes,
+        verticalalignment="top",
+        fontsize=9,
+        bbox=dict(boxstyle="round", facecolor="wheat", alpha=0.8),
+    )
+
+    plt.tight_layout()
+
+    # Sauvegarde
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    plt.savefig(save_path, dpi=300, bbox_inches="tight")
+    print(f"Plot 3D de l'espace latent sauvegardé: {save_path}")
+
+    if show_plot:
+        plt.show()
+    else:
+        plt.close()
+
+    return True
+
+
+def plot_rv_periodogram(
+    periods,
+    power,
+    rv_values,
+    times,
+    known_periods=None,
+    save_path="reports/figures/rv_periodogram_with_known_periods.png",
+    show_plot=False,
+):
+    """
+    Trace le périodogramme des vitesses radiales avec des zooms sur les périodes d'intérêt.
+
+    Args:
+        periods: Périodes en jours
+        power: Puissance du périodogramme
+        rv_values: Valeurs de vitesses radiales
+        times: Temps JDB
+        known_periods: Liste des périodes connues des planètes (optionnel)
+        save_path: Chemin pour sauvegarder la figure
+        show_plot: Afficher la figure ou non
+    """
+
+    # Création de la figure avec plusieurs sous-graphiques
+    if known_periods is not None and len(known_periods) > 0:
+        fig = plt.figure(figsize=(18, 14))
+
+        # Graphique principal du périodogramme
+        ax1 = plt.subplot(4, 3, (1, 3))
+        ax1.semilogx(periods, power, "b-", linewidth=0.8)
+        ax1.set_xlabel("Période (jours)")
+        ax1.set_ylabel("Puissance LS")
+        ax1.set_title("Périodogramme Lomb-Scargle des vitesses radiales")
+        ax1.grid(True, alpha=0.3)
+
+        # Marquer les périodes connues
+        for i, period in enumerate(known_periods):
+            if periods.min() <= period <= periods.max():
+                ax1.axvline(
+                    period,
+                    color="red",
+                    linestyle="--",
+                    alpha=0.7,
+                    label=f"Planète {i + 1}: {period:.1f}d",
+                )
+
+        ax1.legend()
+
+        # Graphique des vitesses radiales en fonction du temps
+        ax2 = plt.subplot(4, 3, (4, 6))
+        ax2.plot(times, rv_values, "ko-", markersize=2, linewidth=0.5)
+        ax2.set_xlabel("JDB")
+        ax2.set_ylabel("Vitesse radiale")
+        ax2.set_title("Série temporelle des vitesses radiales")
+        ax2.grid(True, alpha=0.3)
+
+        # Zooms sur les 3 périodes d'intérêt
+        zoom_positions = [7, 8, 9]  # Positions dans la grille 4x3
+        for i, period in enumerate(known_periods[:3]):
+            if periods.min() <= period <= periods.max() and i < 3:
+                ax_zoom = plt.subplot(4, 3, zoom_positions[i])
+
+                # Définir la fenêtre de zoom autour de la période connue
+                zoom_factor = 0.2  # ±20% autour de la période
+                period_min = period * (1 - zoom_factor)
+                period_max = period * (1 + zoom_factor)
+
+                # Masque pour la zone de zoom
+                zoom_mask = (periods >= period_min) & (periods <= period_max)
+
+                if np.any(zoom_mask):
+                    ax_zoom.plot(
+                        periods[zoom_mask], power[zoom_mask], "b-", linewidth=1.5
+                    )
+                    ax_zoom.axvline(
+                        period, color="red", linestyle="--", alpha=0.8, linewidth=2
+                    )
+                    ax_zoom.set_xlabel("Période (jours)")
+                    ax_zoom.set_ylabel("Puissance LS")
+                    ax_zoom.set_title(f"Zoom Planète {i + 1}: {period:.1f}d")
+                    ax_zoom.grid(True, alpha=0.3)
+
+                    # Trouver le pic local le plus proche
+                    local_max_idx = np.argmax(power[zoom_mask])
+                    if len(periods[zoom_mask]) > 0:
+                        local_max_period = periods[zoom_mask][local_max_idx]
+                        local_max_power = power[zoom_mask][local_max_idx]
+                        ax_zoom.plot(
+                            local_max_period,
+                            local_max_power,
+                            "ro",
+                            markersize=8,
+                            label=f"Max local: {local_max_period:.1f}d",
+                        )
+                        ax_zoom.legend(fontsize=8)
+
+    else:
+        # Si pas de périodes connues, graphique simple
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8))
+
+        # Périodogramme
+        ax1.semilogx(periods, power, "b-", linewidth=0.8)
+        ax1.set_xlabel("Période (jours)")
+        ax1.set_ylabel("Puissance LS")
+        ax1.set_title("Périodogramme Lomb-Scargle des vitesses radiales")
+        ax1.grid(True, alpha=0.3)
+
+        # Vitesses radiales
+        ax2.plot(times, rv_values, "ko-", markersize=3, linewidth=0.5)
+        ax2.set_xlabel("JDB")
+        ax2.set_ylabel("Vitesse radiale")
+        ax2.set_title("Série temporelle des vitesses radiales")
+        ax2.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+
+    # Sauvegarde
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    plt.savefig(save_path, dpi=300, bbox_inches="tight")
+    print(f"Périodogramme sauvegardé: {save_path}")
+
+    if show_plot:
+        plt.show()
+    else:
+        plt.close()
 
     if show_plot:
         plt.show()

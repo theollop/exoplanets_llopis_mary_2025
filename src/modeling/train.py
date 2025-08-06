@@ -89,7 +89,7 @@ def save_experiment_checkpoint(
     console.log(f"💾 Experiment checkpoint saved: {path}")
 
 
-def load_experiment_checkpoint(path, device="cuda"):
+def load_experiment_checkpoint(path, data_root_dir=None, device="cuda"):
     """
     Charge un checkpoint d'expérience complet.
 
@@ -105,6 +105,8 @@ def load_experiment_checkpoint(path, device="cuda"):
 
     # Reconstruction du dataset
     dataset_metadata = ckpt["dataset_metadata"]
+    if data_root_dir is not None:
+        dataset_metadata["data_root_dir"] = data_root_dir
     dataset = SpectrumDataset(**dataset_metadata)
 
     # Reconstruction du modèle

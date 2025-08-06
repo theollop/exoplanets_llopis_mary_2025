@@ -1,142 +1,134 @@
+"""
+Module d'analyse et de prédiction AESTRA.
+
+Ce module contient les fonctions principales pour analyser les modèles AESTRA entraînés :
+- Calcul des distances latentes (Figure 3)
+- Analyse de la perturbation d'activité (Figure 2)
+- Calcul du périodogramme des vitesses radiales
+- Visualisation 3D de l'espace latent
+
+Optimisé pour éviter les erreurs de mémoire (OOM) avec traitement par batches.
+"""
+
 import torch
-from src.modeling.models import AESTRA
-from src.dataset import SpectrumDataset
 import numpy as np
-import matplotlib.pyplot as plt
+import pandas as pd
+import os
+import glob
+from astropy.timeseries import LombScargle
+
 from src.modeling.train import load_experiment_checkpoint
 from src.interpolate import augment_spectra_uniform
 from src.plots_aestra import (
     plot_latent_distance_distribution,
     plot_activity_perturbation,
+    plot_latent_space_3d,
+    plot_rv_periodogram,
 )
-
-import pandas as pd
-import os
-from astropy.timeseries import LombScargle
-import glob
+from src.utils import clear_gpu_memory
 
 
-def get_vencode(model, batch):
-    """
-    Get the velocity encoding from the batch of observations.
-    The batch should contain the observed spectra and the model's b_obs parameter.
-
-    Args:
-        model (AESTRA): The AESTRA model instance.
-        batch (tuple): A tuple containing the batch data, where the first element is the observed spectra.
-    Returns:
-        torch.Tensor: The velocity encoding of the observed spectra.
-    """
-    batch_yobs, _, _, _ = batch
-    batch_robs = batch_yobs - model.b_obs.unsqueeze(0)
-    batch_vencode = model.rvestimator(batch_robs)
-
-    return batch_vencode
+# =============================================================================
+# ANALYSIS FUNCTIONS - Fonctions d'analyse principales
+# =============================================================================
 
 
-def get_spender_output(model, batch, aug_output=False):
-    """
-
-    Get the output of the spender module from the batch of observations.
-    The batch should contain the observed spectra and the model's b_obs parameter.
-    Args:
-        model (AESTRA): The AESTRA model instance.
-        batch (tuple): A tuple containing the batch data, where the first element is the observed spectra.
-        aug_output (bool): If True, also return the augmented output.
-    Returns:
-        tuple: A tuple containing the predicted activity and the state from the spender module.
-               If aug_output is True, it also includes the augmented activity and state.
-    """
-
-    batch_yobs, batch_yaug, _, batch_wavegrid = batch
-
-    batch_robs = batch_yobs - model.b_obs.unsqueeze(0)
-
-    batch_yact, batch_s = model.spender(batch_robs)
-    if aug_output:
-        batch_yact_aug, batch_s_aug = model.spender(batch_yaug)
-        return batch_yact, batch_s, batch_yact_aug, batch_s_aug
-
-    return batch_yact, batch_s
-
-
-# Figure 3: Calcul des distances latentes
-# ==============================================================================
-# Cette fonction calcule les distances latentes pour les spectres originaux et augmentés.
-# Elle est utilisée pour reproduire la Figure 3 de l'article.
-# Elle prend en entrée le modèle AESTRA et le dataset contenant les spectres.
-# Elle retourne les distances latentes pour les paires aléatoires et augmentées.
-
-
-def compute_latent_distances(model, dataset):
+def compute_latent_distances(model, dataset, batch_size=32):
     """
     Calcule les distances latentes pour reproduire la Figure 3.
+    Version optimisée par batches pour éviter les OOM errors.
 
     Args:
         model: Modèle AESTRA entraîné
         dataset: Dataset contenant les spectres
-        n_specs: Nombre de spectres à utiliser pour le calcul
-        n_random_pairs: Nombre de paires aléatoires à générer
+        batch_size: Taille des batches pour le traitement (défaut 32)
 
     Returns:
         tuple: (delta_s_rand, delta_s_aug) - distances latentes pour paires aléatoires et augmentées
     """
     model.eval()
 
-    # Limitation au nombre de spectres disponibles
     n_specs = len(dataset)
+    print(
+        f"Calcul des distances latentes sur {n_specs} spectres (batch_size={batch_size})..."
+    )
 
-    # Sélection aléatoire des spectres
-    indices = torch.randperm(len(dataset))[:n_specs]
-    selected_spectra = dataset.spectra[indices]
-
-    # Grille de longueurs d'onde répétée pour tous les spectres
-    batch_wavegrid = dataset.wavegrid.unsqueeze(0).repeat(n_specs, 1).contiguous()
+    # Traitement par batches pour éviter les OOM
+    delta_s_aug_list = []
+    latent_s_list = []
 
     with torch.no_grad():
-        # Calcul des encodages latents pour les spectres originaux
-        batch_robs = selected_spectra - model.b_obs.unsqueeze(0)
-        _, latent_s = model.spender(batch_robs)
+        print("Calcul des encodages latents par batches...")
 
-        # Génération des spectres augmentés avec décalage Doppler
-        batch_yaug, batch_voffset = augment_spectra_uniform(
-            batch_yobs=selected_spectra,
-            batch_wave=batch_wavegrid,
-            vmin=-3.0,
-            vmax=3.0,
-            interpolate="linear",
-            extrapolate="linear",
-            out_dtype=torch.float32,
-        )
+        for i in range(0, n_specs, batch_size):
+            end_idx = min(i + batch_size, n_specs)
+            current_batch_size = end_idx - i
 
-        # Calcul des encodages latents pour les spectres augmentés
-        batch_raug = batch_yaug - model.b_obs.unsqueeze(0)
-        _, latent_s_aug = model.spender(batch_raug)
+            # Sélection des spectres pour ce batch
+            batch_spectra = dataset.spectra[i:end_idx]
 
-        # Calcul des distances latentes pour les paires de données augmentées (∆s_aug)
-        delta_s_aug = torch.norm(latent_s - latent_s_aug, dim=1).cpu().numpy()
+            # Grille de longueurs d'onde pour ce batch
+            batch_wavegrid = (
+                dataset.wavegrid.unsqueeze(0).repeat(current_batch_size, 1).contiguous()
+            )
 
-        # Génération de paires aléatoires pour calculer ∆s_rand
-        n_random_pairs = n_specs
+            # Calcul des encodages latents pour les spectres originaux
+            batch_robs = batch_spectra - model.b_obs.unsqueeze(0)
+            _, latent_s_batch = model.spender(batch_robs)
 
-        # Génération d'indices de paires aléatoires sans remise
-        all_pairs = [(i, j) for i in range(n_specs) for j in range(i + 1, n_specs)]
-        selected_pairs = np.random.choice(
-            len(all_pairs), size=n_random_pairs, replace=False
-        )
+            # Stockage des encodages latents (sur CPU pour économiser GPU)
+            latent_s_list.append(latent_s_batch.cpu())
 
+            # Génération des spectres augmentés avec décalage Doppler
+            batch_yaug, batch_voffset = augment_spectra_uniform(
+                batch_yobs=batch_spectra,
+                batch_wave=batch_wavegrid,
+                vmin=-3.0,
+                vmax=3.0,
+                interpolate="linear",
+                extrapolate="linear",
+                out_dtype=torch.float32,
+            )
+
+            # Calcul des encodages latents pour les spectres augmentés
+            batch_raug = batch_yaug - model.b_obs.unsqueeze(0)
+            _, latent_s_aug_batch = model.spender(batch_raug)
+
+            # Calcul des distances latentes pour les paires de données augmentées (∆s_aug)
+            delta_s_aug_batch = (
+                torch.norm(latent_s_batch - latent_s_aug_batch, dim=1).cpu().numpy()
+            )
+            delta_s_aug_list.extend(delta_s_aug_batch)
+
+            # Nettoyage mémoire périodique
+            if (i // batch_size) % 5 == 0:
+                clear_gpu_memory()
+
+        # Concaténation des encodages latents
+        latent_s = torch.cat(latent_s_list, dim=0)
+        delta_s_aug = np.array(delta_s_aug_list)
+
+        print(f"Génération de {n_specs} paires aléatoires...")
+
+        # Génération efficace de paires aléatoires pour calculer ∆s_rand
         delta_s_rand = []
-        for pair_idx in selected_pairs:
-            i, j = all_pairs[pair_idx]
-            dist = torch.norm(latent_s[i] - latent_s[j], dim=0).cpu().numpy()
+        # Éviter de générer toutes les paires en mémoire
+        for _ in range(n_specs):
+            i, j = np.random.choice(n_specs, size=2, replace=False)
+            dist = torch.norm(latent_s[i] - latent_s[j], dim=0).numpy()
             delta_s_rand.append(dist)
 
         delta_s_rand = np.array(delta_s_rand)
 
+        # Nettoyage final
+        clear_gpu_memory()
+
+    print(
+        f"✅ Distances calculées: {len(delta_s_rand)} paires aléatoires, {len(delta_s_aug)} paires augmentées"
+    )
     return delta_s_rand, delta_s_aug
 
 
-# Figure 2: Calcul de la perturbation d'activité
 def compute_activity_perturbation(model, dataset, idx=0, perturbation_scale=1.0):
     """
     Calcule les spectres d'activité perturbés pour reproduire la Figure 2.
@@ -190,14 +182,97 @@ def compute_activity_perturbation(model, dataset, idx=0, perturbation_scale=1.0)
     return y_act_original, y_act_perturbed_list, wavelength
 
 
-def compute_rv_periodogram(model, dataset, star_name=None):
+def extract_latent_vectors_and_rv(model, dataset, batch_size=32, remove_outliers=None):
+    """
+    Extrait les vecteurs latents et calcule les vitesses radiales correspondantes.
+    Version optimisée par batches pour éviter les OOM errors.
+
+    Args:
+        model: Modèle AESTRA entraîné
+        dataset: Dataset contenant les spectres
+        batch_size: Taille des batches pour le traitement (défaut 32)
+        remove_outliers: Liste des indices à supprimer (défaut [334, 464])
+
+    Returns:
+        tuple: (latent_s, rv_values)
+            - latent_s: Vecteurs latents (N, D)
+            - rv_values: Valeurs RV correspondantes (N,)
+    """
+    model.eval()
+
+    if remove_outliers is None:
+        remove_outliers = [334, 464]
+
+    print("Extraction des vecteurs latents et calcul des RV...")
+
+    # Création d'un masque pour exclure les indices outliers
+    n_specs = len(dataset)
+    valid_indices = [i for i in range(n_specs) if i not in remove_outliers]
+
+    if remove_outliers:
+        print(f"Suppression de {len(remove_outliers)} outliers: {remove_outliers}")
+        print(f"Traitement de {len(valid_indices)} spectres sur {n_specs} total")
+
+    # Collecte des vecteurs latents et des RV
+    latent_vectors = []
+    rv_values = []
+
+    with torch.no_grad():
+        # Traitement par batches seulement des indices valides
+        for i in range(0, len(valid_indices), batch_size):
+            end_idx = min(i + batch_size, len(valid_indices))
+            batch_indices = valid_indices[i:end_idx]
+
+            # Sélection des spectres pour ce batch
+            batch_spectra = dataset.spectra[batch_indices]
+
+            # Calcul des vecteurs latents
+            batch_robs = batch_spectra - model.b_obs.unsqueeze(0)
+            _, latent_s_batch = model.spender(batch_robs)
+
+            # Calcul des RV pour ce batch
+            batch_vencode = model.rvestimator(batch_robs)
+            rv_batch = batch_vencode.cpu().numpy()
+
+            # Si vencode est multidimensionnel, prendre la moyenne
+            if rv_batch.ndim > 1:
+                rv_batch = rv_batch.mean(axis=1)
+
+            latent_vectors.append(latent_s_batch.cpu())
+            rv_values.extend(rv_batch)
+
+            # Nettoyage mémoire périodique
+            if (i // batch_size) % 10 == 0:
+                clear_gpu_memory()
+
+    # Concaténation des résultats
+    latent_s = torch.cat(latent_vectors, dim=0).numpy()
+    rv_values = np.array(rv_values)
+
+    # Nettoyage final
+    clear_gpu_memory()
+
+    print(
+        f"✅ Extraction terminée: {latent_s.shape[0]} spectres, dim latente: {latent_s.shape[1]}"
+    )
+    if remove_outliers:
+        print(f"Outliers supprimés: {len(remove_outliers)} spectres exclus")
+    return latent_s, rv_values
+
+
+def compute_rv_periodogram(
+    model, dataset, star_name=None, batch_size=64, remove_outliers=None
+):
     """
     Calcule le périodogramme des vitesses radiales en utilisant LombScargle.
+    Version optimisée par batches pour éviter les OOM errors.
 
     Args:
         model: Modèle AESTRA entraîné
         dataset: Dataset contenant les spectres et les temps JDB
         star_name: Nom de l'étoile pour identifier le fichier de transit (optionnel)
+        batch_size: Taille des batches pour le traitement (défaut 64)
+        remove_outliers: Liste des indices à supprimer (défaut [334, 464])
 
     Returns:
         tuple: (periods, power, rv_values, times)
@@ -208,22 +283,38 @@ def compute_rv_periodogram(model, dataset, star_name=None):
     """
     model.eval()
 
+    if remove_outliers is None:
+        remove_outliers = [334, 464]
+
     print("Calcul des vitesses radiales à partir des spectres...")
 
-    # Récupération des temps depuis le dataset
-    times = dataset.jdb.cpu().numpy()
+    # Création d'un masque pour exclure les indices outliers
+    n_specs = len(dataset)
+    valid_indices = [i for i in range(n_specs) if i not in remove_outliers]
 
-    # Calcul des vitesses radiales pour tous les spectres
+    if remove_outliers:
+        print(f"Suppression de {len(remove_outliers)} outliers: {remove_outliers}")
+        print(f"Traitement de {len(valid_indices)} spectres sur {n_specs} total")
+
+    # Récupération des temps depuis le dataset (seulement pour les indices valides)
+    all_times = dataset.jdb.cpu().numpy()
+    times = all_times[valid_indices]
+
+    # Calcul des vitesses radiales pour tous les spectres valides
     rv_values = []
 
     with torch.no_grad():
         # Traitement par batch pour économiser la mémoire
-        batch_size = 32
-        n_specs = len(dataset)
+        print(
+            f"Traitement de {len(valid_indices)} spectres par batches de {batch_size}..."
+        )
 
-        for i in range(0, n_specs, batch_size):
-            end_idx = min(i + batch_size, n_specs)
-            batch_spectra = dataset.spectra[i:end_idx]
+        for i in range(0, len(valid_indices), batch_size):
+            end_idx = min(i + batch_size, len(valid_indices))
+            batch_indices = valid_indices[i:end_idx]
+
+            # Sélection des spectres pour ce batch
+            batch_spectra = dataset.spectra[batch_indices]
 
             # Calcul de l'encodage de vitesse pour ce batch
             batch_robs = batch_spectra - model.b_obs.unsqueeze(0)
@@ -238,11 +329,27 @@ def compute_rv_periodogram(model, dataset, star_name=None):
 
             rv_values.extend(rv_batch)
 
+            # Nettoyage mémoire périodique
+            if (i // batch_size) % 10 == 0:
+                clear_gpu_memory()
+
+            # Progress indication
+            if (i // batch_size) % 50 == 0:
+                progress = (i / len(valid_indices)) * 100
+                print(
+                    f"Progress: {progress:.1f}% ({i}/{len(valid_indices)} spectres traités)"
+                )
+
     rv_values = np.array(rv_values)
+
+    # Nettoyage final
+    clear_gpu_memory()
 
     print(f"Nombre de mesures RV: {len(rv_values)}")
     print(f"Période d'observation: {times.max() - times.min():.1f} jours")
     print(f"RV min/max: {rv_values.min():.3f} / {rv_values.max():.3f}")
+    if remove_outliers:
+        print(f"Outliers supprimés: {len(remove_outliers)} spectres exclus")
 
     # Calcul du périodogramme avec LombScargle
     # Définition de la grille de périodes
@@ -255,6 +362,8 @@ def compute_rv_periodogram(model, dataset, star_name=None):
     # Calcul des fréquences correspondantes
     frequencies = 1.0 / periods
 
+    print(f"Calcul du périodogramme pour {len(periods)} périodes...")
+
     # Calcul du périodogramme Lomb-Scargle
     ls = LombScargle(times, rv_values)
     power = ls.power(frequencies)
@@ -265,7 +374,12 @@ def compute_rv_periodogram(model, dataset, star_name=None):
     return periods, power, rv_values, times
 
 
-def get_transit_periods(star_name="STAR1136"):
+# =============================================================================
+# UTILITY FUNCTIONS - Fonctions utilitaires
+# =============================================================================
+
+
+def get_transit_periods(star_name="STAR1136", data_root_dir="data"):
     """
     Récupère les périodes des planètes connues depuis le fichier Transit_information.csv
 
@@ -276,7 +390,7 @@ def get_transit_periods(star_name="STAR1136"):
         list: Liste des périodes en jours, ou None si le fichier n'est pas trouvé
     """
     # Utiliser STAR1136 par défaut car c'est l'étoile configurée dans base_config.yaml
-    data_path = "data/rv_datachallenge"
+    data_path = f"{data_root_dir}/rv_datachallenge"
     pattern = f"{data_path}/*/{star_name}_HPN_Transit_information.csv"
     files = glob.glob(pattern)
 
@@ -297,175 +411,19 @@ def get_transit_periods(star_name="STAR1136"):
         return None
 
 
-def plot_rv_periodogram(
-    periods,
-    power,
-    rv_values,
-    times,
-    known_periods=None,
-    save_path="reports/figures/rv_periodogram_with_known_periods.png",
-    show_plot=False,
-):
+def analyze_periodogram_peaks(periods, power, threshold_ratio=0.1):
     """
-    Trace le périodogramme des vitesses radiales avec des zooms sur les périodes d'intérêt.
+    Analyse les pics du périodogramme pour identifier les périodes significatives.
 
     Args:
         periods: Périodes en jours
         power: Puissance du périodogramme
-        rv_values: Valeurs de vitesses radiales
-        times: Temps JDB
-        known_periods: Liste des périodes connues des planètes (optionnel)
-        save_path: Chemin pour sauvegarder la figure
-        show_plot: Afficher la figure ou non
-    """
-
-    # Création de la figure avec plusieurs sous-graphiques
-    if known_periods is not None and len(known_periods) > 0:
-        fig = plt.figure(figsize=(18, 14))
-
-        # Graphique principal du périodogramme
-        ax1 = plt.subplot(4, 3, (1, 3))
-        ax1.semilogx(periods, power, "b-", linewidth=0.8)
-        ax1.set_xlabel("Période (jours)")
-        ax1.set_ylabel("Puissance LS")
-        ax1.set_title("Périodogramme Lomb-Scargle des vitesses radiales")
-        ax1.grid(True, alpha=0.3)
-
-        # Marquer les périodes connues
-        for i, period in enumerate(known_periods):
-            if periods.min() <= period <= periods.max():
-                ax1.axvline(
-                    period,
-                    color="red",
-                    linestyle="--",
-                    alpha=0.7,
-                    label=f"Planète {i + 1}: {period:.1f}d",
-                )
-
-        ax1.legend()
-
-        # Graphique des vitesses radiales en fonction du temps
-        ax2 = plt.subplot(4, 3, (4, 6))
-        ax2.plot(times, rv_values, "ko-", markersize=2, linewidth=0.5)
-        ax2.set_xlabel("JDB")
-        ax2.set_ylabel("Vitesse radiale")
-        ax2.set_title("Série temporelle des vitesses radiales")
-        ax2.grid(True, alpha=0.3)
-
-        # Zooms sur les 3 périodes d'intérêt
-        zoom_positions = [7, 8, 9]  # Positions dans la grille 4x3
-        for i, period in enumerate(known_periods[:3]):
-            if periods.min() <= period <= periods.max() and i < 3:
-                ax_zoom = plt.subplot(4, 3, zoom_positions[i])
-
-                # Définir la fenêtre de zoom autour de la période connue
-                zoom_factor = 0.2  # ±20% autour de la période
-                period_min = period * (1 - zoom_factor)
-                period_max = period * (1 + zoom_factor)
-
-                # Masque pour la zone de zoom
-                zoom_mask = (periods >= period_min) & (periods <= period_max)
-
-                if np.any(zoom_mask):
-                    ax_zoom.plot(
-                        periods[zoom_mask], power[zoom_mask], "b-", linewidth=1.5
-                    )
-                    ax_zoom.axvline(
-                        period, color="red", linestyle="--", alpha=0.8, linewidth=2
-                    )
-                    ax_zoom.set_xlabel("Période (jours)")
-                    ax_zoom.set_ylabel("Puissance LS")
-                    ax_zoom.set_title(f"Zoom Planète {i + 1}: {period:.1f}d")
-                    ax_zoom.grid(True, alpha=0.3)
-
-                    # Trouver le pic local le plus proche
-                    local_max_idx = np.argmax(power[zoom_mask])
-                    if len(periods[zoom_mask]) > 0:
-                        local_max_period = periods[zoom_mask][local_max_idx]
-                        local_max_power = power[zoom_mask][local_max_idx]
-                        ax_zoom.plot(
-                            local_max_period,
-                            local_max_power,
-                            "ro",
-                            markersize=8,
-                            label=f"Max local: {local_max_period:.1f}d",
-                        )
-                        ax_zoom.legend(fontsize=8)
-
-    else:
-        # Si pas de périodes connues, graphique simple
-        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8))
-
-        # Périodogramme
-        ax1.semilogx(periods, power, "b-", linewidth=0.8)
-        ax1.set_xlabel("Période (jours)")
-        ax1.set_ylabel("Puissance LS")
-        ax1.set_title("Périodogramme Lomb-Scargle des vitesses radiales")
-        ax1.grid(True, alpha=0.3)
-
-        # Vitesses radiales
-        ax2.plot(times, rv_values, "ko-", markersize=3, linewidth=0.5)
-        ax2.set_xlabel("JDB")
-        ax2.set_ylabel("Vitesse radiale")
-        ax2.set_title("Série temporelle des vitesses radiales")
-        ax2.grid(True, alpha=0.3)
-
-    plt.tight_layout()
-
-    # Sauvegarde
-    os.makedirs(os.path.dirname(save_path), exist_ok=True)
-    plt.savefig(save_path, dpi=300, bbox_inches="tight")
-    print(f"Périodogramme sauvegardé: {save_path}")
-
-    if show_plot:
-        plt.show()
-    else:
-        plt.close()
-
-
-def analyze_rv_periodogram_from_checkpoint(
-    checkpoint_path="models/aestra_base_config_final.pth",
-    star_name="STAR1136",
-    save_path="reports/figures/rv_periodogram_analysis.png",
-    show_plot=False,
-):
-    """
-    Fonction autonome pour calculer et tracer le périodogramme depuis un checkpoint.
-
-    Args:
-        checkpoint_path: Chemin vers le checkpoint du modèle
-        star_name: Nom de l'étoile pour chercher les périodes connues
-        save_path: Chemin pour sauvegarder la figure
-        show_plot: Afficher la figure ou non
+        threshold_ratio: Ratio du pic maximum pour définir le seuil (défaut 0.1 = 10%)
 
     Returns:
-        dict: Dictionnaire contenant les résultats de l'analyse
+        list: Liste des dictionnaires contenant les informations des pics
     """
-
-    print(f"Chargement du checkpoint: {checkpoint_path}")
-
-    # Chargement du modèle et du dataset
-    exp_data = load_experiment_checkpoint(checkpoint_path)
-    model = exp_data["model"]
-    dataset = exp_data["dataset"]
-    cfg_name = exp_data["cfg_name"]
-    start_epoch = exp_data["epoch"]
-    current_phase = exp_data["current_phase"]
-
-    print(f"Modèle chargé: {cfg_name}, epoch {start_epoch}, phase {current_phase}")
-    print(f"Dataset: {len(dataset)} spectres, {dataset.n_pixels} pixels")
-
-    # Récupération des périodes connues
-    known_periods = get_transit_periods(star_name)
-
-    # Calcul du périodogramme
-    print("Calcul du périodogramme des vitesses radiales...")
-    periods, power, rv_values, times = compute_rv_periodogram(
-        model=model, dataset=dataset
-    )
-
-    # Analyse des pics
-    threshold = 0.1 * np.max(power)
+    threshold = threshold_ratio * np.max(power)
     peak_indices = np.where(power > threshold)[0]
 
     peaks_info = []
@@ -478,6 +436,76 @@ def analyze_rv_periodogram_from_checkpoint(
             period = peak_periods[idx]
             power_val = peak_powers[idx]
             peaks_info.append({"rank": i + 1, "period": period, "power": power_val})
+
+    return peaks_info
+
+
+# =============================================================================
+# HIGH-LEVEL ANALYSIS FUNCTIONS - Fonctions d'analyse haut niveau
+# =============================================================================
+
+
+def analyze_rv_periodogram_from_checkpoint(
+    checkpoint_path="models/aestra_base_config_final.pth",
+    star_name="STAR1136",
+    save_path="reports/figures/rv_periodogram_analysis.png",
+    show_plot=False,
+    data_root_dir="data",  # Ajout pour la compatibilité avec les chemins de données
+    remove_outliers=None,  # Nouvelle option pour supprimer les outliers
+):
+    """
+    Fonction autonome pour calculer et tracer le périodogramme depuis un checkpoint.
+
+    Args:
+        checkpoint_path: Chemin vers le checkpoint du modèle
+        star_name: Nom de l'étoile pour chercher les périodes connues
+        save_path: Chemin pour sauvegarder la figure
+        show_plot: Afficher la figure ou non
+        data_root_dir: Répertoire racine des données pour charger le dataset
+        remove_outliers: Liste des indices à supprimer (défaut [334, 464])
+
+    Returns:
+        dict: Dictionnaire contenant les résultats de l'analyse
+    """
+
+    print(f"Chargement du checkpoint: {checkpoint_path}")
+
+    # Chargement du modèle et du dataset
+    exp_data = load_experiment_checkpoint(checkpoint_path, data_root_dir=data_root_dir)
+    model = exp_data["model"]
+    dataset = exp_data["dataset"]
+    cfg_name = exp_data["cfg_name"]
+    start_epoch = exp_data["epoch"]
+    current_phase = exp_data["current_phase"]
+
+    print(f"Modèle chargé: {cfg_name}, epoch {start_epoch}, phase {current_phase}")
+    print(f"Dataset: {len(dataset)} spectres, {dataset.n_pixels} pixels")
+
+    # Récupération des périodes connues
+    known_periods = get_transit_periods(star_name, data_root_dir=data_root_dir)
+
+    # Calcul du périodogramme
+    print("Calcul du périodogramme des vitesses radiales...")
+    periods, power, rv_values, times = compute_rv_periodogram(
+        model=model,
+        dataset=dataset,
+        batch_size=64,  # Ajustable selon la mémoire disponible
+        remove_outliers=remove_outliers,
+    )
+
+    # Analyse des pics
+    peaks_info = analyze_periodogram_peaks(periods, power, threshold_ratio=0.1)
+
+    # Création du plot
+    plot_rv_periodogram(
+        periods=periods,
+        power=power,
+        rv_values=rv_values,
+        times=times,
+        known_periods=known_periods,
+        save_path=save_path,
+        show_plot=show_plot,
+    )
 
     # Création du plot
     plot_rv_periodogram(
@@ -507,138 +535,284 @@ def analyze_rv_periodogram_from_checkpoint(
     return results
 
 
-if __name__ == "__main__":
-    # Chargement du modèle entraîné
-    checkpoint_path = "models/aestra_base_config_final.pth"
+def analyze_latent_space_from_checkpoint(
+    checkpoint_path="models/aestra_base_config_final.pth",
+    save_path="reports/figures/latent_space_3d_analysis.png",
+    show_plot=False,
+    data_root_dir="data",  # Ajout pour la compatibilité avec les chemins de données
+    remove_outliers=None,  # Nouvelle option pour supprimer les outliers
+):
+    """
+    Fonction autonome pour analyser l'espace latent depuis un checkpoint.
+
+    Args:
+        checkpoint_path: Chemin vers le checkpoint du modèle
+        save_path: Chemin pour sauvegarder la figure
+        show_plot: Afficher la figure ou non
+        data_root_dir: Répertoire racine des données pour charger le dataset
+        remove_outliers: Liste des indices à supprimer (défaut [334, 464])
+
+    Returns:
+        dict: Dictionnaire contenant les résultats de l'analyse
+    """
+
     print(f"Chargement du checkpoint: {checkpoint_path}")
 
-    exp_data = load_experiment_checkpoint(checkpoint_path)
+    # Chargement du modèle et du dataset
+    exp_data = load_experiment_checkpoint(checkpoint_path, data_root_dir=data_root_dir)
     model = exp_data["model"]
     dataset = exp_data["dataset"]
     cfg_name = exp_data["cfg_name"]
-    start_epoch = exp_data["epoch"]
-    current_phase = exp_data["current_phase"]
 
-    print(f"Modèle chargé: {cfg_name}, epoch {start_epoch}, phase {current_phase}")
+    print(f"Modèle chargé: {cfg_name}")
     print(f"Dataset: {len(dataset)} spectres, {dataset.n_pixels} pixels")
 
-    # Calcul des distances latentes (comme dans la Figure 3)
-    print("Calcul des distances latentes...")
+    # Extraction des vecteurs latents et RV
+    latent_s, rv_values = extract_latent_vectors_and_rv(
+        model=model, dataset=dataset, batch_size=32, remove_outliers=remove_outliers
+    )
+
+    # Création du plot 3D si possible
+    plot_created = plot_latent_space_3d(
+        latent_s=latent_s,
+        rv_values=rv_values,
+        save_path=save_path,
+        show_plot=show_plot,
+    )
+
+    # Retour des résultats
+    results = {
+        "latent_s": latent_s,
+        "rv_values": rv_values,
+        "latent_dim": latent_s.shape[1],
+        "n_spectra": latent_s.shape[0],
+        "plot_created": plot_created,
+        "rv_stats": {
+            "min": np.min(rv_values),
+            "max": np.max(rv_values),
+            "mean": np.mean(rv_values),
+            "std": np.std(rv_values),
+        },
+    }
+
+    return results
+
+
+def full_analysis_from_checkpoint(
+    checkpoint_path="models/aestra_base_config_final.pth",
+    star_name="STAR1136",
+    save_dir="reports/figures",
+    show_plots=False,
+    data_root_dir="data",  # Ajout pour la compatibilité avec les chemins de données
+    remove_outliers=None,  # Nouvelle option pour supprimer les outliers
+):
+    """
+    Fonction pour effectuer une analyse complète depuis un checkpoint.
+
+    Args:
+        checkpoint_path: Chemin vers le checkpoint du modèle
+        star_name: Nom de l'étoile
+        save_dir: Répertoire pour sauvegarder les figures
+        show_plots: Afficher les figures ou non
+        remove_outliers: Liste des indices à supprimer (défaut [334, 464])
+
+    Returns:
+        dict: Dictionnaire contenant tous les résultats de l'analyse
+    """
+
+    print("=" * 60)
+    print("ANALYSE COMPLÈTE AESTRA")
+    print("=" * 60)
+    print(f"Checkpoint: {checkpoint_path}")
+    print(f"Étoile: {star_name}")
+    print(f"Répertoire de sauvegarde: {save_dir}")
+    if remove_outliers:
+        print(f"Outliers à supprimer: {remove_outliers}")
+
+    # Chargement du modèle et du dataset
+    exp_data = load_experiment_checkpoint(checkpoint_path, data_root_dir=data_root_dir)
+    model = exp_data["model"]
+    dataset = exp_data["dataset"]
+    cfg_name = exp_data["cfg_name"]
+
+    print(f"\nModèle chargé: {cfg_name}")
+    print(f"Dataset: {len(dataset)} spectres, {dataset.n_pixels} pixels")
+
+    os.makedirs(save_dir, exist_ok=True)
+
+    results = {}
+
+    # 1. Analyse des distances latentes (Figure 3)
+    print("\n1. Calcul des distances latentes...")
     delta_s_rand, delta_s_aug = compute_latent_distances(
-        model=model,
-        dataset=dataset,
+        model=model, dataset=dataset, batch_size=32
     )
 
-    print(f"Nombre de paires aléatoires: {len(delta_s_rand)}")
-    print(f"Nombre de paires augmentées: {len(delta_s_aug)}")
-    print(f"Moyenne ∆s_rand: {np.mean(delta_s_rand):.3e}")
-    print(f"Moyenne ∆s_aug: {np.mean(delta_s_aug):.3e}")
-    print(
-        f"Min ∆s_rand: {np.min(delta_s_rand):.3e}, Max ∆s_rand: {np.max(delta_s_rand):.3e}"
-    )
-    print(
-        f"Min ∆s_aug: {np.min(delta_s_aug):.3e}, Max ∆s_aug: {np.max(delta_s_aug):.3e}"
-    )
-
-    # Création et sauvegarde du plot
-    save_path = "reports/figures/latent_distance_distribution_base_config2.png"
+    save_path = os.path.join(save_dir, "latent_distance_distribution.png")
     plot_latent_distance_distribution(
         delta_s_rand=delta_s_rand, delta_s_aug=delta_s_aug, save_path=save_path
     )
 
-    # Calcul et plot de la perturbation d'activité (Figure 2)
-    print("Calcul de la perturbation d'activité...")
+    results["latent_distances"] = {
+        "delta_s_rand": delta_s_rand,
+        "delta_s_aug": delta_s_aug,
+        "mean_rand": np.mean(delta_s_rand),
+        "mean_aug": np.mean(delta_s_aug),
+    }
+
+    # 2. Analyse de l'espace latent 3D
+    print("\n2. Analyse de l'espace latent 3D...")
+    latent_analysis = analyze_latent_space_from_checkpoint(
+        checkpoint_path=checkpoint_path,
+        save_path=os.path.join(save_dir, "latent_space_3d.png"),
+        show_plot=show_plots,
+        remove_outliers=remove_outliers,
+    )
+    results["latent_space"] = latent_analysis
+
+    # 3. Analyse de la perturbation d'activité (Figure 2)
+    print("\n3. Analyse de la perturbation d'activité...")
     y_act_original, y_act_perturbed_list, wavelength = compute_activity_perturbation(
-        model=model,
-        dataset=dataset,
-        idx=0,  # Premier spectre du dataset
-        perturbation_scale=0.1,
+        model=model, dataset=dataset, idx=0, perturbation_scale=1.0
     )
 
-    print(f"Spectre d'activité original: {y_act_original.shape}")
-    print(f"Nombre de spectres perturbés: {len(y_act_perturbed_list)}")
-
-    # Sauvegarde de la Figure 2
-    save_path_fig2 = "reports/figures/activity_perturbation_figure2.png"
+    save_path = os.path.join(save_dir, "activity_perturbation.png")
     plot_activity_perturbation(
         y_act_original=y_act_original,
         y_act_perturbed_list=y_act_perturbed_list,
         wavelength=wavelength,
-        save_path=save_path_fig2,
-        wave_range=(5000, 5010),  # Gamme de longueurs d'onde comme dans la Figure 2
-        show_plot=True,
+        save_path=save_path,
+        wave_range=(5000, 5050),
+        show_plot=show_plots,
     )
 
-    # Calcul et plot du périodogramme des vitesses radiales
-    print("Calcul du périodogramme des vitesses radiales...")
+    results["activity_perturbation"] = {
+        "y_act_original": y_act_original,
+        "y_act_perturbed_list": y_act_perturbed_list,
+        "wavelength": wavelength,
+    }
 
-    # Récupération des périodes connues des planètes pour STAR1136
-    known_periods = get_transit_periods("STAR1136")
-
-    # Calcul du périodogramme
-    periods, power, rv_values, times = compute_rv_periodogram(
-        model=model, dataset=dataset
+    # 4. Analyse du périodogramme RV
+    print("\n4. Analyse du périodogramme des vitesses radiales...")
+    periodogram_analysis = analyze_rv_periodogram_from_checkpoint(
+        checkpoint_path=checkpoint_path,
+        star_name=star_name,
+        save_path=os.path.join(save_dir, "rv_periodogram.png"),
+        show_plot=show_plots,
+        data_root_dir=data_root_dir,
+        remove_outliers=remove_outliers,
     )
+    results["periodogram"] = periodogram_analysis
 
-    print(f"Périodogramme calculé avec {len(periods)} points")
-    print(
-        f"Puissance max: {np.max(power):.3e} à la période {periods[np.argmax(power)]:.2f} jours"
-    )
-
-    # Affichage des pics principaux
-    # Trouver les pics significatifs (seuil à 90% du maximum)
-    threshold = 0.1 * np.max(power)
-    peak_indices = np.where(power > threshold)[0]
-    if len(peak_indices) > 0:
-        peak_periods = periods[peak_indices]
-        peak_powers = power[peak_indices]
-
-        # Trier par puissance décroissante et prendre les 5 premiers
-        sorted_indices = np.argsort(peak_powers)[::-1][:5]
-        print("Pics principaux détectés:")
-        for i, idx in enumerate(sorted_indices):
-            period = peak_periods[idx]
-            power_val = peak_powers[idx]
-            print(f"  {i + 1}. Période: {period:.2f} jours, Puissance: {power_val:.3e}")
-
-    # Création et sauvegarde du plot du périodogramme
-    save_path_periodo = "reports/figures/rv_periodogram_with_known_periods.png"
-    plot_rv_periodogram(
-        periods=periods,
-        power=power,
-        rv_values=rv_values,
-        times=times,
-        known_periods=known_periods,
-        save_path=save_path_periodo,
-        show_plot=True,
-    )
-
+    # Résumé
     print("\n" + "=" * 60)
-    print("RÉSUMÉ DE L'ANALYSE DU PÉRIODOGRAMME")
+    print("RÉSUMÉ DE L'ANALYSE")
     print("=" * 60)
-    print(f"Nombre d'observations: {len(rv_values)}")
-    print(f"Durée d'observation: {times.max() - times.min():.1f} jours")
-    print(f"Plage RV: {rv_values.min():.2f} à {rv_values.max():.2f}")
-    if known_periods is not None:
-        print(f"Périodes connues: {known_periods}")
-    print(f"Meilleure période détectée: {periods[np.argmax(power)]:.2f} jours")
-    print(f"Puissance maximale: {np.max(power):.3e}")
+    print(f"Dimension latente: {results['latent_space']['latent_dim']}D")
+    print(f"Nombre de spectres: {results['latent_space']['n_spectra']}")
+    print(
+        f"Plage RV: {results['latent_space']['rv_stats']['min']:.2f} à {results['latent_space']['rv_stats']['max']:.2f}"
+    )
+    print(
+        f"Distance latente moyenne (paires aléatoires): {results['latent_distances']['mean_rand']:.3e}"
+    )
+    print(
+        f"Distance latente moyenne (paires augmentées): {results['latent_distances']['mean_aug']:.3e}"
+    )
+    print(
+        f"Meilleure période détectée: {results['periodogram']['best_period']:.2f} jours"
+    )
+    if results["periodogram"]["known_periods"] is not None:
+        print(f"Périodes connues: {results['periodogram']['known_periods']}")
     print("=" * 60)
 
+    return results
 
-# Exemple d'utilisation autonome des fonctions:
-# ==============================================
-#
-# from src.modeling.predict import analyze_rv_periodogram_from_checkpoint
-#
-# # Analyse complète depuis un checkpoint
-# results = analyze_rv_periodogram_from_checkpoint(
-#     checkpoint_path="models/aestra_base_config_final.pth",
-#     save_path="mon_periodogramme.png",
-#     show_plot=True
-# )
-#
-# print(f"Meilleure période: {results['best_period']:.2f} jours")
-# print(f"Puissance max: {results['max_power']:.3e}")
-# print(f"Pics principaux: {results['peaks_info'][:3]}")
-#
+
+# =============================================================================
+# MAIN EXECUTION - Exécution principale
+# =============================================================================
+
+
+if __name__ == "__main__":
+    # Exemple d'utilisation - analyse complète
+    checkpoint_path = "models/aestra_colab_config_final.pth"
+
+    # Analyse complète avec suppression des outliers par défaut
+    results = full_analysis_from_checkpoint(
+        checkpoint_path=checkpoint_path,
+        star_name="STAR1136",
+        save_dir="reports/figures",
+        show_plots=True,
+        remove_outliers=[334, 464],  # Suppression des outliers par défaut
+    )
+
+    print("\n✅ Analyse terminée. Résultats sauvegardés dans reports/figures/")
+    print(
+        f"Meilleure période détectée: {results['periodogram']['best_period']:.2f} jours"
+    )
+    print(f"Dimension de l'espace latent: {results['latent_space']['latent_dim']}D")
+    print(f"Nombre de spectres analysés: {results['latent_space']['n_spectra']}")
+
+
+# =============================================================================
+# USAGE EXAMPLES - Exemples d'utilisation
+# =============================================================================
+
+"""
+Exemples d'utilisation des fonctions:
+
+# 1. Analyse complète depuis un checkpoint avec suppression des outliers
+results = full_analysis_from_checkpoint(
+    checkpoint_path="models/aestra_base_config_final.pth",
+    star_name="STAR1136",
+    save_dir="mon_analyse",
+    show_plots=True,
+    remove_outliers=[334, 464]  # Suppression des outliers par défaut
+)
+
+# 2. Analyse complète sans suppression d'outliers
+results = full_analysis_from_checkpoint(
+    checkpoint_path="models/aestra_base_config_final.pth",
+    star_name="STAR1136",
+    save_dir="mon_analyse",
+    show_plots=True,
+    remove_outliers=[]  # Aucun outlier à supprimer
+)
+
+# 3. Analyse seulement du périodogramme avec outliers supprimés
+periodogram_results = analyze_rv_periodogram_from_checkpoint(
+    checkpoint_path="models/aestra_base_config_final.pth",
+    save_path="mon_periodogramme.png",
+    show_plot=True,
+    remove_outliers=[334, 464]
+)
+
+# 4. Analyse seulement de l'espace latent avec outliers supprimés
+latent_results = analyze_latent_space_from_checkpoint(
+    checkpoint_path="models/aestra_base_config_final.pth",
+    save_path="mon_espace_latent.png",
+    show_plot=True,
+    remove_outliers=[334, 464]
+)
+
+# 5. Utilisation modulaire des fonctions individuelles avec outliers supprimés
+exp_data = load_experiment_checkpoint("models/aestra_base_config_final.pth")
+model, dataset = exp_data["model"], exp_data["dataset"]
+
+# Calcul des distances latentes (pas d'option remove_outliers pour cette fonction)
+delta_s_rand, delta_s_aug = compute_latent_distances(model, dataset)
+
+# Extraction des vecteurs latents et RV avec suppression d'outliers
+latent_s, rv_values = extract_latent_vectors_and_rv(
+    model, dataset, remove_outliers=[334, 464]
+)
+
+# Calcul du périodogramme avec suppression d'outliers
+periods, power, rv_values, times = compute_rv_periodogram(
+    model, dataset, remove_outliers=[334, 464]
+)
+
+# Périodes connues
+known_periods = get_transit_periods("STAR1136")
+"""
