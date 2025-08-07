@@ -2,6 +2,7 @@ import pynvml
 import importlib
 import torch
 import gc
+import numpy as np
 
 ##############################################################################
 ##############################################################################
@@ -83,3 +84,18 @@ def get_class(path: str):
     module_name, class_name = path.rsplit(".", 1)
     module = importlib.import_module(module_name)
     return getattr(module, class_name)
+
+
+def get_mask(mask_type: str = "G2") -> np.ndarray:
+    """
+    Charge un masque de lignes d'absorption à partir d'un fichier CSV.
+
+    Args:
+        mask_type (str): Type de masque à charger. Par défaut, "G2".
+
+    Returns:
+        np.ndarray: Tableau numpy contenant les positions et poids des lignes.
+    """
+    return np.loadtxt(
+        f"data/rv_datachallenge/masks/{mask_type}_mask.txt",
+    )

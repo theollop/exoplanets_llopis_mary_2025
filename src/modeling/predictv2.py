@@ -1,78 +1,14 @@
+from statistics import LinearRegression
 import torch
 import numpy as np
 from astropy.timeseries import LombScargle
 
 from src.modeling.train import load_experiment_checkpoint
 from torch.utils.data import DataLoader
-from src.dataset import generate_collate_fn
+from src.dataset import generate_collate_fn, inject_dataset
 from src.utils import clear_gpu_memory
 import matplotlib.pyplot as plt
-from src.interpolate import shift_spectra_linear
-
-
-def inject_dataset(
-    dataset, amplitudes: list[float], periods: list[float], batch_size=None
-):
-    """
-    Injects artificial planetary signals into the dataset by shifting spectra according to RV variations.
-
-    Args:
-        dataset: SpectrumDataset containing spectra, wavegrid and time values (jdb)
-        amplitudes: List of semi-amplitudes (Kp) in m/s for each planet
-        periods: List of periods (P) in days for each planet
-        batch_size: If None, process all spectra at once. Otherwise, process in batches.
-
-    Returns:
-        torch.Tensor: Modified spectra with injected planetary signals
-    """
-    # Calculate RV velocities for all time points
-    velocities = np.zeros(len(dataset.jdb))
-    time_values = (
-        dataset.jdb.cpu().numpy() if hasattr(dataset.jdb, "cpu") else dataset.jdb
-    )
-
-    for Kp, P in zip(amplitudes, periods):
-        velocities += Kp * np.sin(2 * np.pi * time_values / P)
-
-    # Convert to tensor and ensure same device as dataset
-    velocities = torch.tensor(
-        velocities, dtype=dataset.spectra.dtype, device=dataset.spectra.device
-    )
-
-    if batch_size is None:
-        # Process all spectra at once
-        print(f"Processing all {len(dataset)} spectra at once...")
-        injected_spectra = shift_spectra_linear(
-            spectra=dataset.spectra,
-            wavegrid=dataset.wavegrid.unsqueeze(0)
-            .expand(len(dataset), -1)
-            .contiguous(),
-            velocities=velocities,
-        )
-    else:
-        # Process in batches
-        print(f"Processing {len(dataset)} spectra in batches of {batch_size}...")
-        injected_spectra_list = []
-
-        for i in range(0, len(dataset), batch_size):
-            end_idx = min(i + batch_size, len(dataset))
-            batch_spectra = dataset.spectra[i:end_idx]
-            batch_velocities = velocities[i:end_idx]
-            batch_wavegrid = (
-                dataset.wavegrid.unsqueeze(0).expand(end_idx - i, -1).contiguous()
-            )
-
-            batch_injected = shift_spectra_linear(
-                spectra=batch_spectra,
-                wavegrid=batch_wavegrid,
-                velocities=batch_velocities,
-            )
-
-            injected_spectra_list.append(batch_injected)
-
-        injected_spectra = torch.cat(injected_spectra_list, dim=0)
-
-    return injected_spectra
+from src.ccf import compute_CCFs, analyze_CCFs
 
 
 def predict(
@@ -146,7 +82,7 @@ def predict(
     all_yact_aug = np.concatenate(all_yact_aug, axis=0)
     all_yobs_prime = np.concatenate(all_yobs_prime, axis=0)
 
-    # Concaténer et réorganiser all_yact_perturbed en (latent_dim, n_specs, n_pixels)
+    # Concaténer et réorganiser all_yact_perturbed en (latent_dim, n_spectra, n_pixels)
     latent_dim = len(all_yact_perturbed)
     all_yact_perturbed_array = np.array(
         [np.concatenate(all_yact_perturbed[dim], axis=0) for dim in range(latent_dim)]
@@ -161,6 +97,98 @@ def predict(
         "all_yobs_prime": all_yobs_prime,
         "all_yact_perturbed": all_yact_perturbed_array,
     }
+
+
+def get_vapparent(
+    spectra: np.ndarray,
+    wavegrid: np.ndarray,
+    v_grid: np.ndarray,
+    window_size_velocity: float,
+    mask_type: str = "G2",
+    verbose: bool = False,
+    batch_size: int = None,
+    normalize: bool = True,
+):
+    """
+    Calcule v_apparent qui correspond aux vitesses radiales obtenues par CCFs sur les spectres.
+    """
+
+    # Compute the cross-correlation functions (CCFs)
+    CCFs = compute_CCFs(
+        spectra=spectra,
+        wavegrid=wavegrid,
+        v_grid=v_grid,
+        window_size_velocity=window_size_velocity,
+        mask_type=mask_type,
+        verbose=verbose,
+        batch_size=batch_size,
+        normalize=normalize,
+    )
+
+    # Analyze the CCFs to extract V_apparent
+    res = analyze_CCFs(CCFs, v_grid)
+
+    v_apparent = res["rv"]
+
+    return v_apparent, res
+
+
+def get_vref(
+    spectra: np.ndarray,
+    wavegrid: np.ndarray,
+    v_grid: np.ndarray,
+    window_size_velocity: float,
+    mask_type: str = "G2",
+    verbose: bool = False,
+    batch_size: int = None,
+    normalize: bool = True,
+):
+    """
+    Calcule v_ref qui correspond aux vitesses radiales obtenues par CCFs sur les spectres sans activités et ne contenant que le signal planétaire.
+    """
+
+    # Compute the cross-correlation functions (CCFs)
+    CCFs = compute_CCFs(
+        spectra=spectra,
+        wavegrid=wavegrid,
+        v_grid=v_grid,
+        window_size_velocity=window_size_velocity,
+        mask_type=mask_type,
+        verbose=verbose,
+        batch_size=batch_size,
+        normalize=normalize,
+    )
+
+    # Analyze the CCFs to extract V_apparent
+    res = analyze_CCFs(CCFs, v_grid)
+
+    v_ref = res["rv"]
+
+    return v_ref, res
+
+
+def get_vtraditionnal(
+    v_apparent: np.ndarray, fwhm: np.ndarray, depth: np.ndarray, bis_span: np.ndarray
+):
+    """
+    Calcule v_traditionnal qui correspond aux vitesses radiales obtenues par la méthode de correction de l'activité traditionnelle.
+    """
+    # Calcul de v_traditionnal
+    v_traditionnal = []
+    for i in range(len(v_apparent)):
+        v_app = v_apparent[i]
+        fwhm_val = fwhm[i]
+        depth_val = depth[i]
+        bis_span_val = bis_span[i]
+        inds = [fwhm_val, depth_val, bis_span_val]
+
+        # Calcul de v_traditionnal
+        model = LinearRegression().fit(inds, v_app)
+        v_pred = model.predict(inds)
+        v_traditionnal.append(v_apparent - v_pred)
+    v_traditionnal = np.array(v_traditionnal)
+
+    return v_traditionnal
 
 
 def compute_latent_distances(all_s, all_saug, seed=None):

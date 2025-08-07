@@ -96,7 +96,7 @@ def shift_spectra_linear(
     Example:
         >>> from dataset import SpectrumDataset
         >>> B = 32  # Batch size
-        >>> dataset = SpectrumDataset(n_specs=100, wavemin=5000, wavemax=5050, data_dtype=torch.float32)
+        >>> dataset = SpectrumDataset(n_spectra=100, wavemin=5000, wavemax=5050, data_dtype=torch.float32)
         >>> batch_yobs = dataset.spectra
         >>> batch_wave = dataset.wavegrid.unsqueeze(0).expand(B, -1).contiguous()  # [B, n_pixel]
         >>> batch_voffset = torch.from_numpy(np.random.uniform(-3, 3, size=(B, 1))).cuda()
@@ -252,7 +252,7 @@ if __name__ == "__main__":
 
     B = 32  # Taille du batch
     dataset = SpectrumDataset(
-        n_specs=100, wavemin=5000, wavemax=5050, data_dtype=torch.float32
+        n_spectra=100, wavemin=5000, wavemax=5050, data_dtype=torch.float32
     )
 
     batch_yobs = dataset.spectra[:B]  # [B, n_pixel]

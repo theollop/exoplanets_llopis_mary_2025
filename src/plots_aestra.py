@@ -1143,3 +1143,328 @@ def plot_rv_periodogram(
         plt.show()
     else:
         plt.close()
+
+
+def plot_ccf_analysis(
+    v_grid: np.ndarray,
+    ccf: np.ndarray,
+    analysis_results: dict,
+    spectrum_idx: int = 0,
+    save_path: Optional[str] = None,
+    show_plot: bool = True,
+):
+    """
+    Visualise une CCF avec son analyse complète (fit gaussien, FWHM, bissector span).
+
+    Args:
+        v_grid: Grille de vitesses en m/s
+        ccf: Profil CCF à visualiser
+        analysis_results: Résultats de l'analyse CCF (dict avec rv, depth, fwhm, span, etc.)
+        spectrum_idx: Index du spectre analysé (pour le titre)
+        save_path: Chemin de sauvegarde du plot (optionnel)
+        show_plot: Si True, affiche le plot
+    """
+    from src.ccf import gaussian
+
+    fig, axes = plt.subplots(2, 2, figsize=(16, 10))
+    fig.suptitle(
+        f"Analyse CCF complète - Spectre {spectrum_idx}", fontsize=14, fontweight="bold"
+    )
+
+    # Plot 1: CCF et fit gaussien (haut gauche)
+    ax1 = axes[0, 0]
+    ax1.plot(v_grid, ccf, "b-", linewidth=1.5, label="CCF observée", alpha=0.7)
+
+    # Fit gaussien si disponible
+    if "popt" in analysis_results and not np.any(np.isnan(analysis_results["popt"])):
+        v_fine = np.linspace(v_grid.min(), v_grid.max(), 1000)
+        ccf_fit = gaussian(v_fine, *analysis_results["popt"])
+        ax1.plot(v_fine, ccf_fit, "r-", linewidth=2, label="Fit gaussien")
+
+        # Marquer le centre de la gaussienne (RV)
+        rv = analysis_results["rv"]
+        if not np.isnan(rv):
+            rv_idx = np.argmin(np.abs(v_grid - rv))
+            ax1.axvline(
+                rv, color="red", linestyle="--", alpha=0.8, label=f"RV = {rv:.1f} m/s"
+            )
+            ax1.plot(rv, ccf[rv_idx], "ro", markersize=8, label="Minimum CCF")
+
+        # Marquer la FWHM
+        fwhm = analysis_results["fwhm"]
+        if not np.isnan(fwhm):
+            half_depth = (
+                analysis_results["continuum"] + analysis_results["amplitude"] / 2
+            )
+            ax1.axhline(
+                half_depth,
+                color="orange",
+                linestyle=":",
+                alpha=0.8,
+                label=f"FWHM = {fwhm:.1f} m/s",
+            )
+            ax1.axvspan(rv - fwhm / 2, rv + fwhm / 2, alpha=0.2, color="orange")
+
+    ax1.set_xlabel("Vitesse radiale (m/s)")
+    ax1.set_ylabel("CCF")
+    ax1.set_title("CCF et fit gaussien")
+    ax1.grid(True, alpha=0.3)
+    ax1.legend()
+
+    # Plot 2: Bissector (haut droite)
+    ax2 = axes[0, 1]
+
+    # Calculer et tracer le bissector si le fit est disponible
+    if "popt" in analysis_results and not np.any(np.isnan(analysis_results["popt"])):
+        try:
+            # Paramètres du fit
+            c, k, x0, fwhm = analysis_results["popt"]
+
+            # Calcul du bissector (adapté de calculate_bissector_span)
+            n = len(v_grid)
+            nstep = 100
+            margin = 5
+            len_depth = nstep - 2 * margin + 1
+
+            sigma = fwhm / (2 * np.sqrt(2 * np.log(2)))
+
+            # CCF normalisée
+            norm_CCF = -c / k * (1 - ccf / c)
+            depth_levels = np.array([(i + margin) / nstep for i in range(len_depth)])
+
+            # Calcul simplifié du bissector
+            ind_max = np.argmax(norm_CCF)
+            bis = np.zeros(len_depth)
+
+            for i in range(len_depth):
+                # Recherche des indices gauche et droite pour chaque niveau de profondeur
+                current_depth = depth_levels[i]
+
+                # Trouver les points où la CCF normalisée = current_depth
+                left_indices = np.where((norm_CCF[:ind_max] <= current_depth))[0]
+                right_indices = (
+                    np.where((norm_CCF[ind_max:] <= current_depth))[0] + ind_max
+                )
+
+                if len(left_indices) > 0 and len(right_indices) > 0:
+                    # Interpolation linéaire pour une position plus précise
+                    if len(left_indices) > 1:
+                        idx_left = left_indices[-1]
+                        if idx_left > 0:
+                            # Interpolation entre les deux points
+                            alpha = (current_depth - norm_CCF[idx_left - 1]) / (
+                                norm_CCF[idx_left] - norm_CCF[idx_left - 1]
+                            )
+                            v_left = v_grid[idx_left - 1] + alpha * (
+                                v_grid[idx_left] - v_grid[idx_left - 1]
+                            )
+                        else:
+                            v_left = v_grid[idx_left]
+                    else:
+                        v_left = v_grid[left_indices[0]]
+
+                    if len(right_indices) > 1:
+                        idx_right = right_indices[0]
+                        if idx_right < len(v_grid) - 1:
+                            # Interpolation entre les deux points
+                            alpha = (current_depth - norm_CCF[idx_right]) / (
+                                norm_CCF[idx_right + 1] - norm_CCF[idx_right]
+                            )
+                            v_right = v_grid[idx_right] + alpha * (
+                                v_grid[idx_right + 1] - v_grid[idx_right]
+                            )
+                        else:
+                            v_right = v_grid[idx_right]
+                    else:
+                        v_right = v_grid[right_indices[0]]
+
+                    # Position du bissector = milieu entre gauche et droite
+                    bis[i] = (v_left + v_right) / 2
+                else:
+                    bis[i] = np.nan
+
+            # Tracer le bissector
+            valid_mask = ~np.isnan(bis)
+            if np.any(valid_mask):
+                ax2.plot(
+                    bis[valid_mask],
+                    depth_levels[valid_mask],
+                    "g-",
+                    linewidth=2,
+                    label="Bissector",
+                )
+
+                # Marquer les zones pour le calcul du span
+                top_mask = (depth_levels >= 0.1) & (depth_levels <= 0.4) & valid_mask
+                bottom_mask = (depth_levels >= 0.6) & (depth_levels <= 0.9) & valid_mask
+
+                if np.any(top_mask):
+                    ax2.plot(
+                        bis[top_mask],
+                        depth_levels[top_mask],
+                        "ro",
+                        markersize=4,
+                        alpha=0.7,
+                        label="Zone haute (10-40%)",
+                    )
+                    ax2.axhspan(0.1, 0.4, alpha=0.2, color="red")
+
+                if np.any(bottom_mask):
+                    ax2.plot(
+                        bis[bottom_mask],
+                        depth_levels[bottom_mask],
+                        "bo",
+                        markersize=4,
+                        alpha=0.7,
+                        label="Zone basse (60-90%)",
+                    )
+                    ax2.axhspan(0.6, 0.9, alpha=0.2, color="blue")
+
+                # Afficher le span calculé
+                span = analysis_results.get("span", np.nan)
+                if not np.isnan(span):
+                    # Calculer les moyennes pour visualiser le span
+                    if np.any(top_mask) and np.any(bottom_mask):
+                        bis_top_mean = np.mean(bis[top_mask])
+                        bis_bottom_mean = np.mean(bis[bottom_mask])
+
+                        # Ligne horizontale pour visualiser le span
+                        ax2.annotate(
+                            "",
+                            xy=(bis_top_mean, 0.25),
+                            xytext=(bis_bottom_mean, 0.75),
+                            arrowprops=dict(arrowstyle="<->", color="purple", lw=2),
+                        )
+                        ax2.text(
+                            0.02,
+                            0.95,
+                            f"Span = {span:.2f} m/s",
+                            transform=ax2.transAxes,
+                            bbox=dict(
+                                boxstyle="round,pad=0.3", facecolor="purple", alpha=0.3
+                            ),
+                        )
+
+        except Exception as e:
+            ax2.text(
+                0.5,
+                0.5,
+                f"Erreur calcul bissector:\n{str(e)}",
+                transform=ax2.transAxes,
+                ha="center",
+                va="center",
+                color="red",
+            )
+    else:
+        ax2.text(
+            0.5,
+            0.5,
+            "Fit gaussien non disponible",
+            transform=ax2.transAxes,
+            ha="center",
+            va="center",
+            color="red",
+        )
+
+    ax2.set_xlabel("Vitesse radiale (m/s)")
+    ax2.set_ylabel("Profondeur normalisée")
+    ax2.set_title("Bissector et calcul du span")
+    ax2.grid(True, alpha=0.3)
+    ax2.legend(fontsize=8)
+
+    # Plot 3: Résidus du fit (bas gauche)
+    ax3 = axes[1, 0]
+    if "popt" in analysis_results and not np.any(np.isnan(analysis_results["popt"])):
+        ccf_model = gaussian(v_grid, *analysis_results["popt"])
+        residuals = ccf - ccf_model
+        ax3.plot(v_grid, residuals, "g-", linewidth=1, label="Résidus (CCF - modèle)")
+        ax3.axhline(0, color="black", linestyle="--", alpha=0.5)
+
+        # RMS des résidus
+        rms = np.sqrt(np.mean(residuals**2))
+        ax3.text(
+            0.02,
+            0.95,
+            f"RMS résidus = {rms:.4f}",
+            transform=ax3.transAxes,
+            bbox=dict(boxstyle="round,pad=0.3", facecolor="lightgray"),
+        )
+    else:
+        ax3.text(
+            0.5,
+            0.5,
+            "Pas de fit disponible",
+            transform=ax3.transAxes,
+            ha="center",
+            va="center",
+            fontsize=12,
+            color="red",
+        )
+
+    ax3.set_xlabel("Vitesse radiale (m/s)")
+    ax3.set_ylabel("Résidus")
+    ax3.set_title("Résidus du fit gaussien")
+    ax3.grid(True, alpha=0.3)
+    ax3.legend()
+
+    # Plot 4: Paramètres et statistiques (bas droite)
+    ax4 = axes[1, 1]
+    ax4.axis("off")
+
+    # Ajouter les paramètres d'analyse
+    params_text = ["Paramètres CCF:\n"]
+    if not np.isnan(analysis_results.get("rv", np.nan)):
+        params_text.append(f"• RV: {analysis_results['rv']:.2f} m/s")
+    if not np.isnan(analysis_results.get("depth", np.nan)):
+        params_text.append(f"• Profondeur: {analysis_results['depth']:.4f}")
+    if not np.isnan(analysis_results.get("fwhm", np.nan)):
+        params_text.append(f"• FWHM: {analysis_results['fwhm']:.2f} m/s")
+    if not np.isnan(analysis_results.get("span", np.nan)):
+        params_text.append(f"• Bissector Span: {analysis_results['span']:.2f} m/s")
+    if not np.isnan(analysis_results.get("continuum", np.nan)):
+        params_text.append(f"• Continuum: {analysis_results['continuum']:.4f}")
+    if not np.isnan(analysis_results.get("amplitude", np.nan)):
+        params_text.append(f"• Amplitude: {analysis_results['amplitude']:.4f}")
+
+    params_text.append("\nInterpretation:")
+    span_val = analysis_results.get("span", np.nan)
+    if not np.isnan(span_val):
+        if abs(span_val) < 10:
+            params_text.append("• Span faible → Étoile calme")
+        elif abs(span_val) < 50:
+            params_text.append("• Span modéré → Activité stellaire")
+        else:
+            params_text.append("• Span élevé → Forte activité")
+
+    depth_val = analysis_results.get("depth", np.nan)
+    if not np.isnan(depth_val):
+        if depth_val > 0.05:
+            params_text.append("• Profondeur élevée → Bon signal")
+        elif depth_val > 0.01:
+            params_text.append("• Profondeur modérée")
+        else:
+            params_text.append("• Profondeur faible → Signal bruité")
+
+    ax4.text(
+        0.05,
+        0.95,
+        "\n".join(params_text),
+        transform=ax4.transAxes,
+        bbox=dict(boxstyle="round,pad=0.5", facecolor="lightblue", alpha=0.8),
+        fontsize=10,
+        verticalalignment="top",
+        fontfamily="monospace",
+    )
+
+    plt.tight_layout()
+
+    # Sauvegarde
+    if save_path:
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        plt.savefig(save_path, dpi=300, bbox_inches="tight")
+        print(f"Plot CCF sauvegardé: {save_path}")
+
+    if show_plot:
+        plt.show()
+    else:
+        plt.close()

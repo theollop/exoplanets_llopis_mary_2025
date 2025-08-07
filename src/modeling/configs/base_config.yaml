@@ -9,8 +9,7 @@
 # Données
 # --------------------------------------------------------------------------
 data_root_dir: "data"     # Répertoire racine des données (peut être modifié pour Colab)
-wavemin: 5000.0           # Longueur d'onde minimale (nm)
-wavemax: 5010.0           # Longueur d'onde maximale (nm)
+n_spectra: 10
 data_dtype: float32       # Type numpy/torch du tableau des spectres (float16/float32/float64)
 
 checkpoint_every: 100       # Fréquence de sauvegarde des checkpoints (en epochs)

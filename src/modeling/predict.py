@@ -320,9 +320,9 @@ def compute_latent_distances(model, dataset, batch_size=4):
     """
     model.eval()
 
-    n_specs = len(dataset)
+    n_spectra = len(dataset)
     print(
-        f"Calcul des distances latentes sur {n_specs} spectres (batch_size={batch_size})..."
+        f"Calcul des distances latentes sur {n_spectra} spectres (batch_size={batch_size})..."
     )
 
     # Traitement par batches pour éviter les OOM
@@ -332,8 +332,8 @@ def compute_latent_distances(model, dataset, batch_size=4):
     with torch.no_grad():
         print("Calcul des encodages latents par batches...")
 
-        for i in range(0, n_specs, batch_size):
-            end_idx = min(i + batch_size, n_specs)
+        for i in range(0, n_spectra, batch_size):
+            end_idx = min(i + batch_size, n_spectra)
             current_batch_size = end_idx - i
 
             # Sélection des spectres pour ce batch
@@ -380,13 +380,13 @@ def compute_latent_distances(model, dataset, batch_size=4):
         latent_s = torch.cat(latent_s_list, dim=0)
         delta_s_aug = np.array(delta_s_aug_list)
 
-        print(f"Génération de {n_specs} paires aléatoires...")
+        print(f"Génération de {n_spectra} paires aléatoires...")
 
         # Génération efficace de paires aléatoires pour calculer ∆s_rand
         delta_s_rand = []
         # Éviter de générer toutes les paires en mémoire
-        for _ in range(n_specs):
-            i, j = np.random.choice(n_specs, size=2, replace=False)
+        for _ in range(n_spectra):
+            i, j = np.random.choice(n_spectra, size=2, replace=False)
             dist = torch.norm(latent_s[i] - latent_s[j], dim=0).numpy()
             delta_s_rand.append(dist)
 
@@ -484,12 +484,12 @@ def extract_latent_vectors_and_rv(
     print("Extraction des vecteurs latents et calcul des RV...")
 
     # Création d'un masque pour exclure les indices outliers
-    n_specs = len(dataset)
-    valid_indices = [i for i in range(n_specs) if i not in remove_outliers]
+    n_spectra = len(dataset)
+    valid_indices = [i for i in range(n_spectra) if i not in remove_outliers]
 
     if remove_outliers:
         print(f"Suppression de {len(remove_outliers)} outliers: {remove_outliers}")
-        print(f"Traitement de {len(valid_indices)} spectres sur {n_specs} total")
+        print(f"Traitement de {len(valid_indices)} spectres sur {n_spectra} total")
 
     # Collecte des vecteurs latents et des RV
     latent_vectors = []
@@ -590,12 +590,12 @@ def compute_rv_periodogram(
     print("Calcul des vitesses radiales à partir des spectres...")
 
     # Création d'un masque pour exclure les indices outliers
-    n_specs = len(dataset)
-    valid_indices = [i for i in range(n_specs) if i not in remove_outliers]
+    n_spectra = len(dataset)
+    valid_indices = [i for i in range(n_spectra) if i not in remove_outliers]
 
     if remove_outliers:
         print(f"Suppression de {len(remove_outliers)} outliers: {remove_outliers}")
-        print(f"Traitement de {len(valid_indices)} spectres sur {n_specs} total")
+        print(f"Traitement de {len(valid_indices)} spectres sur {n_spectra} total")
 
     # Récupération des temps depuis le dataset (seulement pour les indices valides)
     all_times = dataset.jdb.cpu().numpy()
@@ -932,8 +932,8 @@ def analyze_activity_signals_mosaic(
         save_path = "reports/figures/activity_signals_mosaic.png"
 
     # Création d'un masque pour exclure les indices outliers
-    n_specs = len(dataset)
-    valid_indices = [i for i in range(n_specs) if i not in remove_outliers]
+    n_spectra = len(dataset)
+    valid_indices = [i for i in range(n_spectra) if i not in remove_outliers]
 
     # Chargement du masque G2 pour obtenir les positions et poids des raies
     try:
@@ -1720,8 +1720,8 @@ def analyze_latent_periodograms_from_checkpoint(
     if remove_outliers is None:
         remove_outliers = [334, 464]
 
-    n_specs = len(dataset)
-    valid_indices = [i for i in range(n_specs) if i not in remove_outliers]
+    n_spectra = len(dataset)
+    valid_indices = [i for i in range(n_spectra) if i not in remove_outliers]
     all_times = dataset.jdb.cpu().numpy()
     times = all_times[valid_indices]
 
@@ -2653,8 +2653,8 @@ import numpy as np
 from astropy.timeseries import LombScargle
 
 # Récupération des temps
-n_specs = len(dataset)
-valid_indices = [i for i in range(n_specs) if i not in [334, 464]]
+n_spectra = len(dataset)
+valid_indices = [i for i in range(n_spectra) if i not in [334, 464]]
 all_times = dataset.jdb.cpu().numpy()
 times = all_times[valid_indices]
 

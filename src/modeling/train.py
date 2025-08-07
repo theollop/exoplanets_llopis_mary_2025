@@ -621,7 +621,7 @@ def main(cfg_name=None, checkpoint=None, device="cuda"):
         # Création du dataset
         try:
             dataset = SpectrumDataset(
-                n_specs=config.get("n_specs", None),
+                n_spectra=config.get("n_spectra", None),
                 wavemin=config.get("wavemin", None),
                 wavemax=config.get("wavemax", None),
                 data_dtype=getattr(torch, config.get("data_dtype", "float32")),
