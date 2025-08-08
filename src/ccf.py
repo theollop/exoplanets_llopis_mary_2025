@@ -1,24 +1,375 @@
+from matplotlib import pyplot as plt
 import numpy as np
-import matplotlib.pyplot as plt
 from numba import njit, prange
 from scipy.sparse import coo_matrix, csr_matrix
-import torch
-from src.utils import get_mask
 from scipy.optimize import curve_fit
+from typing import Optional, Dict, Any
+from numpy.typing import NDArray
+
+from src.utils import get_mask
+
+__all__ = [
+    "compute_CCFs",
+    "normalize_CCFs",
+    "analyze_ccfs",
+    "fit_gaussian_ccf",
+    "compute_bisector_span",
+    "build_CCF_masks_sparse",
+    "get_full_ccf_analysis",
+]
+
+# =============================================================
+# API PUBLIQUE
+# =============================================================
+
+
+def get_full_ccf_analysis(
+    spectra: NDArray[np.floating],
+    wavegrid: NDArray[np.floating],
+    v_grid: NDArray[np.floating],
+    window_size_velocity: float,
+    mask_type: str = "G2",
+    verbose: bool = False,
+    batch_size: Optional[int] = None,
+    normalize: bool = True,
+) -> Dict[str, NDArray[np.floating]]:
+    """
+    Calcule les CCFs puis réalise l'analyse (RV, profondeur, FWHM, span).
+
+    Args:
+        spectra: Tableau 2D des spectres, de forme (n_spectra, n_wavelengths).
+        wavegrid: Grille de longueurs d'onde (pas constant, triée).
+        v_grid: Grille de vitesses radiales en m/s.
+        window_size_velocity: Largeur (sigma en m/s) du profil gaussien autour de chaque raie.
+        mask_type: Type de masque de raies (ex: "G2").
+        verbose: Affiche des informations de progression.
+        batch_size: Taille des lots pour calculer les CCFs (None = tout d'un coup).
+        normalize: Normaliser les CCFs par leur amplitude max absolue.
+
+    Returns:
+        Dictionnaire contenant les mesures pour chaque spectre:
+        {"rv", "depth", "fwhm", "span", "continuum", "amplitude", "popt"}.
+    """
+    CCFs = compute_CCFs(
+        spectra=spectra,
+        wavegrid=wavegrid,
+        v_grid=v_grid,
+        window_size_velocity=window_size_velocity,
+        mask_type=mask_type,
+        verbose=verbose,
+        batch_size=batch_size,
+        normalize=normalize,
+    )
+    return analyze_ccfs(CCFs, v_grid)
+
+
+def compute_CCFs(
+    spectra: NDArray[np.floating],
+    wavegrid: NDArray[np.floating],
+    v_grid: NDArray[np.floating],
+    window_size_velocity: float,
+    mask_type: str = "G2",
+    verbose: bool = False,
+    batch_size: Optional[int] = None,
+    normalize: bool = True,
+) -> NDArray[np.floating]:
+    """
+    Calcule les CCFs par produit matrice-vecteur avec un masque creux gaussien.
+
+    Args:
+        spectra: Tableau 2D des spectres, de forme (n_spectra, n_wavelengths).
+        wavegrid: Grille de longueurs d'onde (pas constant, triée).
+        v_grid: Grille de vitesses radiales en m/s.
+        window_size_velocity: Largeur (sigma en m/s) du profil gaussien autour de chaque raie.
+        mask_type: Type de masque de raies (ex: "G2").
+        verbose: Affiche des informations de progression.
+        batch_size: Taille des lots pour calculer les CCFs (None = tout d'un coup).
+        normalize: Normaliser les CCFs par leur amplitude max absolue.
+
+    Returns:
+        Tableau 2D des CCFs, de forme (n_spectra, len(v_grid)).
+    """
+    # Charger le masque (positions et poids des raies)
+    mask = get_mask(mask_type)
+    line_pos = mask[:, 0]
+    line_weights = mask[:, 1]
+
+    if verbose:
+        print("Construction des masques CCF gaussiens (sparse)...")
+    CCF_masks = build_CCF_masks_sparse(
+        line_pos, line_weights, v_grid, wavegrid, window_size_velocity
+    )
+
+    n_spectra = spectra.shape[0]
+
+    # Chemin sans batch
+    if batch_size is None:
+        CCFs = (CCF_masks.dot((spectra - 1.0).T)).T
+        # Décalage à 0 par CCF
+        CCFs -= np.min(CCFs, axis=1, keepdims=True)
+        if normalize:
+            CCFs = normalize_CCFs(CCFs)
+        return CCFs
+
+    # Traitement par lots
+    CCFs_list = []
+    n_batches = (n_spectra + batch_size - 1) // batch_size
+    for batch_idx, start in enumerate(range(0, n_spectra, batch_size)):
+        end = min(start + batch_size, n_spectra)
+        batch_specs = spectra[start:end]
+        batch_CCFs = (CCF_masks.dot((batch_specs - 1.0).T)).T
+        batch_CCFs -= np.min(batch_CCFs, axis=1, keepdims=True)
+        CCFs_list.append(batch_CCFs)
+        if verbose:
+            print(
+                f"Batch {batch_idx + 1}/{n_batches} traité ({end}/{n_spectra} spectres)"
+            )
+
+    CCFs = np.vstack(CCFs_list)
+    if normalize:
+        CCFs = normalize_CCFs(CCFs)
+    return CCFs
+
+
+def normalize_CCFs(CCFs: NDArray[np.floating]) -> NDArray[np.floating]:
+    """
+    Normalise chaque CCF par son amplitude maximale absolue.
+
+    Args:
+        CCFs: Tableau 2D des CCFs (n_spectra, len(v_grid)).
+
+    Returns:
+        Tableau des CCFs normalisés, même forme que l'entrée.
+    """
+    denom = np.max(np.abs(CCFs), axis=1, keepdims=True)
+    # Évite la division par zéro
+    denom[denom == 0] = 1.0
+    return CCFs / denom
+
+
+# =============================================================
+# ANALYSE DES CCFs (Fit gaussien, bisector, agrégation)
+# =============================================================
+
+
+def gaussian(
+    x: NDArray[np.floating], c: float, k: float, x0: float, fwhm: float
+) -> NDArray[np.floating]:
+    """Profil gaussien paramétré par c, k, x0 et FWHM."""
+    sigma = fwhm / (2 * np.sqrt(2 * np.log(2)))
+    return c + k * np.exp(-((x - x0) ** 2) / (2 * sigma**2))
+
+
+def fit_gaussian_ccf(
+    v_grid: NDArray[np.floating], ccf: NDArray[np.floating]
+) -> Dict[str, Any]:
+    """
+    Ajuste une gaussienne sur une CCF et calcule les paramètres dérivés.
+
+    Args:
+        v_grid: Grille de vitesses en m/s.
+        ccf: Profil de CCF correspondant.
+
+    Returns:
+        Dictionnaire: {"c", "k", "x0", "fwhm", "rv", "depth", "span", "continuum", "amplitude", "popt"}.
+        - En cas d'échec du fit, les champs sont remplis avec NaN et popt est un tableau NaN de taille 4.
+    """
+    # Estimations initiales simples
+    c_init = float((ccf[0] + ccf[-1]) / 2)
+    k_init = 0.0
+    x0_init = float(v_grid[len(v_grid) // 2])
+    fwhm_init = float((v_grid[-1] - v_grid[0]) / 5)
+
+    # Cherche le point d'écart maximal à c_init (fonctionne pour absorption/émission)
+    for i in range(len(ccf)):
+        if abs(ccf[i] - c_init) > abs(k_init):
+            k_init = float(ccf[i] - c_init)
+            x0_init = float(v_grid[i])
+
+    try:
+        popt, _ = curve_fit(
+            gaussian, v_grid, ccf, p0=[c_init, k_init, x0_init, fwhm_init], maxfev=10000
+        )
+        c, k, x0, fwhm = map(float, popt)
+        span = compute_bisector_span(v_grid, ccf, c, k, x0, fwhm)
+        return {
+            "rv": x0,
+            "depth": abs(k),
+            "fwhm": fwhm,
+            "span": span,
+            "continuum": c,
+            "amplitude": k,
+            "popt": np.array([c, k, x0, fwhm], dtype=float),
+            "c": c,
+            "k": k,
+            "x0": x0,
+        }
+    except Exception:
+        nan4 = np.array([np.nan, np.nan, np.nan, np.nan], dtype=float)
+        return {
+            "rv": np.nan,
+            "depth": np.nan,
+            "fwhm": np.nan,
+            "span": np.nan,
+            "continuum": np.nan,
+            "amplitude": np.nan,
+            "popt": nan4,
+            "c": np.nan,
+            "k": np.nan,
+            "x0": np.nan,
+        }
+
+
+def compute_bisector_span(
+    v_grid: NDArray[np.floating],
+    ccf: NDArray[np.floating],
+    c: float,
+    k: float,
+    x0: float,
+    fwhm: float,
+) -> float:
+    """
+    Calcule le bisector span d'une CCF (inspiré de BIS_FIT2.cpp).
+
+    Le span est défini comme la différence moyenne de la RV du bisector
+    entre les niveaux de profondeur [0.1, 0.4] et [0.6, 0.9].
+
+    Args:
+        v_grid: Grille de vitesses (m/s).
+        ccf: Profil CCF.
+        c, k, x0, fwhm: Paramètres de la gaussienne ajustée.
+
+    Returns:
+        Valeur du bisector span (m/s) ou NaN si non calculable.
+    """
+    # Sécurité sur les paramètres
+    if not np.isfinite([c, k, x0, fwhm]).all() or fwhm <= 0 or abs(k) < 1e-12:
+        return float("nan")
+
+    n = len(v_grid)
+    nstep = 100
+    margin = 5
+    len_depth = nstep - 2 * margin + 1
+
+    sigma = fwhm / (2 * np.sqrt(2 * np.log(2)))
+    if sigma <= 0:
+        return float("nan")
+
+    # CCF normalisée (profondeur 0..1 environ)
+    # norm_CCF ~ (ccf - c)/k remis en signe pour suivre l'implémentation d'origine
+    norm_CCF = -c / k * (1 - ccf / c) if c != 0 else (ccf - c) / (k if k != 0 else 1)
+    depth = np.array([(i + margin) / nstep for i in range(len_depth)], dtype=float)
+
+    # Coefficients d'interpolation parabolique
+    p0 = np.zeros(n - 1)
+    p1 = np.zeros(n - 1)
+    p2 = np.zeros(n - 1)
+
+    for i in range(n - 1):
+        vr = 0.5 * (v_grid[i] + v_grid[i + 1])
+        dx = vr - x0
+        exp_arg = np.exp(-(dx * dx) / (2 * sigma * sigma))
+        dCCFdRV = -(dx) / (sigma * sigma) * exp_arg
+        d2CCFdRV2 = ((dx * dx) / (sigma * sigma) - 1) / (sigma * sigma) * exp_arg
+
+        if abs(dCCFdRV) > 1e-10:
+            d2RVdCCF2 = -d2CCFdRV2 / (dCCFdRV**3)
+            p2[i] = 0.5 * d2RVdCCF2
+
+            dnorm = norm_CCF[i + 1] - norm_CCF[i]
+            if abs(dnorm) > 1e-10:
+                p1[i] = (
+                    v_grid[i + 1]
+                    - v_grid[i]
+                    - p2[i] * (norm_CCF[i + 1] ** 2 - norm_CCF[i] ** 2)
+                ) / dnorm
+                p0[i] = v_grid[i] - p1[i] * norm_CCF[i] - p2[i] * (norm_CCF[i] ** 2)
+
+    # Indice du maximum de la CCF normalisée
+    ind_max = int(np.argmax(norm_CCF))
+
+    # Calcul du bisector par niveaux de profondeur
+    bis = np.zeros(len_depth)
+    for ii in range(len_depth):
+        i_b = ind_max
+        i_r = ind_max
+
+        # Recherche des indices gauche/droite où la CCF atteint la profondeur
+        while i_b > 1 and norm_CCF[i_b] > depth[ii]:
+            i_b -= 1
+        while i_r < n - 2 and norm_CCF[i_r + 1] > depth[ii]:
+            i_r += 1
+
+        if i_b < len(p0) and i_r < len(p0):
+            bis[ii] = (
+                p0[i_b]
+                + p0[i_r]
+                + (p1[i_b] + p1[i_r]) * depth[ii]
+                + (p2[i_b] + p2[i_r]) * (depth[ii] ** 2)
+            ) * 0.5
+        else:
+            bis[ii] = np.nan
+
+    # Span = RV_top - RV_bottom
+    rv_top_indices = (depth >= 0.1) & (depth <= 0.4)
+    rv_bottom_indices = (depth >= 0.6) & (depth <= 0.9)
+
+    if np.any(rv_top_indices) and np.any(rv_bottom_indices):
+        rv_top = np.nanmean(bis[rv_top_indices])
+        rv_bottom = np.nanmean(bis[rv_bottom_indices])
+        return float(rv_top - rv_bottom)
+    return float("nan")
+
+
+def analyze_ccfs(
+    CCFs: NDArray[np.floating], v_grid: NDArray[np.floating]
+) -> Dict[str, NDArray[np.floating]]:
+    """
+    Analyse un ensemble de CCFs pour extraire RV, profondeur, FWHM et bisector span.
+
+    Args:
+        CCFs: Tableau 2D des CCFs (n_spectra, len(v_grid)).
+        v_grid: Grille des vitesses en m/s.
+
+    Returns:
+        Dictionnaire des mesures, tableau 1D par clé (sauf "popt" en (n_spectra, 4)).
+    """
+    n_spectra = CCFs.shape[0]
+
+    results: Dict[str, NDArray[np.floating]] = {
+        "rv": np.full(n_spectra, np.nan, dtype=float),
+        "depth": np.full(n_spectra, np.nan, dtype=float),
+        "fwhm": np.full(n_spectra, np.nan, dtype=float),
+        "span": np.full(n_spectra, np.nan, dtype=float),
+        "continuum": np.full(n_spectra, np.nan, dtype=float),
+        "amplitude": np.full(n_spectra, np.nan, dtype=float),
+        "popt": np.full((n_spectra, 4), np.nan, dtype=float),
+    }
+
+    for i in range(n_spectra):
+        params = fit_gaussian_ccf(v_grid, CCFs[i])
+        results["rv"][i] = params["rv"]
+        results["depth"][i] = params["depth"]
+        results["fwhm"][i] = params["fwhm"]
+        results["span"][i] = params["span"]
+        results["continuum"][i] = params["continuum"]
+        results["amplitude"][i] = params["amplitude"]
+        results["popt"][i, :] = params["popt"]
+
+    return results
+
+
+# =============================================================
+# CONSTRUCTION DES MASQUES CCF (sparse) + UTILITAIRES NUMBA
+# =============================================================
 
 
 @njit(inline="always")
 def _gamma_numba(v: float) -> np.float64:
     """
-    Calcule le facteur de Lorentz pour une vitesse donnée.
-
-    Args:
-        v: Vitesse en m/s.
-
-    Returns:
-        Facteur de Lorentz en np.float64.
+    Calcule le facteur de Lorentz pour une vitesse v (m/s).
     """
-    C_LIGHT = 299_792_458  # Vitesse de la lumière en m/s
+    C_LIGHT = 299_792_458  # m/s
     return np.sqrt((1 + v / C_LIGHT) / (1 - v / C_LIGHT))
 
 
@@ -36,10 +387,10 @@ def extend_wavegrid_numba(
 
     Returns:
         wavegrid_extended: Grille complète incluant les extensions avant et après.
-        wave_before: Portion de la grille avant la longueur d'onde minimale d'origine.
-        wave_after: Portion de la grille après la longueur d'onde maximale d'origine.
+        wave_before: Portion avant la longueur d'onde minimale d'origine.
+        wave_after: Portion après la longueur d'onde maximale d'origine.
     """
-    SAFETY_MARGIN = 100
+    SAFETY_MARGIN = 100.0
     step = wavegrid[1] - wavegrid[0]
     vmax = v_grid.max() + SAFETY_MARGIN
     vmin = v_grid.min() - SAFETY_MARGIN
@@ -69,18 +420,16 @@ def _count_per_velocity(
     v_grid,
     wavegrid_ext,
     window_size_velocity,
-    wavegrid_step,
-    begin_wave,
 ):
     """
-    Compte le nombre d'entrées de la matrice creuse pour chaque vitesse en profil gaussien.
-    On prend un support ±4σ autour de chaque raie.
+    Compte le nombre d'entrées de la matrice creuse pour chaque vitesse avec un profil gaussien.
+    Support considéré: ±4σ autour de chaque raie.
     """
     c = 299792458.0
     n_v = v_grid.shape[0]
     counts = np.zeros(n_v, np.int64)
     for i in prange(n_v):
-        shift = 1.0 + v_grid[i] / c  # approximation non-relativiste
+        shift = ((1.0 + v_grid[i] / c) / (1.0 - v_grid[i] / c)) ** 0.5
         total = 0
         for j in range(line_pos.shape[0]):
             lam0 = line_pos[j]
@@ -107,23 +456,20 @@ def _fill_entries(
     v_grid,
     wavegrid_ext,
     window_size_velocity,
-    wavegrid_step,
-    begin_wave,
     offsets,
     rows,
     cols,
     vals,
 ):
     """
-    Remplit les entrées de la matrice creuse en profil gaussien.
+    Remplit les entrées de la matrice creuse (profil gaussien sur ±4σ).
     Chaque raie contribue selon exp(-0.5*((lambda-lam_c)/sigma)^2).
     """
     c = 299792458.0
     n_v = v_grid.shape[0]
     for i in prange(n_v):
-        shift = 1.0 + v_grid[i] / c
-        idx_base = offsets[i]
-        idx = idx_base
+        shift = ((1.0 + v_grid[i] / c) / (1.0 - v_grid[i] / c)) ** 0.5
+        idx = offsets[i]
         for j in range(line_pos.shape[0]):
             lam0 = line_pos[j]
             weight = line_weights[j]
@@ -148,61 +494,60 @@ def _fill_entries(
 
 
 def build_CCF_masks_sparse(
-    line_pos: np.ndarray,
-    line_weights: np.ndarray,
-    v_grid: np.ndarray,
-    wavegrid: np.ndarray,
+    line_pos: NDArray[np.floating],
+    line_weights: NDArray[np.floating],
+    v_grid: NDArray[np.floating],
+    wavegrid: NDArray[np.floating],
     window_size_velocity: float,
 ) -> csr_matrix:
     """
     Construit une matrice creuse CSR de masques CCF gaussiens.
+
     Args:
-      - line_pos, line_weights: positions et poids des raies
-      - v_grid: grille RV (m/s)
-      - wavegrid: grille de longueurs d'onde (constant step)
-      - window_size_velocity: sigma du profil gaussien en m/s
+        line_pos: Positions (longueurs d'onde) des raies.
+        line_weights: Poids des raies.
+        v_grid: Grille RV (m/s).
+        wavegrid: Grille de longueurs d'onde au pas constant.
+        window_size_velocity: Sigma du profil gaussien en m/s.
+
     Returns:
-      CSR matrix de dimension (len(v_grid), len(wavegrid))
+        Matrice CSR de dimension (len(v_grid), len(wavegrid)).
     """
-    # extension doppler
+    # Extension doppler de la grille de longueurs d'onde
     wavegrid_ext, wave_before, wave_after = extend_wavegrid_numba(wavegrid, v_grid)
-    step = wavegrid[1] - wavegrid[0]
-    begin = wavegrid_ext[0]
     n_v = v_grid.size
 
-    # compter les entrées
+    # Compter les entrées par vitesse
     counts = _count_per_velocity(
-        line_pos, line_weights, v_grid, wavegrid_ext, window_size_velocity, step, begin
+        line_pos, line_weights, v_grid, wavegrid_ext, window_size_velocity
     )
 
-    # offsets
+    # Offsets cumulés
     offsets = np.empty(n_v, np.int64)
     total = 0
     for i in range(n_v):
         offsets[i] = total
         total += counts[i]
 
-    # allouer triplets
+    # Triplets (i, j, val)
     rows = np.empty(total, dtype=np.int64)
     cols = np.empty(total, dtype=np.int64)
     vals = np.empty(total, dtype=np.float64)
 
-    # remplir
+    # Remplir les entrées
     _fill_entries(
         line_pos,
         line_weights,
         v_grid,
         wavegrid_ext,
         window_size_velocity,
-        step,
-        begin,
         offsets,
         rows,
         cols,
         vals,
     )
 
-    # assembler et recadrer
+    # Assembler et recadrer sur la grille d'origine
     coo = coo_matrix((vals, (rows, cols)), shape=(n_v, wavegrid_ext.size))
     CCF = coo.tocsr()
     s = len(wave_before)
@@ -210,323 +555,33 @@ def build_CCF_masks_sparse(
     return CCF[:, s:e]
 
 
-def compute_CCFs(
-    spectra: np.ndarray,
-    v_grid: np.ndarray,
-    wavegrid: np.ndarray,
-    window_size_velocity: float,
-    mask_type: str = "G2",
-    verbose: bool = False,
-    batch_size: int = None,
-    normalize: bool = True,
-):
-    # charger masque
-    mask = get_mask(mask_type)
-    line_pos = mask[:, 0]
-    line_weights = mask[:, 1]
-    if verbose:
-        print("Construction CCF gaussian sparse...")
-    CCF_masks = build_CCF_masks_sparse(
-        line_pos, line_weights, v_grid, wavegrid, window_size_velocity
-    )
-
-    n_spectra = spectra.shape[0]
-
-    # Si pas de batch_size défini, traiter tout d'un coup
-    if batch_size is None:
-        CCFs = (CCF_masks.dot((spectra - 1.0).T)).T
-        CCFs -= np.min(CCFs, axis=1, keepdims=True)
-        return CCFs
-
-    # Traitement par batch
-    CCFs_list = []
-    n_batches = (n_spectra + batch_size - 1) // batch_size
-    for batch_idx, i in enumerate(range(0, n_spectra, batch_size)):
-        end_idx = min(i + batch_size, n_spectra)
-        batch_specs = spectra[i:end_idx]
-        batch_CCFs = (CCF_masks.dot((batch_specs - 1.0).T)).T
-        batch_CCFs -= np.min(batch_CCFs, axis=1, keepdims=True)
-        CCFs_list.append(batch_CCFs)
-
-        if verbose:
-            print(
-                f"Batch {batch_idx + 1}/{n_batches} traité ({end_idx}/{n_spectra} spectres)"
-            )
-    CCFs = np.vstack(CCFs_list)
-    if normalize:
-        CCFs = normalize_CCFs(CCFs)
-    return CCFs
-
-
-def normalize_CCFs(CCFs: np.ndarray) -> np.ndarray:
-    """
-    Normalise les CCFs en divisant par le max / min de chaque CCF.
-
-    Args:
-        CCFs (np.ndarray): Tableau des CCFs à normaliser.
-
-    Returns:
-        np.ndarray: Tableau des CCFs normalisés.
-    """
-
-    return CCFs / np.max(np.abs(CCFs), axis=1, keepdims=True)
-
-
-def gaussian(x, c, k, x0, fwhm):
-    sigma = fwhm / (2 * np.sqrt(2 * np.log(2)))
-    return c + k * np.exp(-((x - x0) ** 2) / (2 * sigma**2))
-
-
-def fitian_ccf(v_grid: np.ndarray, ccf: np.ndarray) -> dict:
-    """
-    Ajuste une gaussienne sur une CCF et calcule les paramètres.
-
-    Args:
-        v_grid: Grille de vitesses en m/s
-        ccf: Profil CCF
-
-    Returns:
-        dict: Paramètres ajustés {c, k, x0, fwhm, rv, depth, span}
-    """
-
-    # Estimation initiale des paramètres
-    c_init = (ccf[0] + ccf[-1]) / 2
-    k_init = 0
-    x0_init = v_grid[len(v_grid) // 2]
-    fwhm_init = (v_grid[-1] - v_grid[0]) / 5
-
-    # Trouver le minimum (pour une CCF en absorption)
-    for i in range(len(ccf)):
-        if abs(ccf[i] - c_init) > abs(k_init):
-            k_init = ccf[i] - c_init
-            x0_init = v_grid[i]
-
-    try:
-        popt, _ = curve_fit(
-            gaussian, v_grid, ccf, p0=[c_init, k_init, x0_init, fwhm_init], maxfev=10000
-        )
-        c, k, x0, fwhm = popt
-
-        # Calcul du bissector span
-        span = calculate_bissector_span(v_grid, ccf, c, k, x0, fwhm)
-
-        return {
-            "rv": x0,
-            "depth": abs(k),
-            "fwhm": fwhm,
-            "span": span,
-            "continuum": c,
-            "amplitude": k,
-            "popt": popt,
-        }
-    except Exception:
-        return {
-            "rv": np.nan,
-            "depth": np.nan,
-            "fwhm": np.nan,
-            "span": np.nan,
-            "continuum": np.nan,
-            "amplitude": np.nan,
-        }
-
-
-def calculate_bissector_span(
-    v_grid: np.ndarray, ccf: np.ndarray, c: float, k: float, x0: float, fwhm: float
-) -> float:
-    """
-    Calcule le bissector span d'une CCF selon l'algorithme BIS_FIT2.cpp
-
-    Args:
-        v_grid: Grille de vitesses
-        ccf: Profil CCF
-        c, k, x0, fwhm: Paramètres gaussiens ajustés
-
-    Returns:
-        float: Bissector span
-    """
-    n = len(v_grid)
-    nstep = 100
-    margin = 5
-    len_depth = nstep - 2 * margin + 1
-
-    sigma = fwhm / (2 * np.sqrt(2 * np.log(2)))
-
-    # CCF normalisée
-    norm_CCF = -c / k * (1 - ccf / c)
-    depth = np.array([(i + margin) / nstep for i in range(len_depth)])
-
-    # Calcul des coefficients de l'interpolation parabolique
-    p0 = np.zeros(n - 1)
-    p1 = np.zeros(n - 1)
-    p2 = np.zeros(n - 1)
-
-    for i in range(n - 1):
-        vr = (v_grid[i] + v_grid[i + 1]) / 2
-        dCCFdRV = -(vr - x0) / sigma**2 * np.exp(-((vr - x0) ** 2) / (2 * sigma**2))
-        d2CCFdRV2 = (
-            ((vr - x0) ** 2 / sigma**2 - 1)
-            / sigma**2
-            * np.exp(-((vr - x0) ** 2) / (2 * sigma**2))
-        )
-
-        if abs(dCCFdRV) > 1e-10:
-            d2RVdCCF2 = -d2CCFdRV2 / dCCFdRV**3
-            p2[i] = d2RVdCCF2 / 2
-
-            if abs(norm_CCF[i + 1] - norm_CCF[i]) > 1e-10:
-                p1[i] = (
-                    v_grid[i + 1]
-                    - v_grid[i]
-                    - p2[i] * (norm_CCF[i + 1] ** 2 - norm_CCF[i] ** 2)
-                ) / (norm_CCF[i + 1] - norm_CCF[i])
-                p0[i] = v_grid[i] - p1[i] * norm_CCF[i] - p2[i] * norm_CCF[i] ** 2
-
-    # Trouver le maximum de la CCF normalisée
-    ind_max = np.argmax(norm_CCF)
-
-    # Calcul du bissector
-    bis = np.zeros(len_depth)
-    for i in range(len_depth):
-        i_b = ind_max
-        i_r = ind_max
-
-        # Recherche des indices gauche et droite
-        while i_b > 1 and norm_CCF[i_b] > depth[i]:
-            i_b -= 1
-        while i_r < n - 2 and norm_CCF[i_r + 1] > depth[i]:
-            i_r += 1
-
-        if i_b < len(p0) and i_r < len(p0):
-            bis[i] = (
-                p0[i_b]
-                + p0[i_r]
-                + (p1[i_b] + p1[i_r]) * depth[i]
-                + (p2[i_b] + p2[i_r]) * depth[i] ** 2
-            ) / 2
-
-    # Calcul du span (différence entre haut et bas du bissector)
-    rv_top_indices = (depth >= 0.1) & (depth <= 0.4)
-    rv_bottom_indices = (depth >= 0.6) & (depth <= 0.9)
-
-    if np.any(rv_top_indices) and np.any(rv_bottom_indices):
-        rv_top = np.mean(bis[rv_top_indices])
-        rv_bottom = np.mean(bis[rv_bottom_indices])
-        span = rv_top - rv_bottom
-    else:
-        span = np.nan
-
-    return span
-
-
-def analyze_CCFs(CCFs: np.ndarray, v_grid: np.ndarray) -> dict:
-    """
-    Analyse un ensemble de CCFs pour extraire RV, profondeur, FWHM et bissector span.
-
-    Args:
-        CCFs: Tableau 2D des CCFs (n_spectra, n_velocities)
-        v_grid: Grille de vitesses en m/s
-
-    Returns:
-        dict: Dictionnaire avec les mesures pour chaque spectre
-    """
-    n_spectra = CCFs.shape[0]
-
-    results = {
-        "rv": np.zeros(n_spectra),
-        "depth": np.zeros(n_spectra),
-        "fwhm": np.zeros(n_spectra),
-        "span": np.zeros(n_spectra),
-        "continuum": np.zeros(n_spectra),
-        "amplitude": np.zeros(n_spectra),
-        "popt": np.zeros((n_spectra, 4)),
-    }
-
-    for i in range(n_spectra):
-        params = fitian_ccf(v_grid, CCFs[i])
-        for key in results:
-            results[key][i] = params[key]
-
-    return results
-
-
-# Point d'entrée du script: appel de la fonction compute_ccf et tracé
 if __name__ == "__main__":
-    from src.plots_aestra import plot_ccf_analysis
-
-    torch.cuda.empty_cache()  # Nettoyage de la mémoire GPU
-
-    # Hyperparamètres
-    verbose: bool = True
-    v_grid_max: int = 20000
-    v_grid_step: int = 100
-    v_grid: np.ndarray = np.arange(-v_grid_max, v_grid_max, v_grid_step)
-    window_size_velocity: int = 820  # Taille de la fenêtre en espace de vitesse en m/s
-
-    # Charger les données
-    dset = np.load(
-        "data/soap_gpu_paper/dataset_1000specs_5000_6000_Kp10_P100_auto_safe.npz"
+    data = np.load(
+        "data/npz_datasets/dataset_1000specs_5000_5010_Kp1e-1_P100.npz",
+        allow_pickle=True,
     )
-    spectra = dset["cube"]
-    print(f"Spectres min/max: {spectra.min():.3f} / {spectra.max():.3f}")
-    print(f"Spectres moyenne: {spectra.mean():.3f}")
+    spectra = data["spectra"]
+    wavegrid = data["wavegrid"]
 
-    wavegrid = dset["wavegrid"]
-
-    # Calculer les CCFs
-    CCFs = compute_CCFs(
+    res = get_full_ccf_analysis(
         spectra=spectra,
         wavegrid=wavegrid,
-        v_grid=v_grid,
+        v_grid=np.linspace(-20000, 20000, 100),
+        window_size_velocity=820.0,
         mask_type="G2",
-        window_size_velocity=410,
-        verbose=verbose,
-        batch_size=32,
+        verbose=False,
+        batch_size=100,
         normalize=True,
     )
 
-    # Analyser les CCFs
-    res = analyze_CCFs(CCFs, v_grid)
-
-    # Visualisation détaillée de la première CCF avec analyse complète
-    spectrum_idx = 0
-    analysis_first = {
-        "rv": res["rv"][spectrum_idx],
-        "depth": res["depth"][spectrum_idx],
-        "fwhm": res["fwhm"][spectrum_idx],
-        "span": res["span"][spectrum_idx],
-        "continuum": res["continuum"][spectrum_idx],
-        "amplitude": res["amplitude"][spectrum_idx],
-        "popt": res["popt"][spectrum_idx],
-    }
-
-    plot_ccf_analysis(
-        v_grid=v_grid,
-        ccf=CCFs[spectrum_idx],
-        analysis_results=analysis_first,
-        spectrum_idx=spectrum_idx,
-        show_plot=True,
-    )
-
-    # Plot de la série temporelle des RV
-    plt.figure(figsize=(18, 6))
-    plt.plot(res["rv"], "ko-", markersize=3, label="RV mesurées")
-    plt.grid(True, alpha=0.3)
-    plt.xlabel("Index du spectre")
-    plt.ylabel("Vitesse radiale (m/s)")
-    plt.title("Série temporelle des vitesses radiales extraites des CCFs")
+    plt.figure(figsize=(10, 6))
+    plt.plot(res["rv"], "o", markersize=2, label="Points RV vs Depth")
+    plt.xlabel("Vitesse Radiale (m/s)")
+    plt.ylabel("Profondeur (absorption)")
+    plt.title("Analyse des CCFs - RV vs Profondeur")
+    plt.grid()
     plt.legend()
+    plt.tight_layout()
+    plt.savefig("ccf_analysis_rv_vs_depth.png", dpi=300)
     plt.show()
-
-    # Statistiques globales
-    print("\n=== Statistiques des mesures CCF ===")
-    print(f"Nombre de spectres analysés: {len(res['rv'])}")
-    print(f"RV moyenne: {np.nanmean(res['rv']):.2f} ± {np.nanstd(res['rv']):.2f} m/s")
-    print(
-        f"FWHM moyenne: {np.nanmean(res['fwhm']):.2f} ± {np.nanstd(res['fwhm']):.2f} m/s"
-    )
-    print(
-        f"Bissector span moyen: {np.nanmean(res['span']):.2f} ± {np.nanstd(res['span']):.2f} m/s"
-    )
-    print(
-        f"Profondeur moyenne: {np.nanmean(res['depth']):.4f} ± {np.nanstd(res['depth']):.4f}"
-    )
+    print("Analyse CCF terminée et graphique enregistré.")

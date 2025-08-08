@@ -143,6 +143,168 @@ def plot_losses(losses_history, exp_name, phase_name, epoch, plot_dir, console):
     console.log(f"📊 Mosaic plot saved: {filename}")
 
 
+def plot_rv_predictions_dataset(
+    dataset,
+    model: torch.nn.Module,
+    exp_name: str,
+    phase_name: str,
+    epoch: int,
+    plot_dir: str,
+    chunk_size: int = 256,
+) -> None:
+    """
+    Calcule et trace les prédictions RV (r_obs = y_obs - b_obs) pour TOUT le dataset.
+
+    Args:
+        dataset: SpectrumDataset (utilise dataset.spectra et éventuellement dataset.time_values)
+        model: Modèle AESTRA (utilise model.rvestimator et model.b_obs)
+        exp_name: Nom de l'expérience
+        phase_name: Phase d'entraînement
+        epoch: Époch actuelle (pour le nom de fichier)
+        plot_dir: Répertoire de sauvegarde
+        chunk_size: Taille des chunks pour éviter d'épuiser la mémoire
+    """
+    os.makedirs(plot_dir, exist_ok=True)
+
+    N = len(dataset)
+    device = model.b_obs.device
+
+    # Préserver l'état d'entraînement du modèle
+    was_training = model.training
+    model.eval()
+
+    preds = []
+    with torch.no_grad():
+        for i in range(0, N, chunk_size):
+            j = min(i + chunk_size, N)
+            y_batch = dataset.spectra[i:j].to(device)
+            r_batch = y_batch - model.b_obs.unsqueeze(0)
+            v_batch = model.rvestimator(r_batch)
+            preds.append(v_batch.detach().cpu())
+
+    # Restaurer l'état précédent
+    if was_training:
+        model.train()
+    else:
+        model.eval()
+
+    v_pred = torch.cat(preds, dim=0).numpy()
+    idx = np.arange(N)
+
+    # Axe temporel si disponible
+    t = None
+    try:
+        t = dataset.time_values.detach().cpu().numpy()
+    except Exception:
+        t = None
+
+    import matplotlib.pyplot as plt
+
+    if t is not None and t.shape[0] == N:
+        fig, axes = plt.subplots(1, 3, figsize=(16, 4))
+        axes[0].plot(idx, v_pred, "b.-", alpha=0.85)
+        axes[0].set_title("RV predictions vs index")
+        axes[0].set_xlabel("Index")
+        axes[0].set_ylabel("v_pred (m/s)")
+        axes[0].grid(True, alpha=0.3)
+
+        axes[1].plot(t, v_pred, "g.-", alpha=0.85)
+        axes[1].set_title("RV predictions vs time")
+        axes[1].set_xlabel("Time")
+        axes[1].set_ylabel("v_pred (m/s)")
+        axes[1].grid(True, alpha=0.3)
+
+        axes[2].hist(v_pred, bins=40, color="tab:blue", alpha=0.8)
+        axes[2].set_title("Distribution of RV predictions")
+        axes[2].set_xlabel("v_pred (m/s)")
+        axes[2].set_ylabel("Count")
+        axes[2].grid(True, alpha=0.3)
+    else:
+        fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+        axes[0].plot(idx, v_pred, "b.-", alpha=0.85)
+        axes[0].set_title("RV predictions on full dataset")
+        axes[0].set_xlabel("Index")
+        axes[0].set_ylabel("v_pred (m/s)")
+        axes[0].grid(True, alpha=0.3)
+
+        axes[1].hist(v_pred, bins=40, color="tab:blue", alpha=0.8)
+        axes[1].set_title("Distribution of RV predictions")
+        axes[1].set_xlabel("v_pred (m/s)")
+        axes[1].set_ylabel("Count")
+        axes[1].grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    filename = f"{exp_name}_{phase_name}_rvpred_full_epoch_{epoch}.png"
+    filepath = os.path.join(plot_dir, filename)
+    plt.savefig(filepath, dpi=200, bbox_inches="tight")
+    plt.close()
+
+
+def plot_rv_predictions(
+    batch: tuple,
+    model: torch.nn.Module,
+    exp_name: str,
+    phase_name: str,
+    epoch: int,
+    plot_dir: str,
+) -> None:
+    """
+    Plot des prédictions de vitesses radiales du RVEstimator sur les entrées r_obs = y_obs - b_obs.
+
+    Args:
+        batch: Batch de données (y_obs, y_aug, v_offset, wavegrid)
+        model: Modèle AESTRA (utilise model.rvestimator et model.b_obs)
+        exp_name: Nom de l'expérience
+        phase_name: Phase d'entraînement
+        epoch: Époch actuelle (pour le nom de fichier)
+        plot_dir: Répertoire de sauvegarde
+    """
+    os.makedirs(plot_dir, exist_ok=True)
+
+    batch_yobs, _, _, _ = batch
+
+    # Préserver l'état d'entraînement du modèle
+    was_training = model.training
+
+    with torch.no_grad():
+        batch_robs = batch_yobs - model.b_obs.unsqueeze(0)
+        v_pred = model.rvestimator(batch_robs).detach().cpu().numpy()
+
+    # Restaurer l'état précédent
+    if was_training:
+        model.train()
+    else:
+        model.eval()
+
+    idx = np.arange(len(v_pred))
+
+    import matplotlib.pyplot as plt  # local import to avoid issues if backend changes
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+
+    # Courbe des prédictions (par ordre de batch)
+    axes[0].plot(idx, v_pred, "b.-", alpha=0.85)
+    axes[0].set_title("RV predictions on r_obs = y_obs - b_obs")
+    axes[0].set_xlabel("Batch index")
+    axes[0].set_ylabel("v_pred (m/s)")
+    axes[0].grid(True, alpha=0.3)
+
+    # Histogramme des prédictions
+    axes[1].hist(v_pred, bins=30, color="tab:blue", alpha=0.75)
+    axes[1].set_title("Distribution of RV predictions")
+    axes[1].set_xlabel("v_pred (m/s)")
+    axes[1].set_ylabel("Count")
+    axes[1].grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    filename = f"{exp_name}_{phase_name}_rvpred_epoch_{epoch}.png"
+    filepath = os.path.join(plot_dir, filename)
+    plt.savefig(filepath, dpi=200, bbox_inches="tight")
+    plt.close()
+
+    # Pas de console ici pour éviter une dépendance circulaire avec train.py
+
+
 def plot_aestra_analysis(
     batch: tuple,
     model: torch.nn.Module,
@@ -912,8 +1074,6 @@ Corrélations avec RV:
     else:
         plt.close()
 
-    return True
-
 
 def plot_rv_periodogram(
     periods,
@@ -1096,7 +1256,7 @@ def plot_rv_periodogram(
                         period, color="red", linestyle="--", alpha=0.8, linewidth=2
                     )
                     ax_zoom.set_xlabel("Période (jours)")
-                    ax_zoom.set_ylabel("Puissance LS")
+                    ax_zoom.set_ylabel("Puissance")
                     ax_zoom.set_title(f"Zoom Planète {i + 1}: {period:.1f}d")
                     ax_zoom.grid(True, alpha=0.3)
 
@@ -1152,17 +1312,21 @@ def plot_ccf_analysis(
     spectrum_idx: int = 0,
     save_path: Optional[str] = None,
     show_plot: bool = True,
+    all_ccfs: Optional[np.ndarray] = None,  # (N, M) pour halo min–max
+    halo_alpha: float = 0.15,  # transparence du halo
 ):
     """
     Visualise une CCF avec son analyse complète (fit gaussien, FWHM, bissector span).
 
     Args:
         v_grid: Grille de vitesses en m/s
-        ccf: Profil CCF à visualiser
+        ccf: Profil CCF à visualiser (1D) ou matrice (N, M). Si 2D, la première ligne est tracée et l'ensemble sert au halo
         analysis_results: Résultats de l'analyse CCF (dict avec rv, depth, fwhm, span, etc.)
         spectrum_idx: Index du spectre analysé (pour le titre)
         save_path: Chemin de sauvegarde du plot (optionnel)
         show_plot: Si True, affiche le plot
+        all_ccfs: Optionnel, tableau/list de toutes les CCFs (N, M) pour tracer un halo (enveloppe min–max) sous la CCF principale
+        halo_alpha: Transparence du halo (0–1)
     """
     from src.ccf import gaussian
 
@@ -1173,22 +1337,78 @@ def plot_ccf_analysis(
 
     # Plot 1: CCF et fit gaussien (haut gauche)
     ax1 = axes[0, 0]
-    ax1.plot(v_grid, ccf, "b-", linewidth=1.5, label="CCF observée", alpha=0.7)
+
+    # Préparer CCF principale et éventuel ensemble pour halo
+    ccf_main = ccf
+    ccf_stack = None
+
+    # Si l'utilisateur passe ccf en 2D, utiliser la 1ère comme principale et l'ensemble pour halo
+    if isinstance(ccf, np.ndarray) and ccf.ndim == 2:
+        if ccf.shape[1] == len(v_grid):
+            ccf_stack = ccf
+            ccf_main = ccf[0]
+        else:
+            # Dimensions incompatibles, on ignore le halo
+            ccf_main = ccf[0]
+            ccf_stack = None
+
+    # Paramètre dédié all_ccfs a priorité si fourni
+    if all_ccfs is not None:
+        try:
+            ccf_stack = np.asarray(all_ccfs)
+            if ccf_stack.ndim == 1:
+                ccf_stack = ccf_stack[None, :]
+            # Vérifier compatibilité
+            if ccf_stack.shape[1] != len(v_grid):
+                ccf_stack = None  # incompatibilité → pas de halo
+        except Exception:
+            ccf_stack = None
+
+    # Tracer le halo (enveloppe min–max) avant la courbe principale pour qu'il soit dessous
+    if ccf_stack is not None and ccf_stack.shape[0] > 1:
+        ccf_min = np.nanmin(ccf_stack, axis=0)
+        ccf_max = np.nanmax(ccf_stack, axis=0)
+        ax1.fill_between(
+            v_grid,
+            ccf_min,
+            ccf_max,
+            color="b",
+            alpha=halo_alpha,
+            linewidth=0,
+            zorder=0,
+            label="Halo CCFs (min–max)",
+        )
+
+    # Tracer la CCF principale
+    ax1.plot(
+        v_grid, ccf_main, "b-", linewidth=1.5, label="CCF observée", alpha=0.7, zorder=1
+    )
 
     # Fit gaussien si disponible
     if "popt" in analysis_results and not np.any(np.isnan(analysis_results["popt"])):
         v_fine = np.linspace(v_grid.min(), v_grid.max(), 1000)
         ccf_fit = gaussian(v_fine, *analysis_results["popt"])
-        ax1.plot(v_fine, ccf_fit, "r-", linewidth=2, label="Fit gaussien")
+        ax1.plot(v_fine, ccf_fit, "r-", linewidth=2, label="Fit gaussien", zorder=2)
 
         # Marquer le centre de la gaussienne (RV)
         rv = analysis_results["rv"]
         if not np.isnan(rv):
             rv_idx = np.argmin(np.abs(v_grid - rv))
             ax1.axvline(
-                rv, color="red", linestyle="--", alpha=0.8, label=f"RV = {rv:.1f} m/s"
+                rv,
+                color="red",
+                linestyle="--",
+                alpha=0.8,
+                label=f"RV = {rv:.1f} m/s",
+                zorder=2,
             )
-            ax1.plot(rv, ccf[rv_idx], "ro", markersize=8, label="Minimum CCF")
+            # Sécurité si la CCF principale était 2D/halo
+            y_min_marker = (
+                ccf_main[rv_idx] if np.ndim(ccf_main) == 1 else ccf[0, rv_idx]
+            )
+            ax1.plot(
+                rv, y_min_marker, "ro", markersize=8, label="Minimum CCF", zorder=3
+            )
 
         # Marquer la FWHM
         fwhm = analysis_results["fwhm"]
@@ -1221,12 +1441,9 @@ def plot_ccf_analysis(
             c, k, x0, fwhm = analysis_results["popt"]
 
             # Calcul du bissector (adapté de calculate_bissector_span)
-            n = len(v_grid)
             nstep = 100
             margin = 5
             len_depth = nstep - 2 * margin + 1
-
-            sigma = fwhm / (2 * np.sqrt(2 * np.log(2)))
 
             # CCF normalisée
             norm_CCF = -c / k * (1 - ccf / c)

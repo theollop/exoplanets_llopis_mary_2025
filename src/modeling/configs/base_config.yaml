@@ -8,8 +8,7 @@
 # --------------------------------------------------------------------------
 # Données
 # --------------------------------------------------------------------------
-data_root_dir: "data"     # Répertoire racine des données (peut être modifié pour Colab)
-n_spectra: 10
+dataset_filepath: "data/npz_datasets/dataset_1000specs_5000_5300_Kp1e-1_P100.npz"  # Chemin complet du NPZ standardisé
 data_dtype: float32       # Type numpy/torch du tableau des spectres (float16/float32/float64)
 
 checkpoint_every: 100       # Fréquence de sauvegarde des checkpoints (en epochs)
@@ -17,7 +16,7 @@ checkpoint_every: 100       # Fréquence de sauvegarde des checkpoints (en epoch
 # --------------------------------------------------------------------------
 # DataLoader
 # --------------------------------------------------------------------------
-batch_size: 64            # Nombre d'échantillons par batch
+batch_size: 32            # Nombre d'échantillons par batch
 shuffle: false            # True pour mélanger à chaque epoch
 
 # --------------------------------------------------------------------------
@@ -60,50 +59,38 @@ grad_scaler_growth_interval: 2000 # Intervalle de croissance du scaler
 # --------------------------------------------------------------------------
 output_root_dir: "experiments"                                # Répertoire racine pour tous les outputs (local)
 experiment_name: "aestra_local_experiment"                 # Nom de l'expérience (créera un sous-dossier)
-# Structure créée automatiquement :
-# output_root_dir/experiment_name/
-# ├── models/          # Checkpoints et modèles finaux
-# ├── figures/         # Plots d'entraînement
-# ├── spectra/         # Plots de spectres
-# ├── logs/            # Fichiers CSV des losses
-# └── config.yaml      # Copie de la configuration utilisée
 
 # --------------------------------------------------------------------------
 # Logging des losses
 # --------------------------------------------------------------------------
 save_losses_csv: true     # Sauver les losses dans un fichier CSV
 csv_save_every: 100       # Fréquence de sauvegarde CSV (en epochs)
+plot_every: 0             # Plot des losses tous les X epochs (0 = désactivé)
+plot_rv_every: 50          # Plot des prédictions RV (dataset complet) tous les X epochs (0 = désactivé)
+plot_rv_chunk_size: 256   # Taille des chunks pour le calcul des RV sur tout le dataset
 
 # --------------------------------------------------------------------------
 # Phases d'entraînement
 # --------------------------------------------------------------------------
-# Liste d'étapes séquentielles, chacune avec ses propres optimiseur,
-# hyperparamètres de scheduler et réglages de trainabilité.
 phases:
   - name: rvonly
-    n_epochs: 200
-    optimizer: "torch.optim.Adam"                # Chemin complet de la classe
-    optimizer_kwargs:
-      lr: 0.0001
-      weight_decay: 0.0
-    b_obs_trainable: false
-    b_rest_trainable: false
-    # scheduler: "torch.optim.lr_scheduler.StepLR"
-    # scheduler_kwargs:
-    #   step_size: 50
-    #   gamma: 0.5
-
-
-  - name: joint
     n_epochs: 200
     optimizer: "torch.optim.Adam"
     optimizer_kwargs:
       lr: 0.0001
       weight_decay: 0.0
     b_obs_trainable: false
+    b_rest_trainable: false
+    # plot_rv_every: 10           # (optionnel) override par-phase
+    # plot_rv_chunk_size: 512     # (optionnel) override par-phase
+
+  - name: joint
+    n_epochs: 100
+    optimizer: "torch.optim.Adam"
+    optimizer_kwargs:
+      lr: 0.0001
+      weight_decay: 0.0
+    b_obs_trainable: false
     b_rest_trainable: true
-    scheduler: "torch.optim.lr_scheduler.StepLR"
-    scheduler_kwargs:
-      step_size: 50
-      gamma: 0.7
-    plot_spectra_every: 10     # Plot des spectres toutes les X epochs (0 = désactivé)
+    # plot_rv_every: 10           # (optionnel) override par-phase
+    # plot_rv_chunk_size: 512     # (optionnel) override par-phase

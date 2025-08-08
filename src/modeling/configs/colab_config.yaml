@@ -9,8 +9,7 @@
 # Données
 # --------------------------------------------------------------------------
 data_root_dir: "/content/drive/MyDrive/PFE/data"     # Répertoire racine des données (peut être modifié pour Colab)
-wavemin: 5000.0           # Longueur d'onde minimale (nm)
-wavemax: 5500.0           # Longueur d'onde maximale (nm)
+dataset_filename: "dataset_1000specs_5000_5050_Kp1e-1_P100.npz"  # Fichier NPZ dans data/npz_datasets
 data_dtype: float32       # Type numpy/torch du tableau des spectres (float16/float32/float64)
 
 checkpoint_every: 20       # Fréquence de sauvegarde des checkpoints (en epochs)

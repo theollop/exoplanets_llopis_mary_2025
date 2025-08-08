@@ -31,7 +31,11 @@ from rich.table import Table
 from src.modeling.models import AESTRA, save_checkpoint
 from src.dataset import SpectrumDataset, generate_collate_fn
 from src.utils import get_class, clear_gpu_memory, get_gpu_memory_info
-from src.plots_aestra import plot_losses, plot_aestra_analysis
+from src.plots_aestra import (
+    plot_losses,
+    plot_aestra_analysis,
+    plot_rv_predictions_dataset,
+)
 
 console = Console()
 
@@ -140,7 +144,7 @@ def save_experiment_checkpoint(
     console.log(f"💾 Experiment checkpoint saved: {path}")
 
 
-def load_experiment_checkpoint(path, data_root_dir=None, device="cuda"):
+def load_experiment_checkpoint(path, device="cuda"):
     """
     Charge un checkpoint d'expérience complet.
 
@@ -156,8 +160,7 @@ def load_experiment_checkpoint(path, data_root_dir=None, device="cuda"):
 
     # Reconstruction du dataset
     dataset_metadata = ckpt["dataset_metadata"]
-    if data_root_dir is not None:
-        dataset_metadata["data_root_dir"] = data_root_dir
+    # data_root_dir override supprimé: on utilise le chemin complet enregistré
     dataset = SpectrumDataset(**dataset_metadata)
 
     # Reconstruction du modèle
@@ -172,10 +175,8 @@ def load_experiment_checkpoint(path, data_root_dir=None, device="cuda"):
         cycle_length=config["cycle_length"],
         b_obs=dataset.template,
         b_rest=dataset.spectra.mean(dim=0),
-        device=device,  # ⚠️ NOUVEAU: Passer le device explicitement
-        dtype=getattr(
-            torch, config.get("model_dtype", "float32")
-        ),  # ⚠️ NOUVEAU: Support dtype modèle
+        device=device,
+        dtype=getattr(torch, config.get("model_dtype", "float32")),
     )
     model.load_state_dict(ckpt["model_state_dict"])
     model.set_phase(ckpt.get("model_phase", "joint"))
@@ -189,11 +190,9 @@ def load_experiment_checkpoint(path, data_root_dir=None, device="cuda"):
         "config": config,
         "cfg_name": ckpt["cfg_name"],
         "epoch": ckpt["epoch"],
-        "current_phase": ckpt.get("current_phase", "joint"),  # Phase actuelle
+        "current_phase": ckpt.get("current_phase", "joint"),
         "checkpoint_data": ckpt,
-        "scaler_state_dict": ckpt.get(
-            "scaler_state_dict", None
-        ),  # État du scaler pour mixed precision
+        "scaler_state_dict": ckpt.get("scaler_state_dict", None),
     }
 
 
@@ -467,6 +466,35 @@ def train_phase(
                     losses_history, cfg_name, phase_name, epoch + 1, plot_dir, console
                 )
 
+            # Plotting RV predictions périodique (dataset complet)
+            plot_rv_every = phase_config.get(
+                "plot_rv_every", config.get("plot_rv_every", 0)
+            )
+            if plot_rv_every > 0 and (epoch + 1) % plot_rv_every == 0:
+                rv_plot_dir = (
+                    exp_dirs["figures_dir"]
+                    if exp_dirs
+                    else config.get("plot_dir", "reports/figures")
+                )
+                rv_chunk_size = phase_config.get(
+                    "plot_rv_chunk_size", config.get("plot_rv_chunk_size", 256)
+                )
+                try:
+                    plot_rv_predictions_dataset(
+                        dataset,
+                        model,
+                        cfg_name,
+                        phase_name,
+                        epoch + 1,
+                        rv_plot_dir,
+                        chunk_size=rv_chunk_size,
+                    )
+                    console.log(
+                        f"📈 RV predictions (full dataset) plotted at epoch {epoch + 1} (saved in {rv_plot_dir})"
+                    )
+                except Exception as e:
+                    console.log(f"⚠️  RV plotting failed: {e}")
+
             # Plots de spectres périodiques
             plot_spectra_every = phase_config.get("plot_spectra_every", 0)
             if plot_spectra_every > 0 and (epoch + 1) % plot_spectra_every == 0:
@@ -616,16 +644,17 @@ def main(cfg_name=None, checkpoint=None, device="cuda"):
         start_epoch = 0
 
         console.log("🔧 Début de la création du dataset...")
-        console.log(f"📁 data_root_dir: {config.get('data_root_dir', 'data')}")
+        console.log(f"📁 dataset_filepath: {config.get('dataset_filepath')}")
 
-        # Création du dataset
+        # Création du dataset (NPZ standardisé uniquement)
         try:
             dataset = SpectrumDataset(
-                n_spectra=config.get("n_spectra", None),
-                wavemin=config.get("wavemin", None),
-                wavemax=config.get("wavemax", None),
+                dataset_filepath=config.get(
+                    "dataset_filepath",
+                    "data/npz_datasets/dataset_1000specs_5000_5050_Kp1e-1_P100.npz",
+                ),
                 data_dtype=getattr(torch, config.get("data_dtype", "float32")),
-                data_root_dir=config.get("data_root_dir", "data"),
+                cuda=True,
             )
             console.log("✅ Dataset créé avec succès")
         except Exception as e:
