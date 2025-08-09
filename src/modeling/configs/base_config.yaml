@@ -10,7 +10,7 @@
 # --------------------------------------------------------------------------
 experiment_name: "aestra_local_experiment_range_50"                 # Nom de l'expérience (créera un sous-dossier)
 
-dataset_filepath: "data/npz_datasets/dataset_1000specs_5000_5050_Kp1e-1_P100_Phi0.npz"  # Chemin complet du NPZ standardisé
+dataset_filepath: "data/npz_datasets/dataset_1000specs_5000_5010_Kp1e-1_P100_Phi0.npz"  # Chemin complet du NPZ standardisé
 output_root_dir: "experiments"                                # Répertoire racine pour tous les outputs (local)
 
 data_dtype: float32       # Type numpy/torch du tableau des spectres (float16/float32/float64)

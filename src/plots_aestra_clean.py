@@ -21,20 +21,10 @@ import torch
 from typing import Optional
 from src.interpolate import shift_spectra_linear
 from src.dataset import SpectrumDataset
+from scipy.signal import find_peaks
+from astropy.timeseries import LombScargle
 
-# Lazy imports for optional dependencies
-try:
-    from scipy.signal import find_peaks
-    from astropy.timeseries import LombScargle
-    HAS_ASTROPY = True
-except ImportError:
-    HAS_ASTROPY = False
-
-try:
-    import corner
-    HAS_CORNER = True
-except ImportError:
-    HAS_CORNER = False
+import corner
 
 
 def create_phase_plot_dir(plot_dir: str, phase_name: str) -> str:
@@ -332,9 +322,21 @@ def plot_latent_space_3d(
     ax = fig.add_subplot(111, projection="3d")
 
     # Utiliser les 3 premières dimensions
-    s1 = latent_vectors[:, 0] if latent_vectors.shape[1] > 0 else np.zeros(len(rv_values))
-    s2 = latent_vectors[:, 1] if latent_vectors.shape[1] > 1 else np.zeros(len(rv_values))
-    s3 = latent_vectors[:, 2] if latent_vectors.shape[1] > 2 else np.zeros(len(rv_values))
+    s1 = (
+        latent_vectors[:, 0]
+        if latent_vectors.shape[1] > 0
+        else np.zeros(len(rv_values))
+    )
+    s2 = (
+        latent_vectors[:, 1]
+        if latent_vectors.shape[1] > 1
+        else np.zeros(len(rv_values))
+    )
+    s3 = (
+        latent_vectors[:, 2]
+        if latent_vectors.shape[1] > 2
+        else np.zeros(len(rv_values))
+    )
 
     # Scatter plot avec coloration
     scatter = ax.scatter(s1, s2, s3, c=rv_values, cmap="viridis", s=20, alpha=0.6)
@@ -351,7 +353,14 @@ def plot_latent_space_3d(
     save_plot(fig, filename, verbose=True)
 
 
-def plot_periodogram_analysis(periods, power, metrics, P_inj=None, title="Lomb-Scargle Periodogram", save_path=None):
+def plot_periodogram_analysis(
+    periods,
+    power,
+    metrics,
+    P_inj=None,
+    title="Lomb-Scargle Periodogram",
+    save_path=None,
+):
     """
     Plot complet d'analyse de périodogramme avec métriques de détection.
 
@@ -366,40 +375,56 @@ def plot_periodogram_analysis(periods, power, metrics, P_inj=None, title="Lomb-S
     fig, ax = plt.subplots(figsize=(12, 8))
 
     # Plot principal du périodogramme
-    ax.loglog(periods, power, 'b-', alpha=0.8, linewidth=1)
-    ax.set_xlabel('Period [days]')
-    ax.set_ylabel('Power')
+    ax.loglog(periods, power, "b-", alpha=0.8, linewidth=1)
+    ax.set_xlabel("Period [days]")
+    ax.set_ylabel("Power")
     ax.set_title(title)
     ax.grid(True, alpha=0.3)
 
     # Marquer la période injectée
     if P_inj is not None and P_inj > 0:
-        ax.axvline(P_inj, color='red', linestyle='--', linewidth=2, 
-                  label=f'Injected P = {P_inj:.1f} d')
+        ax.axvline(
+            P_inj,
+            color="red",
+            linestyle="--",
+            linewidth=2,
+            label=f"Injected P = {P_inj:.1f} d",
+        )
 
     # Marquer la période détectée si disponible
-    P_detected = metrics.get('P_detected')
+    P_detected = metrics.get("P_detected")
     if P_detected is not None:
-        ax.axvline(P_detected, color='orange', linestyle=':', linewidth=2,
-                  label=f'Detected P = {P_detected:.1f} d')
+        ax.axvline(
+            P_detected,
+            color="orange",
+            linestyle=":",
+            linewidth=2,
+            label=f"Detected P = {P_detected:.1f} d",
+        )
 
     # Ajouter les métriques comme texte
     text_lines = []
-    if metrics.get('fap_at_Pinj') is not None:
+    if metrics.get("fap_at_Pinj") is not None:
         text_lines.append(f"FAP at P_inj: {metrics['fap_at_Pinj']:.2e}")
-    if metrics.get('power_ratio') is not None:
+    if metrics.get("power_ratio") is not None:
         text_lines.append(f"Power ratio: {metrics['power_ratio']:.2f}")
-    if metrics.get('n_sig_peaks_outside') is not None:
+    if metrics.get("n_sig_peaks_outside") is not None:
         text_lines.append(f"Sig. peaks outside: {metrics['n_sig_peaks_outside']}")
-    if metrics.get('delta_P') is not None:
+    if metrics.get("delta_P") is not None:
         text_lines.append(f"ΔP: {metrics['delta_P']:.2f} d")
 
     if text_lines:
-        text_str = '\n'.join(text_lines)
-        ax.text(0.02, 0.98, text_str, transform=ax.transAxes, 
-               verticalalignment='top', horizontalalignment='left',
-               bbox=dict(boxstyle="round,pad=0.4", facecolor="white", alpha=0.8),
-               fontsize=10)
+        text_str = "\n".join(text_lines)
+        ax.text(
+            0.02,
+            0.98,
+            text_str,
+            transform=ax.transAxes,
+            verticalalignment="top",
+            horizontalalignment="left",
+            bbox=dict(boxstyle="round,pad=0.4", facecolor="white", alpha=0.8),
+            fontsize=10,
+        )
 
     ax.legend()
 
@@ -419,21 +444,17 @@ def plot_mcmc_posteriors(samples, truths=None, save_path=None, labels=None):
         save_path: Chemin pour sauvegarder la figure
         labels: Labels des paramètres
     """
-    if not HAS_CORNER:
-        print("Corner package not available. Skipping MCMC posterior plot.")
-        return
-
     if labels is None:
-        labels = ['P [days]', 'K [m/s]', 'φ [rad]']
+        labels = ["P [days]", "K [m/s]", "φ [rad]"]
 
     fig = corner.corner(
         samples,
         labels=labels,
         truths=truths,
-        truth_color='red',
+        truth_color="red",
         show_titles=True,
         title_kwargs={"fontsize": 12},
-        label_kwargs={"fontsize": 12}
+        label_kwargs={"fontsize": 12},
     )
 
     if save_path:
@@ -442,7 +463,9 @@ def plot_mcmc_posteriors(samples, truths=None, save_path=None, labels=None):
         plt.show()
 
 
-def plot_latent_distance_distribution(delta_s_rand, delta_s_aug, save_path=None, show_plot=False):
+def plot_latent_distance_distribution(
+    delta_s_rand, delta_s_aug, save_path=None, show_plot=False
+):
     """
     Plot de la distribution des distances latentes pour pairs aléatoires vs augmentées.
 
@@ -471,32 +494,49 @@ def plot_latent_distance_distribution(delta_s_rand, delta_s_aug, save_path=None,
     bins = np.logspace(np.log10(x_min), np.log10(x_max), 50)
 
     # Histogrammes
-    ax.hist(delta_s_rand, bins=bins, alpha=0.7, density=True,
-           label=f'Random pairs (μ={mean_rand:.3f})', color='blue')
-    ax.hist(delta_s_aug, bins=bins, alpha=0.7, density=True,
-           label=f'Augmented pairs (μ={mean_aug:.3f})', color='red')
+    ax.hist(
+        delta_s_rand,
+        bins=bins,
+        alpha=0.7,
+        density=True,
+        label=f"Random pairs (μ={mean_rand:.3f})",
+        color="blue",
+    )
+    ax.hist(
+        delta_s_aug,
+        bins=bins,
+        alpha=0.7,
+        density=True,
+        label=f"Augmented pairs (μ={mean_aug:.3f})",
+        color="red",
+    )
 
     # Lignes verticales pour les moyennes
-    ax.axvline(mean_rand, color='blue', linestyle='--', linewidth=2, alpha=0.8)
-    ax.axvline(mean_aug, color='red', linestyle='--', linewidth=2, alpha=0.8)
+    ax.axvline(mean_rand, color="blue", linestyle="--", linewidth=2, alpha=0.8)
+    ax.axvline(mean_aug, color="red", linestyle="--", linewidth=2, alpha=0.8)
 
     # Configuration de l'échelle logarithmique
-    ax.set_xscale('log')
-    ax.set_xlabel('Latent Distance ||s_i - s_j||')
-    ax.set_ylabel('Density')
-    ax.set_title('Distribution of Latent Distances')
+    ax.set_xscale("log")
+    ax.set_xlabel("Latent Distance ||s_i - s_j||")
+    ax.set_ylabel("Density")
+    ax.set_title("Distribution of Latent Distances")
     ax.legend()
     ax.grid(True, alpha=0.3)
 
     # Ajout d'informations statistiques
-    info_text = f'Ratio μ_rand/μ_aug: {mean_rand/mean_aug:.2f}'
-    ax.text(0.7, 0.8, info_text, transform=ax.transAxes,
-           bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.8),
-           fontsize=10)
+    info_text = f"Ratio μ_rand/μ_aug: {mean_rand / mean_aug:.2f}"
+    ax.text(
+        0.7,
+        0.8,
+        info_text,
+        transform=ax.transAxes,
+        bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.8),
+        fontsize=10,
+    )
 
     if save_path:
         save_plot(fig, save_path, verbose=True)
-    
+
     if show_plot:
         plt.show()
 
@@ -512,7 +552,7 @@ def plot_yact_perturbed(all_yact_perturbed, wavegrid, save_path=None, show_plot=
         show_plot: Afficher le plot
     """
     latent_dim = all_yact_perturbed.shape[0]
-    
+
     # Configuration adaptative de la grille
     if latent_dim <= 2:
         nrows, ncols = 1, latent_dim
@@ -524,8 +564,8 @@ def plot_yact_perturbed(all_yact_perturbed, wavegrid, save_path=None, show_plot=
         ncols = 3
         nrows = (latent_dim + ncols - 1) // ncols
 
-    fig, axes = plt.subplots(nrows, ncols, figsize=(5*ncols, 4*nrows))
-    
+    fig, axes = plt.subplots(nrows, ncols, figsize=(5 * ncols, 4 * nrows))
+
     if latent_dim == 1:
         axes = [axes]
     elif nrows == 1:
@@ -538,21 +578,28 @@ def plot_yact_perturbed(all_yact_perturbed, wavegrid, save_path=None, show_plot=
 
     for dim in range(latent_dim):
         ax = axes[dim]
-        
+
         # Plot quelques échantillons représentatifs
         n_samples_to_plot = min(5, all_yact_perturbed.shape[1])
-        sample_indices = np.linspace(0, all_yact_perturbed.shape[1]-1, n_samples_to_plot, dtype=int)
-        
+        sample_indices = np.linspace(
+            0, all_yact_perturbed.shape[1] - 1, n_samples_to_plot, dtype=int
+        )
+
         for i, sample_idx in enumerate(sample_indices):
-            ax.plot(wavegrid, all_yact_perturbed[dim, sample_idx], 
-                   color=colors[i], alpha=0.7, linewidth=1,
-                   label=f'Sample {sample_idx}' if dim == 0 else '')
-        
-        ax.set_xlabel('Wavelength [Å]')
-        ax.set_ylabel('Perturbed Activation')
-        ax.set_title(f'Dimension {dim+1} Perturbation')
+            ax.plot(
+                wavegrid,
+                all_yact_perturbed[dim, sample_idx],
+                color=colors[i],
+                alpha=0.7,
+                linewidth=1,
+                label=f"Sample {sample_idx}" if dim == 0 else "",
+            )
+
+        ax.set_xlabel("Wavelength [Å]")
+        ax.set_ylabel("Perturbed Activation")
+        ax.set_title(f"Dimension {dim + 1} Perturbation")
         ax.grid(True, alpha=0.3)
-        
+
         if dim == 0:  # Légende seulement sur le premier subplot
             ax.legend(fontsize=8)
 
@@ -561,11 +608,11 @@ def plot_yact_perturbed(all_yact_perturbed, wavegrid, save_path=None, show_plot=
         for j in range(latent_dim, len(axes)):
             axes[j].set_visible(False)
 
-    fig.suptitle('Latent Space Perturbation Analysis', fontsize=16)
+    fig.suptitle("Latent Space Perturbation Analysis", fontsize=16)
 
     if save_path:
         save_plot(fig, save_path, verbose=True)
-    
+
     if show_plot:
         plt.show()
 
@@ -583,24 +630,26 @@ def plot_latent_analysis_for_series(all_s, y_series, label, out_root_dir, correl
     """
     y = np.asarray(y_series).reshape(-1)
     S = all_s.shape[1]
-    
+
     # Créer le répertoire de sortie
     os.makedirs(out_root_dir, exist_ok=True)
-    
+
     # Statistiques pour annotation
-    latent_vs_velocity = correlations.get('latent_vs_velocity', [])
-    activity_vs_velocity = correlations.get('activity_vs_velocity', {})
-    
+    latent_vs_velocity = correlations.get("latent_vs_velocity", [])
+    activity_vs_velocity = correlations.get("activity_vs_velocity", {})
+
     annotation_lines = [f"Series: {label}"]
-    if latent_vs_velocity:
+    if (
+        len(latent_vs_velocity) > 0
+    ):  # Correction: vérifier la longueur au lieu d'évaluer directement l'array
         max_corr_idx = np.argmax(np.abs(latent_vs_velocity))
         max_corr_val = latent_vs_velocity[max_corr_idx]
-        annotation_lines.append(f"Max |corr|: s{max_corr_idx+1} = {max_corr_val:.3f}")
-    
+        annotation_lines.append(f"Max |corr|: s{max_corr_idx + 1} = {max_corr_val:.3f}")
+
     for act_name, corr_val in activity_vs_velocity.items():
         if corr_val is not None:
             annotation_lines.append(f"Corr y-{act_name}: {corr_val:.3f}")
-    
+
     annotation = "\n".join(annotation_lines)
 
     if S <= 5:  # Summary plot pour dimensions faibles
@@ -610,62 +659,413 @@ def plot_latent_analysis_for_series(all_s, y_series, label, out_root_dir, correl
         # Rangée 1: Scatter plots latent vs y
         for k in range(S):
             ax = fig.add_subplot(gs[0, k])
-            ax.scatter(all_s[:, k], y, alpha=0.6, s=8, c='blue')
-            ax.set_xlabel(f's{k+1}')
-            ax.set_ylabel(f'{label} [m/s]' if k == 0 else '')
+            ax.scatter(all_s[:, k], y, alpha=0.6, s=8, c="blue")
+            ax.set_xlabel(f"s{k + 1}")
+            ax.set_ylabel(f"{label} [m/s]" if k == 0 else "")
             ax.grid(True, alpha=0.3)
-            if latent_vs_velocity and k < len(latent_vs_velocity):
+            if len(latent_vs_velocity) > 0 and k < len(latent_vs_velocity):
                 corr_val = latent_vs_velocity[k]
-                ax.set_title(f'r = {corr_val:.3f}')
+                ax.set_title(f"r = {corr_val:.3f}")
 
         # Rangée 2: Histogrammes des dimensions latentes
         for k in range(S):
             ax = fig.add_subplot(gs[1, k])
-            ax.hist(all_s[:, k], bins=30, alpha=0.7, color='green')
-            ax.set_xlabel(f's{k+1}')
-            ax.set_ylabel('Count' if k == 0 else '')
+            ax.hist(all_s[:, k], bins=30, alpha=0.7, color="green")
+            ax.set_xlabel(f"s{k + 1}")
+            ax.set_ylabel("Count" if k == 0 else "")
             ax.grid(True, alpha=0.3)
 
         # Rangée 3: Histogramme de la série RV (étendu sur toutes les colonnes)
         axh = fig.add_subplot(gs[2, :])
-        axh.hist(y, bins=40, alpha=0.7, color='orange')
-        axh.set_xlabel(f'{label} [m/s]')
-        axh.set_ylabel('Count')
+        axh.hist(y, bins=40, alpha=0.7, color="orange")
+        axh.set_xlabel(f"{label} [m/s]")
+        axh.set_ylabel("Count")
         axh.grid(True, alpha=0.3)
-        
+
         # Annotation
-        axh.text(0.02, 0.98, annotation, transform=axh.transAxes, va='top', ha='left',
-                bbox=dict(boxstyle="round,pad=0.4", fc='white', ec='0.7', alpha=0.9),
-                fontsize=9)
+        axh.text(
+            0.02,
+            0.98,
+            annotation,
+            transform=axh.transAxes,
+            va="top",
+            ha="left",
+            bbox=dict(boxstyle="round,pad=0.4", fc="white", ec="0.7", alpha=0.9),
+            fontsize=9,
+        )
 
         fig.tight_layout()
-        out_path = os.path.join(out_root_dir, f'latent_analysis_{label}.png')
+        out_path = os.path.join(out_root_dir, f"latent_analysis_{label}.png")
         save_plot(fig, out_path, verbose=True)
-        
+
     else:  # Pairwise plots pour dimensions élevées
-        pair_dir = os.path.join(out_root_dir, f'latent_pairs_{label}')
+        pair_dir = os.path.join(out_root_dir, f"latent_pairs_{label}")
         os.makedirs(pair_dir, exist_ok=True)
-        
+
         for i in range(S):
-            for j in range(i+1, S):
+            for j in range(i + 1, S):
                 fig, ax = plt.subplots(figsize=(5, 4))
-                sc = ax.scatter(all_s[:, i], all_s[:, j], c=y, cmap='viridis', s=6, alpha=0.8)
-                ax.set_xlabel(f's{i+1}')
-                ax.set_ylabel(f's{j+1}')
+                sc = ax.scatter(
+                    all_s[:, i], all_s[:, j], c=y, cmap="viridis", s=6, alpha=0.8
+                )
+                ax.set_xlabel(f"s{i + 1}")
+                ax.set_ylabel(f"s{j + 1}")
                 ax.grid(True, alpha=0.3)
                 cbar = plt.colorbar(sc, ax=ax)
-                cbar.set_label(f'{label} [m/s]')
+                cbar.set_label(f"{label} [m/s]")
                 fig.tight_layout()
-                save_plot(fig, os.path.join(pair_dir, f'latent_pair_s{i+1}_s{j+1}_{label}.png'), verbose=True)
+                save_plot(
+                    fig,
+                    os.path.join(
+                        pair_dir, f"latent_pair_s{i + 1}_s{j + 1}_{label}.png"
+                    ),
+                    verbose=True,
+                )
 
         # Histogramme de la série
         fig, ax = plt.subplots(figsize=(5, 4))
-        ax.hist(y, bins=40, color='#4C72B0', alpha=0.8)
-        ax.set_xlabel(f'{label} [m/s]')
-        ax.set_ylabel('N')
+        ax.hist(y, bins=40, color="#4C72B0", alpha=0.8)
+        ax.set_xlabel(f"{label} [m/s]")
+        ax.set_ylabel("N")
         ax.grid(True, alpha=0.3)
-        ax.text(0.02, 0.98, annotation, transform=ax.transAxes, va='top', ha='left',
-               bbox=dict(boxstyle="round,pad=0.4", fc='white', ec='0.7', alpha=0.9),
-               fontsize=9)
+        ax.text(
+            0.02,
+            0.98,
+            annotation,
+            transform=ax.transAxes,
+            va="top",
+            ha="left",
+            bbox=dict(boxstyle="round,pad=0.4", fc="white", ec="0.7", alpha=0.9),
+            fontsize=9,
+        )
         fig.tight_layout()
-        save_plot(fig, os.path.join(out_root_dir, f'hist_{label}.png'), verbose=True)
+        save_plot(fig, os.path.join(out_root_dir, f"hist_{label}.png"), verbose=True)
+
+
+def plot_correlation_summary(correlation_summaries, save_path=None, show_plot=False):
+    """
+    Plot de synthèse des corrélations pour toutes les séries RV.
+
+    Args:
+        correlation_summaries: Dictionnaire des corrélations par série RV
+        save_path: Chemin pour sauvegarder la figure
+        show_plot: Afficher le plot
+    """
+    rv_labels = list(correlation_summaries.keys())
+    n_series = len(rv_labels)
+
+    if n_series == 0:
+        print("No correlation data to plot.")
+        return
+
+    # Extraction des données de corrélation
+    latent_dims = []
+    for label in rv_labels:
+        latent_vs_vel = correlation_summaries[label].get("latent_vs_velocity", [])
+        if latent_vs_vel:
+            latent_dims.append(len(latent_vs_vel))
+
+    if not latent_dims:
+        print("No latent correlation data found.")
+        return
+
+    max_latent_dim = max(latent_dims)
+
+    # Configuration de la figure
+    fig, axes = plt.subplots(2, 2, figsize=(15, 12))
+    fig.suptitle("Correlation Analysis Summary", fontsize=16, y=0.98)
+
+    # 1. Corrélations latent vs velocity (heatmap)
+    ax1 = axes[0, 0]
+    corr_matrix = np.full((n_series, max_latent_dim), np.nan)
+
+    for i, label in enumerate(rv_labels):
+        latent_vs_vel = correlation_summaries[label].get("latent_vs_velocity", [])
+        if latent_vs_vel:
+            for j, corr_val in enumerate(latent_vs_vel):
+                if j < max_latent_dim:
+                    corr_matrix[i, j] = corr_val
+
+    im1 = ax1.imshow(corr_matrix, cmap="RdBu_r", vmin=-1, vmax=1, aspect="auto")
+    ax1.set_xticks(range(max_latent_dim))
+    ax1.set_xticklabels([f"s{i + 1}" for i in range(max_latent_dim)])
+    ax1.set_yticks(range(n_series))
+    ax1.set_yticklabels(rv_labels)
+    ax1.set_xlabel("Latent Dimensions")
+    ax1.set_ylabel("RV Series")
+    ax1.set_title("Latent vs Velocity Correlations")
+
+    # Ajouter les valeurs dans les cellules
+    for i in range(n_series):
+        for j in range(max_latent_dim):
+            if not np.isnan(corr_matrix[i, j]):
+                text_color = "white" if abs(corr_matrix[i, j]) > 0.5 else "black"
+                ax1.text(
+                    j,
+                    i,
+                    f"{corr_matrix[i, j]:.2f}",
+                    ha="center",
+                    va="center",
+                    color=text_color,
+                    fontsize=9,
+                )
+
+    plt.colorbar(im1, ax=ax1, label="Correlation")
+
+    # 2. Corrélations activity vs velocity (barplot)
+    ax2 = axes[0, 1]
+    activity_indicators = ["fwhm", "depth", "span"]
+    x_pos = np.arange(len(activity_indicators))
+    width = 0.8 / n_series
+
+    colors = plt.cm.Set1(np.linspace(0, 1, n_series))
+
+    for i, label in enumerate(rv_labels):
+        act_vs_vel = correlation_summaries[label].get("activity_vs_velocity", {})
+        values = [act_vs_vel.get(act, 0) for act in activity_indicators]
+        ax2.bar(
+            x_pos + i * width, values, width, label=label, color=colors[i], alpha=0.8
+        )
+
+    ax2.set_xlabel("Activity Indicators")
+    ax2.set_ylabel("Correlation with RV")
+    ax2.set_title("Activity vs Velocity Correlations")
+    ax2.set_xticks(x_pos + width * (n_series - 1) / 2)
+    ax2.set_xticklabels(activity_indicators)
+    ax2.legend()
+    ax2.grid(True, alpha=0.3)
+    ax2.axhline(y=0, color="black", linestyle="-", alpha=0.5)
+
+    # 3. Distribution des corrélations maximales par série
+    ax3 = axes[1, 0]
+    max_corrs = []
+    labels_for_max = []
+
+    for label in rv_labels:
+        latent_vs_vel = correlation_summaries[label].get("latent_vs_velocity", [])
+        if latent_vs_vel:
+            max_abs_corr = max(abs(c) for c in latent_vs_vel)
+            max_corrs.append(max_abs_corr)
+            labels_for_max.append(label)
+
+    if max_corrs:
+        bars = ax3.bar(
+            labels_for_max, max_corrs, color=colors[: len(max_corrs)], alpha=0.8
+        )
+        ax3.set_xlabel("RV Series")
+        ax3.set_ylabel("Max |Correlation|")
+        ax3.set_title("Maximum Latent Correlation by Series")
+        ax3.grid(True, alpha=0.3)
+
+        # Ajouter les valeurs sur les barres
+        for bar, val in zip(bars, max_corrs):
+            height = bar.get_height()
+            ax3.text(
+                bar.get_x() + bar.get_width() / 2.0,
+                height + 0.01,
+                f"{val:.3f}",
+                ha="center",
+                va="bottom",
+                fontsize=10,
+            )
+
+    # 4. Corrélations activity vs latent (summary)
+    ax4 = axes[1, 1]
+
+    # Calculer la corrélation moyenne entre activité et latent pour chaque série
+    series_activity_latent_corr = {}
+    for label in rv_labels:
+        act_vs_latent = correlation_summaries[label].get("activity_vs_latent", [])
+        if act_vs_latent:
+            act_vs_latent = np.array(act_vs_latent)
+            if act_vs_latent.size > 0:
+                # Moyenne des corrélations absolues pour chaque indicateur d'activité
+                mean_corrs = [
+                    np.mean(np.abs(act_vs_latent[i]))
+                    for i in range(min(3, act_vs_latent.shape[0]))
+                ]
+                series_activity_latent_corr[label] = mean_corrs
+
+    if series_activity_latent_corr:
+        x_pos = np.arange(len(activity_indicators))
+        for i, label in enumerate(series_activity_latent_corr.keys()):
+            values = series_activity_latent_corr[label]
+            # Compléter avec des zéros si nécessaire
+            while len(values) < len(activity_indicators):
+                values.append(0)
+            ax4.bar(
+                x_pos + i * width,
+                values[: len(activity_indicators)],
+                width,
+                label=label,
+                color=colors[i],
+                alpha=0.8,
+            )
+
+        ax4.set_xlabel("Activity Indicators")
+        ax4.set_ylabel("Mean |Correlation| with Latent")
+        ax4.set_title("Activity vs Latent Space Correlations")
+        ax4.set_xticks(x_pos + width * (len(series_activity_latent_corr) - 1) / 2)
+        ax4.set_xticklabels(activity_indicators)
+        ax4.legend()
+        ax4.grid(True, alpha=0.3)
+
+    fig.tight_layout()
+
+    if save_path:
+        save_plot(fig, save_path, verbose=True)
+
+    if show_plot:
+        plt.show()
+
+
+def plot_latent_periodograms(
+    all_s, time_values, P_inj=None, save_path=None, show_plot=False
+):
+    """
+    Périodogrammes pour chaque dimension latente avec marquage des périodes d'intérêt.
+
+    Args:
+        all_s: Vecteurs latents [N, latent_dim]
+        time_values: Valeurs temporelles [N]
+        P_inj: Période injectée du signal planétaire
+        save_path: Chemin pour sauvegarder la figure
+        show_plot: Afficher le plot
+    """
+    latent_dim = all_s.shape[1]
+
+    # Périodes d'intérêt stellaire/instrumentales
+    stellar_periods = {
+        "Solar rotation": 27.0,  # Rotation solaire
+        "Solar cycle": 11.0 * 365.25,  # Cycle solaire (11 ans)
+        "Lunar month": 29.53,  # Mois lunaire
+        "1 year": 365.25,  # Année
+        "6 months": 365.25 / 2,  # Demi-année
+    }
+
+    # Configuration adaptative de la grille
+    if latent_dim <= 3:
+        nrows, ncols = 1, latent_dim
+        figsize = (6 * latent_dim, 6)
+    elif latent_dim <= 6:
+        nrows, ncols = 2, 3
+        figsize = (18, 12)
+    else:
+        ncols = 3
+        nrows = (latent_dim + ncols - 1) // ncols
+        figsize = (18, 6 * nrows)
+
+    fig, axes = plt.subplots(nrows, ncols, figsize=figsize)
+    fig.suptitle("Latent Space Periodogram Analysis", fontsize=16, y=0.98)
+
+    if latent_dim == 1:
+        axes = [axes]
+    elif nrows == 1:
+        axes = axes
+    else:
+        axes = axes.flatten()
+
+    # Paramètres du périodogramme
+    baseline = time_values.max() - time_values.min()
+    min_period = max(2.0, 2 * np.median(np.diff(np.sort(time_values))))
+    max_period = baseline / 2.0
+    n_periods = 5000
+
+    periods = np.logspace(np.log10(min_period), np.log10(max_period), n_periods)
+    frequencies = 1.0 / periods
+
+    for dim in range(latent_dim):
+        ax = axes[dim]
+
+        # Extraire la série temporelle pour cette dimension
+        s_series = all_s[:, dim]
+        s_series = s_series - np.mean(s_series)  # Centrer
+
+        # Calculer le périodogramme
+        try:
+            ls = LombScargle(time_values, s_series, fit_mean=True, center_data=True)
+            power = ls.power(frequencies)
+
+            # Plot du périodogramme
+            ax.loglog(
+                periods, power, "b-", alpha=0.8, linewidth=1, label=f"Latent s{dim + 1}"
+            )
+            ax.set_xlabel("Period [days]")
+            ax.set_ylabel("Power")
+            ax.set_title(f"Latent Dimension {dim + 1} Periodogram")
+            ax.grid(True, alpha=0.3)
+
+            # Marquer la période injectée
+            if P_inj is not None and P_inj > 0:
+                if min_period <= P_inj <= max_period:
+                    ax.axvline(
+                        P_inj,
+                        color="red",
+                        linestyle="--",
+                        linewidth=2,
+                        label=f"Planet P = {P_inj:.1f} d",
+                        alpha=0.8,
+                    )
+
+            # Marquer les périodes stellaires d'intérêt
+            colors_stellar = ["orange", "green", "purple", "brown", "pink"]
+            for i, (name, period) in enumerate(stellar_periods.items()):
+                if min_period <= period <= max_period:
+                    color = colors_stellar[i % len(colors_stellar)]
+                    ax.axvline(
+                        period,
+                        color=color,
+                        linestyle=":",
+                        linewidth=1.5,
+                        alpha=0.7,
+                        label=f"{name} ({period:.1f} d)",
+                    )
+
+            # Calculer quelques statistiques
+            max_power = np.max(power)
+            max_period_idx = np.argmax(power)
+            dominant_period = periods[max_period_idx]
+
+            # Annotation avec les statistiques principales
+            stats_text = (
+                f"Max power: {max_power:.2e}\nDominant P: {dominant_period:.1f} d"
+            )
+            ax.text(
+                0.02,
+                0.98,
+                stats_text,
+                transform=ax.transAxes,
+                verticalalignment="top",
+                horizontalalignment="left",
+                bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.8),
+                fontsize=9,
+            )
+
+            # Légende (seulement pour le premier subplot pour éviter l'encombrement)
+            if dim == 0:
+                ax.legend(loc="center right", fontsize=8)
+
+        except Exception as e:
+            ax.text(
+                0.5,
+                0.5,
+                f"Error computing periodogram:\n{str(e)}",
+                ha="center",
+                va="center",
+                transform=ax.transAxes,
+                bbox=dict(boxstyle="round,pad=0.3", facecolor="red", alpha=0.3),
+            )
+            ax.set_title(f"Latent Dimension {dim + 1} - Error")
+
+    # Cacher les axes supplémentaires si nécessaire
+    if latent_dim < len(axes):
+        for j in range(latent_dim, len(axes)):
+            axes[j].set_visible(False)
+
+    fig.tight_layout()
+
+    if save_path:
+        save_plot(fig, save_path, verbose=True)
+
+    if show_plot:
+        plt.show()

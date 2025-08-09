@@ -1923,6 +1923,7 @@ def plot_activity(
 
 # ==== ANALYSIS PLOTS ====
 
+
 def plot_periodogram_analysis(
     periods,
     power,
@@ -2049,29 +2050,36 @@ def plot_mcmc_posteriors(samples, truths=None, save_path=None):
 def plot_yact_perturbed(all_yact_perturbed, wavegrid, save_path=None):
     """Plot perturbed activations for each latent dimension."""
     latent_dim, n_spectra, n_pixels = all_yact_perturbed.shape
-    
+
     fig, axes = plt.subplots(latent_dim, 1, figsize=(12, 3 * latent_dim))
     if latent_dim == 1:
         axes = [axes]
-    
+
     for dim in range(latent_dim):
         ax = axes[dim]
-        
+
         n_plot = min(10, n_spectra)
         for i in range(n_plot):
             ax.plot(wavegrid, all_yact_perturbed[dim, i], alpha=0.3, lw=0.8)
-        
+
         mean_perturbed = np.mean(all_yact_perturbed[dim], axis=0)
-        ax.plot(wavegrid, mean_perturbed, 'k-', lw=2, alpha=0.8, label=f'Mean (dim {dim+1})')
-        
-        ax.set_xlabel('Wavelength [Å]')
-        ax.set_ylabel('Perturbed Activation')
-        ax.set_title(f'Perturbed y_act for latent dimension {dim+1}')
+        ax.plot(
+            wavegrid,
+            mean_perturbed,
+            "k-",
+            lw=2,
+            alpha=0.8,
+            label=f"Mean (dim {dim + 1})",
+        )
+
+        ax.set_xlabel("Wavelength [Å]")
+        ax.set_ylabel("Perturbed Activation")
+        ax.set_title(f"Perturbed y_act for latent dimension {dim + 1}")
         ax.grid(True, alpha=0.3)
         ax.legend()
-    
+
     plt.tight_layout()
-    
+
     if save_path:
         os.makedirs(os.path.dirname(save_path), exist_ok=True)
         plt.savefig(save_path, dpi=200)
@@ -2090,7 +2098,7 @@ def plot_latent_analysis_for_series(all_s, y_series, label, out_root_dir, correl
 
     lat_vel = correlations.get("latent_vs_velocity")
     act_vel = correlations.get("activity_vs_velocity")
-    
+
     if lat_vel is not None and lat_vel.size:
         top_k = int(np.argmax(np.abs(lat_vel)))
         top_val = float(lat_vel[top_k])
@@ -2098,7 +2106,7 @@ def plot_latent_analysis_for_series(all_s, y_series, label, out_root_dir, correl
         lat_summary = f"max|corr(y,s_k)|=|{top_val:.2f}| (k={top_k + 1})\nmean|corr|={mean_abs:.2f}"
     else:
         lat_summary = ""
-    
+
     act_summary = (
         f"corr(y,FWHM)={act_vel['fwhm']:.2f}\n"
         f"corr(y,depth)={act_vel['depth']:.2f}\n"

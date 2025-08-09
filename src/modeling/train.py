@@ -179,7 +179,28 @@ def load_experiment_checkpoint(path, device="cuda"):
         device=device,
         dtype=getattr(torch, config.get("model_dtype", "float32")),
     )
-    model.load_state_dict(ckpt["model_state_dict"])
+
+    # Load state dict with compatibility handling
+    model_state_dict = ckpt["model_state_dict"]
+
+    # Get current model's expected keys
+    current_model_keys = set(model.state_dict().keys())
+    saved_model_keys = set(model_state_dict.keys())
+
+    # Filter out unexpected keys (backward compatibility)
+    unexpected_keys = saved_model_keys - current_model_keys
+    if unexpected_keys:
+        print(
+            f"Warning: Filtering out unexpected keys from checkpoint: {unexpected_keys}"
+        )
+        filtered_state_dict = {
+            k: v for k, v in model_state_dict.items() if k in current_model_keys
+        }
+    else:
+        filtered_state_dict = model_state_dict
+
+    # Load the filtered state dict
+    model.load_state_dict(filtered_state_dict, strict=False)
     model.set_phase(ckpt.get("model_phase", "joint"))
 
     if torch.cuda.is_available():
