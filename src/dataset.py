@@ -143,6 +143,7 @@ class SpectrumDataset(Dataset):
         wavegrid_np = ds["wavegrid"]
         time_values_np = ds["time_values"]
         template_np = ds["template"] if "template" in ds else None
+        activity_np = ds["activity"] if "activity" in ds else None
 
         # Conversion vers torch
         self.spectra = torch.tensor(spectra_np).to(dtype=data_dtype).contiguous()
@@ -155,7 +156,11 @@ class SpectrumDataset(Dataset):
         self.time_values = (
             torch.tensor(time_values_np).to(dtype=data_dtype).contiguous()
         )
-
+        self.activity = (
+            torch.tensor(activity_np).to(dtype=data_dtype).contiguous()
+            if activity_np is not None
+            else None
+        )
         # Métadonnées unifiées
         metadata = ds["metadata"].item()
         self.metadata = metadata
@@ -168,6 +173,13 @@ class SpectrumDataset(Dataset):
         self.planets_periods = metadata.get("planets_periods", None)
         self.planets_amplitudes = metadata.get("planets_amplitudes", None)
         self.planets_phases = metadata.get("planets_phases", None)
+
+        self.v_true = torch.zeros_like(self.time_values)
+        for Kp, P, Phi in zip(
+            self.planets_amplitudes, self.planets_periods, self.planets_phases
+        ):
+            v = Kp * torch.sin(2 * np.pi * self.time_values / P + Phi)
+            self.v_true += v
 
         # Normaliser cohérence
         assert self.n_spectra == self.spectra.shape[0]
@@ -226,6 +238,7 @@ class SpectrumDataset(Dataset):
             self.spectra = self.spectra.cuda()
             self.wavegrid = self.wavegrid.cuda()
             self.template = self.template.cuda()
+            self.v_true = self.v_true.cuda()
         else:
             print("CUDA n'est pas disponible, les données restent sur le CPU.")
 
@@ -768,6 +781,7 @@ def create_soap_gpu_paper_dataset(
         "wavegrid": wavegrid_ds,
         "template": template_ds,
         "spectra": spectra_ds,
+        "activity": spectra_ds - template_ds,
         "time_values": time_values[:n_spectra],
         "metadata": metadata,
     }
@@ -1145,10 +1159,10 @@ if __name__ == "__main__":
     create_soap_gpu_paper_dataset(
         spectra_filepath="data/soap_gpu_paper/spec_cube_tot.h5",
         spec_filepath="data/soap_gpu_paper/spec_master.npz",
-        output_filepath="data/npz_datasets/dataset_1000specs_5000_5300_Kp1e-1_P100.npz",
+        output_filepath="data/npz_datasets/dataset_1000specs_5000_5050_Kp1e-1_P100_Phi0.npz",
         n_spectra=1000,
         wavemin=5000,
-        wavemax=5300,
+        wavemax=5050,
         downscaling_factor=2,
         use_rassine=True,
         rassine_config=None,

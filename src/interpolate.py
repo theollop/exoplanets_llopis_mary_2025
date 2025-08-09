@@ -51,7 +51,7 @@ def shift_spectra_cubic(
 
     # 1) Calcul du shifted (B, n_pixel)
     vel = velocities.view(-1, 1)
-    doppler = torch.sqrt((1 - vel / c) / (1 + vel / c))
+    doppler = torch.sqrt((1 + vel / c) / (1 - vel / c))
     shifted = wavegrid * doppler  # broadcast → (B, N)
 
     # 2) Construction du masque d'extrapolation

@@ -7,7 +7,7 @@ Usage:
 
 Exemple:
     python train_pro.py exp0                           # Nouvel entraînement avec config exp0
-    python train_pro.py exp0 --checkpoint models/aestra_exp0_epoch_100.pth  # Reprendre depuis checkpoint
+    python train_pro.py exp0 --checkpoint aestra_joint_100.pth  # Reprendre depuis checkpoint (recherché dans models/)
 """
 
 import argparse
@@ -35,6 +35,7 @@ from src.plots_aestra import (
     plot_losses,
     plot_aestra_analysis,
     plot_rv_predictions_dataset,
+    plot_activity,
 )
 
 console = Console()
@@ -115,11 +116,11 @@ def save_experiment_checkpoint(
         if exp_dirs is not None:
             path = os.path.join(
                 exp_dirs["models_dir"],
-                f"aestra_{cfg_name}_phase_{phase_name}_epoch_{epoch}.pth",
+                f"aestra_{phase_name}_{epoch}.pth",
             )
         else:
             # Fallback vers l'ancien système
-            path = f"models/aestra_{cfg_name}_phase_{phase_name}_epoch_{epoch}.pth"
+            path = f"models/aestra_{phase_name}_{epoch}.pth"
 
     # Sauvegarde du checkpoint standard
     save_checkpoint(model, optimizer, path, scheduler)
@@ -174,7 +175,7 @@ def load_experiment_checkpoint(path, device="cuda"):
         k_reg_init=config["k_reg_init"],
         cycle_length=config["cycle_length"],
         b_obs=dataset.template,
-        b_rest=dataset.spectra.mean(dim=0),
+        b_rest=dataset.template,
         device=device,
         dtype=getattr(torch, config.get("model_dtype", "float32")),
     )
@@ -476,9 +477,6 @@ def train_phase(
                     if exp_dirs
                     else config.get("plot_dir", "reports/figures")
                 )
-                rv_chunk_size = phase_config.get(
-                    "plot_rv_chunk_size", config.get("plot_rv_chunk_size", 256)
-                )
                 try:
                     plot_rv_predictions_dataset(
                         dataset,
@@ -487,13 +485,40 @@ def train_phase(
                         phase_name,
                         epoch + 1,
                         rv_plot_dir,
-                        chunk_size=rv_chunk_size,
+                        batch_size=config.get("batch_size", 32),
                     )
                     console.log(
                         f"📈 RV predictions (full dataset) plotted at epoch {epoch + 1} (saved in {rv_plot_dir})"
                     )
                 except Exception as e:
                     console.log(f"⚠️  RV plotting failed: {e}")
+
+            # Plotting Activity comparaison périodique
+            plot_activity_every = phase_config.get(
+                "plot_activity_every", config.get("plot_activity_every", 0)
+            )
+            if plot_activity_every > 0 and (epoch + 1) % plot_activity_every == 0:
+                activity_plot_dir = (
+                    exp_dirs["figures_dir"]
+                    if exp_dirs
+                    else config.get("plot_dir", "reports/figures")
+                )
+                try:
+                    plot_activity(
+                        batch,
+                        dataset,
+                        model,
+                        cfg_name,
+                        phase_name,
+                        epoch + 1,
+                        activity_plot_dir,
+                        data_root_dir=config.get("data_root_dir", "data"),
+                    )
+                    console.log(
+                        f"📊 Activity comparison plotted at epoch {epoch + 1} (saved in {activity_plot_dir})"
+                    )
+                except Exception as e:
+                    console.log(f"⚠️  Activity plotting failed: {e}")
 
             # Plots de spectres périodiques
             plot_spectra_every = phase_config.get("plot_spectra_every", 0)
@@ -505,6 +530,7 @@ def train_phase(
                 )
                 plot_aestra_analysis(
                     batch,
+                    dataset,
                     model,
                     cfg_name,
                     phase_name,
@@ -672,8 +698,9 @@ def main(cfg_name=None, checkpoint=None, device="cuda"):
                 sigma_c=config["sigma_c"],
                 sigma_y=config["sigma_y"],
                 k_reg_init=config["k_reg_init"],
+                cycle_length=config["cycle_length"],
                 b_obs=dataset.template,
-                b_rest=dataset.spectra.mean(dim=0),
+                b_rest=dataset.template,
                 device=args.device,  # ⚠️ NOUVEAU: Passer le device explicitement
                 dtype=getattr(
                     torch, config.get("model_dtype", "float32")
@@ -778,11 +805,9 @@ def main(cfg_name=None, checkpoint=None, device="cuda"):
 
     # Sauvegarde finale
     if "exp_dirs" in locals():
-        final_path = os.path.join(
-            exp_dirs["models_dir"], f"aestra_{args.cfg_name}_final.pth"
-        )
+        final_path = os.path.join(exp_dirs["models_dir"], "aestra_final.pth")
     else:
-        final_path = f"models/aestra_{args.cfg_name}_final.pth"
+        final_path = "models/aestra_final.pth"
 
     # Pour la sauvegarde finale, on sauve juste le modèle et la config
     ckpt = {

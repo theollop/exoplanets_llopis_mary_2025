@@ -10,11 +10,46 @@ Ce module contient les fonctions de visualisation optimisées pour AESTRA :
 """
 
 import os
+import gc
 import numpy as np
 import matplotlib.pyplot as plt
 import torch
 from typing import Optional
 from src.interpolate import shift_spectra_linear
+from src.dataset import SpectrumDataset
+
+
+def create_phase_plot_dir(plot_dir: str, phase_name: str) -> str:
+    """
+    Crée un sous-dossier pour une phase spécifique dans le répertoire de plots.
+
+    Args:
+        plot_dir: Répertoire de base des plots (ex: "experiments/exp1/figures")
+        phase_name: Nom de la phase (ex: "rvonly", "joint")
+
+    Returns:
+        str: Chemin du sous-dossier de la phase
+    """
+    phase_dir = os.path.join(plot_dir, phase_name)
+    os.makedirs(phase_dir, exist_ok=True)
+    return phase_dir
+
+
+def create_typed_plot_dir(plot_dir: str, phase_name: str, plot_type: str) -> str:
+    """
+    Crée un sous-dossier organisé par type de plot dans une phase spécifique.
+
+    Args:
+        plot_dir: Répertoire de base des plots (ex: "experiments/exp1/figures")
+        phase_name: Nom de la phase (ex: "rvonly", "joint")
+        plot_type: Type de plot (ex: "losses", "rv_predictions", "analysis", "activity")
+
+    Returns:
+        str: Chemin du sous-dossier organisé
+    """
+    typed_dir = os.path.join(plot_dir, phase_name, plot_type)
+    os.makedirs(typed_dir, exist_ok=True)
+    return typed_dir
 
 
 def plot_losses(losses_history, exp_name, phase_name, epoch, plot_dir, console):
@@ -29,12 +64,13 @@ def plot_losses(losses_history, exp_name, phase_name, epoch, plot_dir, console):
         plot_dir: Répertoire de sauvegarde des plots
         console: Instance de console pour les logs (rich.console.Console)
     """
-    os.makedirs(plot_dir, exist_ok=True)
+    # Créer le sous-dossier organisé par type pour la phase
+    typed_plot_dir = create_typed_plot_dir(plot_dir, phase_name, "losses")
 
     # Configurer la mosaïque (2x3 pour 6 plots)
     fig, axes = plt.subplots(2, 3, figsize=(18, 12))
     fig.suptitle(
-        f"{exp_name} - {phase_name} - Training Losses (Epoch {epoch})",
+        f"Training Losses - Epoch {epoch}",
         fontsize=16,
         fontweight="bold",
     )
@@ -134,13 +170,13 @@ def plot_losses(losses_history, exp_name, phase_name, epoch, plot_dir, console):
 
     plt.tight_layout()
 
-    # Sauvegarde
-    filename = f"{exp_name}_{phase_name}_losses_mosaic_epoch_{epoch}.png"
-    filepath = os.path.join(plot_dir, filename)
+    # Nom de fichier simplifié
+    filename = f"losses_epoch_{epoch}.png"
+    filepath = os.path.join(typed_plot_dir, filename)
     plt.savefig(filepath, dpi=300, bbox_inches="tight")
     plt.close()
 
-    console.log(f"📊 Mosaic plot saved: {filename}")
+    console.log(f"📊 Losses plot saved: {phase_name}/losses/{filename}")
 
 
 def plot_rv_predictions_dataset(
@@ -150,7 +186,7 @@ def plot_rv_predictions_dataset(
     phase_name: str,
     epoch: int,
     plot_dir: str,
-    chunk_size: int = 256,
+    batch_size: int = 32,
 ) -> None:
     """
     Calcule et trace les prédictions RV (r_obs = y_obs - b_obs) pour TOUT le dataset.
@@ -162,9 +198,10 @@ def plot_rv_predictions_dataset(
         phase_name: Phase d'entraînement
         epoch: Époch actuelle (pour le nom de fichier)
         plot_dir: Répertoire de sauvegarde
-        chunk_size: Taille des chunks pour éviter d'épuiser la mémoire
+        batch_size: Taille des chunks pour éviter d'épuiser la mémoire
     """
-    os.makedirs(plot_dir, exist_ok=True)
+    # Créer le sous-dossier organisé par type pour la phase
+    typed_plot_dir = create_typed_plot_dir(plot_dir, phase_name, "rv_predictions")
 
     N = len(dataset)
     device = model.b_obs.device
@@ -175,8 +212,8 @@ def plot_rv_predictions_dataset(
 
     preds = []
     with torch.no_grad():
-        for i in range(0, N, chunk_size):
-            j = min(i + chunk_size, N)
+        for i in range(0, N, batch_size):
+            j = min(i + batch_size, N)
             y_batch = dataset.spectra[i:j].to(device)
             r_batch = y_batch - model.b_obs.unsqueeze(0)
             v_batch = model.rvestimator(r_batch)
@@ -234,8 +271,9 @@ def plot_rv_predictions_dataset(
         axes[1].grid(True, alpha=0.3)
 
     plt.tight_layout()
-    filename = f"{exp_name}_{phase_name}_rvpred_full_epoch_{epoch}.png"
-    filepath = os.path.join(plot_dir, filename)
+    # Nom de fichier simplifié
+    filename = f"rv_predictions_full_epoch_{epoch}.png"
+    filepath = os.path.join(typed_plot_dir, filename)
     plt.savefig(filepath, dpi=200, bbox_inches="tight")
     plt.close()
 
@@ -259,7 +297,8 @@ def plot_rv_predictions(
         epoch: Époch actuelle (pour le nom de fichier)
         plot_dir: Répertoire de sauvegarde
     """
-    os.makedirs(plot_dir, exist_ok=True)
+    # Créer le sous-dossier organisé par type pour la phase
+    typed_plot_dir = create_typed_plot_dir(plot_dir, phase_name, "rv_predictions")
 
     batch_yobs, _, _, _ = batch
 
@@ -297,8 +336,9 @@ def plot_rv_predictions(
     axes[1].grid(True, alpha=0.3)
 
     plt.tight_layout()
-    filename = f"{exp_name}_{phase_name}_rvpred_epoch_{epoch}.png"
-    filepath = os.path.join(plot_dir, filename)
+    # Nom de fichier simplifié
+    filename = f"rv_predictions_batch_epoch_{epoch}.png"
+    filepath = os.path.join(typed_plot_dir, filename)
     plt.savefig(filepath, dpi=200, bbox_inches="tight")
     plt.close()
 
@@ -307,6 +347,7 @@ def plot_rv_predictions(
 
 def plot_aestra_analysis(
     batch: tuple,
+    dataset: SpectrumDataset,
     model: torch.nn.Module,
     exp_name: str,
     phase_name: str,
@@ -339,7 +380,8 @@ def plot_aestra_analysis(
         zoom_line: Activer le zoom sur une raie spectrale
         data_root_dir: Répertoire racine des données (par défaut "data")
     """
-    os.makedirs(plot_dir, exist_ok=True)
+    # Créer le sous-dossier organisé par type pour la phase
+    typed_plot_dir = create_typed_plot_dir(plot_dir, phase_name, "analysis")
 
     # Extraction des données du batch
     batch_yobs, batch_yaug, batch_voffset, batch_wavegrid = batch
@@ -354,7 +396,12 @@ def plot_aestra_analysis(
     line_positions = line_positions[
         (line_positions >= wavegrid.min()) & (line_positions <= wavegrid.max())
     ]
-    most_weighted_line = line_positions[np.argmax(line_weights)]
+    # Sélectionner une ligne parmi les 10 lignes les plus weighted
+    top_indices = np.argsort(line_weights)[-10:]
+    # selected_line = np.random.choice(line_positions[top_indices]) # Choix random
+    selected_line = line_positions[top_indices][
+        1
+    ]  # Choix de la première ligne des 10 les plus weighted
     halfwin = 0.18  # Fenêtre de zoom de 0.5 Å
 
     # Sélection d'un échantillon
@@ -392,12 +439,19 @@ def plot_aestra_analysis(
     r_aug = batch_raug[sample_idx].detach().cpu().numpy()
     b_obs = model.b_obs.detach().cpu().numpy()
     b_rest = model.b_rest.detach().cpu().numpy()
-    y_rest = batch_yact[sample_idx].detach().cpu().numpy()
+    # Use the correct rest-frame model for the sample
+    y_rest = batch_yrest[sample_idx].detach().cpu().numpy()
     y_act = batch_yact[sample_idx].detach().cpu().numpy()
     y_obs_prime = batch_yobsprime[sample_idx].detach().cpu().numpy()
     s_obs = batch_s[sample_idx].detach().cpu().numpy()
     s_aug = batch_s_aug[sample_idx].detach().cpu().numpy()
     v_encode = batch_vencode[sample_idx].detach().cpu().numpy()
+
+    yact_true = (
+        dataset.activity[sample_idx].detach().cpu().numpy()
+        if hasattr(dataset, "activity")
+        else None
+    )
 
     # Création du plot d'analyse complet
     fig, axes = plt.subplots(4, 2, figsize=(16, 20))
@@ -420,7 +474,7 @@ def plot_aestra_analysis(
     axes[0, 0].set_title("Observed Spectra")
     axes[0, 0].legend()
     if zoom_line:
-        axes[0, 0].set_xlim(most_weighted_line - halfwin, most_weighted_line + halfwin)
+        axes[0, 0].set_xlim(selected_line - halfwin, selected_line + halfwin)
     axes[0, 0].grid(True, alpha=0.3)
 
     # Plot 2: Spectres résiduels (r_obs vs r_aug)
@@ -436,7 +490,7 @@ def plot_aestra_analysis(
     axes[0, 1].set_title("Residual Spectra (after template subtraction)")
     axes[0, 1].legend()
     if zoom_line:
-        axes[0, 1].set_xlim(most_weighted_line - halfwin, most_weighted_line + halfwin)
+        axes[0, 1].set_xlim(selected_line - halfwin, selected_line + halfwin)
     axes[0, 1].grid(True, alpha=0.3)
 
     # Plot 3: Templates (b_obs vs b_rest)
@@ -456,20 +510,30 @@ def plot_aestra_analysis(
     axes[1, 0].set_title("Templates")
     axes[1, 0].legend()
     if zoom_line:
-        axes[1, 0].set_xlim(most_weighted_line - halfwin, most_weighted_line + halfwin)
+        axes[1, 0].set_xlim(selected_line - halfwin, selected_line + halfwin)
     axes[1, 0].grid(True, alpha=0.3)
 
     # Plot 4: Spectre d'activité (y_act)
     axes[1, 1].plot(
         wavegrid, y_act, "orange", linewidth=2, alpha=0.8, label="y_act (activity)"
     )
+    if yact_true is not None:
+        # Si un template de référence est fourni et la RV vraie, tracer l'activité vraie
+        axes[1, 1].plot(
+            wavegrid,
+            yact_true,
+            "k",
+            linewidth=1.5,
+            alpha=0.6,
+            label="True Activity",
+        )
     axes[1, 1].axhline(y=0, color="k", linestyle="--", alpha=0.5)
     axes[1, 1].set_xlabel("Wavelength (Å)")
     axes[1, 1].set_ylabel("Activity Flux")
     axes[1, 1].set_title("Activity Spectrum (decoded from latent)")
     axes[1, 1].legend()
     if zoom_line:
-        axes[1, 1].set_xlim(most_weighted_line - halfwin, most_weighted_line + halfwin)
+        axes[1, 1].set_xlim(selected_line - halfwin, selected_line + halfwin)
     axes[1, 1].grid(True, alpha=0.3)
 
     # Plot 5: Modèle au repos (y_rest = y_act + b_rest)
@@ -483,7 +547,7 @@ def plot_aestra_analysis(
     axes[2, 0].set_title("Rest-frame Model (y_rest = y_act + b_rest)")
     axes[2, 0].legend()
     if zoom_line:
-        axes[2, 0].set_xlim(most_weighted_line - halfwin, most_weighted_line + halfwin)
+        axes[2, 0].set_xlim(selected_line - halfwin, selected_line + halfwin)
     axes[2, 0].grid(True, alpha=0.3)
 
     # Plot 6: Reconstruction finale vs observé
@@ -503,7 +567,7 @@ def plot_aestra_analysis(
     axes[2, 1].set_title("Final Reconstruction")
     axes[2, 1].legend()
     if zoom_line:
-        axes[2, 1].set_xlim(most_weighted_line - halfwin, most_weighted_line + halfwin)
+        axes[2, 1].set_xlim(selected_line - halfwin, selected_line + halfwin)
     axes[2, 1].grid(True, alpha=0.3)
 
     # Plot 7: Résidus de reconstruction
@@ -517,7 +581,7 @@ def plot_aestra_analysis(
     axes[3, 0].set_title("Reconstruction Residual (y_obs - y'_obs)")
     axes[3, 0].legend()
     if zoom_line:
-        axes[3, 0].set_xlim(most_weighted_line - halfwin, most_weighted_line + halfwin)
+        axes[3, 0].set_xlim(selected_line - halfwin, selected_line + halfwin)
     axes[3, 0].grid(True, alpha=0.3)
 
     # Plot 8: Informations sur l'analyse
@@ -553,9 +617,9 @@ def plot_aestra_analysis(
 
     plt.tight_layout()
 
-    # Sauvegarde
-    filename = f"{exp_name}_{phase_name}_aestra_analysis_epoch_{epoch}.png"
-    filepath = os.path.join(plot_dir, filename)
+    # Nom de fichier simplifié
+    filename = f"aestra_analysis_epoch_{epoch}.png"
+    filepath = os.path.join(typed_plot_dir, filename)
     plt.savefig(filepath, dpi=300, bbox_inches="tight")
     plt.close()
 
@@ -596,7 +660,8 @@ def plot_ultra_precise_doppler(
     """
     from src.spectral_lines import find_best_lines_for_doppler
 
-    os.makedirs(plot_dir, exist_ok=True)
+    # Créer le sous-dossier organisé par type pour la phase
+    typed_plot_dir = create_typed_plot_dir(plot_dir, phase_name, "ultra_doppler")
 
     # Extraction des données
     batch_yobs, batch_yaug, batch_voffset, batch_wavegrid = batch
@@ -717,9 +782,9 @@ def plot_ultra_precise_doppler(
 
     plt.tight_layout()
 
-    # Sauvegarde
-    filename = f"{exp_name}_{phase_name}_ultra_doppler_epoch_{epoch}.png"
-    filepath = os.path.join(plot_dir, filename)
+    # Nom de fichier simplifié
+    filename = f"ultra_doppler_epoch_{epoch}.png"
+    filepath = os.path.join(typed_plot_dir, filename)
     plt.savefig(filepath, dpi=300, bbox_inches="tight")
     plt.close()
 
@@ -1685,3 +1750,458 @@ def plot_ccf_analysis(
         plt.show()
     else:
         plt.close()
+
+
+def plot_activity(
+    batch: tuple,
+    dataset: SpectrumDataset,
+    model: torch.nn.Module,
+    exp_name: str,
+    phase_name: str,
+    epoch: int,
+    plot_dir: str,
+    sample_idx: Optional[int] = None,
+    data_root_dir: str = "data",
+) -> None:
+    """
+    Plot de comparaison entre l'activité vraie et l'activité prédite par AESTRA.
+
+    Structure du plot :
+    - 1ère ligne : spectre d'activité complet (vraie vs prédite)
+    - 2ème ligne : zoom sur les 3 raies les plus importantes (weightées)
+
+    Args:
+        batch: Batch de données (y_obs, y_aug, v_offset, wavegrid)
+        dataset: Dataset contenant l'activité vraie
+        model: Modèle AESTRA
+        exp_name: Nom de l'expérience
+        phase_name: Phase d'entraînement
+        epoch: Époch actuelle
+        plot_dir: Répertoire de sauvegarde
+        sample_idx: Index de l'échantillon (None pour aléatoire)
+        data_root_dir: Répertoire racine des données (par défaut "data")
+    """
+    # Créer le sous-dossier organisé par type pour la phase
+    typed_plot_dir = create_typed_plot_dir(plot_dir, phase_name, "activity")
+
+    # Extraction des données du batch
+    batch_yobs, batch_yaug, batch_voffset, batch_wavegrid = batch
+    batch_size = batch_yobs.shape[0]
+
+    # Chargement du masque G2 pour les raies importantes
+    g2mask = np.loadtxt(f"{data_root_dir}/rv_datachallenge/masks/G2_mask.txt")
+    line_positions, line_weights = g2mask[:, 0], g2mask[:, 1]
+    wavegrid = batch_wavegrid[0].detach().cpu().numpy()
+
+    # Filtrer les raies dans la plage spectrale
+    mask_in_range = (line_positions >= wavegrid.min()) & (
+        line_positions <= wavegrid.max()
+    )
+    line_weights = line_weights[mask_in_range]
+    line_positions = line_positions[mask_in_range]
+
+    # Sélectionner les 3 raies les plus importantes
+    top_indices = np.argsort(line_weights)[-3:]  # Les 3 plus fortes
+    selected_lines = line_positions[top_indices]
+    halfwin = 0.18  # Fenêtre de zoom de 0.18 Å comme dans plot_aestra_analysis
+
+    # Sélection d'un échantillon
+    if sample_idx is None:
+        sample_idx = np.random.randint(0, batch_size)
+
+    # Vérifier que le dataset a bien l'activité vraie
+    if not hasattr(dataset, "activity"):
+        print(
+            "⚠️ Warning: Dataset doesn't have 'activity' attribute. Cannot plot activity comparison."
+        )
+        return
+
+    # Forward pass du modèle pour obtenir l'activité prédite
+    model.eval()
+    with torch.no_grad():
+        # Spectres résiduels (après soustraction des templates)
+        batch_robs = batch_yobs - model.b_obs.unsqueeze(0)
+
+        # Encodage + Décodage pour obtenir le spectre d'activité prédit
+        batch_yact, batch_s = model.spender(batch_robs)
+
+    # Données pour l'échantillon sélectionné
+    wavegrid = batch_wavegrid[sample_idx].detach().cpu().numpy()
+    y_act_pred = batch_yact[sample_idx].detach().cpu().numpy()  # Activité prédite
+    y_act_true = dataset.activity[sample_idx].detach().cpu().numpy()  # Activité vraie
+
+    # Création du plot avec 4 subplots (1 en haut + 3 en bas)
+    fig, axes = plt.subplots(2, 3, figsize=(18, 10))
+    fig.suptitle(
+        f"Activity Comparison - {exp_name} - {phase_name} - Epoch {epoch}\n"
+        f"Sample {sample_idx} | True vs Predicted Activity",
+        fontsize=14,
+        fontweight="bold",
+    )
+
+    # Plot 1 : Spectre d'activité complet (occupe les 3 colonnes de la première ligne)
+    # Fusionner les 3 subplots de la première ligne
+    gs = fig.add_gridspec(2, 3)
+    ax_full = fig.add_subplot(gs[0, :])  # Première ligne complète
+
+    # Supprimer les axes individuels de la première ligne
+    for i in range(3):
+        axes[0, i].remove()
+
+    ax_full.plot(
+        wavegrid, y_act_true, "k-", linewidth=2, alpha=0.8, label="True Activity"
+    )
+    ax_full.plot(
+        wavegrid,
+        y_act_pred,
+        "orange",
+        linewidth=2,
+        alpha=0.8,
+        label="Predicted Activity",
+    )
+    ax_full.axhline(y=0, color="gray", linestyle="--", alpha=0.5)
+    ax_full.set_xlabel("Wavelength (Å)")
+    ax_full.set_ylabel("Activity Flux")
+    ax_full.set_title("Full Spectrum Activity Comparison")
+    ax_full.legend()
+    ax_full.grid(True, alpha=0.3)
+
+    # Plots 2-4 : Zoom sur les 3 raies les plus importantes
+    for i, line_pos in enumerate(selected_lines):
+        ax = axes[1, i]
+
+        # Créer le masque de zoom
+        zoom_mask = (wavegrid >= line_pos - halfwin) & (wavegrid <= line_pos + halfwin)
+        wave_zoom = wavegrid[zoom_mask]
+        true_zoom = y_act_true[zoom_mask]
+        pred_zoom = y_act_pred[zoom_mask]
+
+        ax.plot(
+            wave_zoom, true_zoom, "k-", linewidth=2, alpha=0.8, label="True Activity"
+        )
+        ax.plot(
+            wave_zoom,
+            pred_zoom,
+            "orange",
+            linewidth=2,
+            alpha=0.8,
+            label="Predicted Activity",
+        )
+        ax.axhline(y=0, color="gray", linestyle="--", alpha=0.5)
+        ax.axvline(
+            x=line_pos,
+            color="red",
+            linestyle=":",
+            alpha=0.7,
+            label=f"Line @ {line_pos:.2f}Å",
+        )
+
+        ax.set_xlabel("Wavelength (Å)")
+        ax.set_ylabel("Activity Flux")
+        ax.set_title(
+            f"Line {i + 1}: {line_pos:.2f}Å (Weight: {line_weights[top_indices[i]]:.3f})"
+        )
+        ax.set_xlim(line_pos - halfwin, line_pos + halfwin)
+        ax.legend(fontsize=8)
+        ax.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+
+    # Nom de fichier simplifié
+    filename = f"activity_comparison_epoch_{epoch}.png"
+    filepath = os.path.join(typed_plot_dir, filename)
+    plt.savefig(filepath, dpi=300, bbox_inches="tight")
+    plt.close()
+
+    # Nettoyage mémoire
+    del batch_yobs, batch_yaug, batch_voffset, batch_wavegrid
+    del batch_robs, batch_yact, batch_s
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
+# ==== ANALYSIS PLOTS ====
+
+def plot_periodogram_analysis(
+    periods,
+    power,
+    metrics,
+    P_inj=None,
+    fap_threshold=0.01,
+    exclude_width_frac=0.05,
+    peak_prominence=None,
+    title="Lomb–Scargle Periodogram",
+    save_path=None,
+    show_plot=False,
+):
+    """Plot periodogram with FAP threshold, exclusion band, and metrics."""
+    from scipy.signal import find_peaks
+
+    max_power = np.max(power)
+    fap_level = max_power * fap_threshold
+
+    if P_inj is not None:
+        mask_excl = np.abs(periods - P_inj) <= exclude_width_frac * P_inj
+    else:
+        mask_excl = np.zeros_like(periods, dtype=bool)
+
+    if peak_prominence is None:
+        peak_prominence = 0.5 * np.std(power)
+
+    p_out = power[~mask_excl]
+    per_out = periods[~mask_excl]
+    peaks_out, _ = find_peaks(p_out, prominence=peak_prominence)
+
+    fig, ax = plt.subplots(figsize=(10, 5.5))
+    ax.semilogx(periods, power, lw=1.6)
+    ax.set_xlabel("Période [jours]")
+    ax.set_ylabel("Puissance Lomb–Scargle")
+    ax.set_title(title)
+    ax.grid(True, which="both", alpha=0.25)
+
+    ax.axhline(
+        fap_level, ls="--", lw=1.2, label=f"Seuil FAP = {int(fap_threshold * 100)}%"
+    )
+
+    if P_inj is not None and P_inj > 0:
+        ax.axvspan(
+            P_inj * (1 - exclude_width_frac),
+            P_inj * (1 + exclude_width_frac),
+            alpha=0.15,
+            label=f"Bande autour de $P_{{inj}}$ = {P_inj:.4g} j",
+        )
+
+        if metrics.get("P_detected") is not None:
+            P_detected = metrics["P_detected"]
+            idx = np.argmin(np.abs(periods - P_detected))
+            ax.plot(
+                periods[idx],
+                power[idx],
+                marker="o",
+                ms=7,
+                mec="k",
+                mfc="none",
+                label=f"Pic détecté @ {P_detected:.4g} j",
+            )
+            ax.axvline(P_inj, color="k", lw=1.0, alpha=0.5)
+
+    if peaks_out.size:
+        ax.plot(
+            per_out[peaks_out], p_out[peaks_out], "x", ms=6, label="Pics (hors planète)"
+        )
+
+    lines = []
+    if metrics.get("fap_at_Pinj") is not None:
+        lines.append(f"FAP @ P_inj: {metrics['fap_at_Pinj']:.3g}")
+    if metrics.get("power_ratio") is not None:
+        lines.append(f"Power ratio: {metrics['power_ratio']:.3g}")
+    if metrics.get("n_sig_peaks_outside") is not None:
+        lines.append(f"# pics FAP<1% (hors): {metrics['n_sig_peaks_outside']}")
+    if metrics.get("delta_P") is not None:
+        lines.append(f"ΔP: {metrics['delta_P']:.3g} j")
+    if lines:
+        txt = "\n".join(lines)
+        ax.text(
+            0.02,
+            0.98,
+            txt,
+            transform=ax.transAxes,
+            va="top",
+            ha="left",
+            bbox=dict(boxstyle="round,pad=0.4", fc="white", ec="0.7", alpha=0.9),
+            fontsize=10,
+        )
+
+    ax.legend(loc="best", frameon=True)
+    plt.tight_layout()
+
+    if save_path:
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        plt.savefig(save_path, dpi=200)
+        plt.close()
+    elif show_plot:
+        plt.show()
+    else:
+        plt.close()
+
+
+def plot_mcmc_posteriors(samples, truths=None, save_path=None):
+    """Plot MCMC posterior distributions."""
+    labels = ["P [d]", "K [m/s]", "phi [rad]"]
+    fig, axes = plt.subplots(1, 3, figsize=(12, 3.5))
+    for i, (ax, lab) in enumerate(zip(axes, labels)):
+        ax.hist(samples[:, i], bins=50, color="#4C72B0", alpha=0.7, density=True)
+        ax.set_xlabel(lab)
+        if truths is not None:
+            v = truths[["P", "K", "phi"][i]]
+            ax.axvline(v, color="k", ls="--", lw=1)
+        ax.grid(True, alpha=0.2)
+    plt.tight_layout()
+    if save_path:
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        plt.savefig(save_path, dpi=200)
+        plt.close()
+    else:
+        plt.show()
+
+
+def plot_yact_perturbed(all_yact_perturbed, wavegrid, save_path=None):
+    """Plot perturbed activations for each latent dimension."""
+    latent_dim, n_spectra, n_pixels = all_yact_perturbed.shape
+    
+    fig, axes = plt.subplots(latent_dim, 1, figsize=(12, 3 * latent_dim))
+    if latent_dim == 1:
+        axes = [axes]
+    
+    for dim in range(latent_dim):
+        ax = axes[dim]
+        
+        n_plot = min(10, n_spectra)
+        for i in range(n_plot):
+            ax.plot(wavegrid, all_yact_perturbed[dim, i], alpha=0.3, lw=0.8)
+        
+        mean_perturbed = np.mean(all_yact_perturbed[dim], axis=0)
+        ax.plot(wavegrid, mean_perturbed, 'k-', lw=2, alpha=0.8, label=f'Mean (dim {dim+1})')
+        
+        ax.set_xlabel('Wavelength [Å]')
+        ax.set_ylabel('Perturbed Activation')
+        ax.set_title(f'Perturbed y_act for latent dimension {dim+1}')
+        ax.grid(True, alpha=0.3)
+        ax.legend()
+    
+    plt.tight_layout()
+    
+    if save_path:
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        plt.savefig(save_path, dpi=200)
+        plt.close()
+    else:
+        plt.show()
+
+
+def plot_latent_analysis_for_series(all_s, y_series, label, out_root_dir, correlations):
+    """Plot latent analysis (3D/pairwise + histogram) for a velocity series."""
+    from matplotlib.gridspec import GridSpec
+
+    y = np.asarray(y_series).reshape(-1)
+    S = all_s.shape[1]
+    os.makedirs(out_root_dir, exist_ok=True)
+
+    lat_vel = correlations.get("latent_vs_velocity")
+    act_vel = correlations.get("activity_vs_velocity")
+    
+    if lat_vel is not None and lat_vel.size:
+        top_k = int(np.argmax(np.abs(lat_vel)))
+        top_val = float(lat_vel[top_k])
+        mean_abs = float(np.mean(np.abs(lat_vel)))
+        lat_summary = f"max|corr(y,s_k)|=|{top_val:.2f}| (k={top_k + 1})\nmean|corr|={mean_abs:.2f}"
+    else:
+        lat_summary = ""
+    
+    act_summary = (
+        f"corr(y,FWHM)={act_vel['fwhm']:.2f}\n"
+        f"corr(y,depth)={act_vel['depth']:.2f}\n"
+        f"corr(y,span)={act_vel['span']:.2f}"
+    )
+    annotation = lat_summary + ("\n" if lat_summary else "") + act_summary
+
+    if S == 3:
+        fig = plt.figure(figsize=(14, 6))
+        gs = GridSpec(2, 3, figure=fig, width_ratios=[1.6, 1, 1], height_ratios=[1, 1])
+
+        ax3d = fig.add_subplot(gs[:, 0], projection="3d")
+        p = ax3d.scatter(
+            all_s[:, 0], all_s[:, 1], all_s[:, 2], c=y, cmap="viridis", s=8, alpha=0.9
+        )
+        ax3d.set_xlabel("s1")
+        ax3d.set_ylabel("s2")
+        ax3d.set_zlabel("s3")
+        fig.colorbar(p, ax=ax3d, shrink=0.7, label=f"{label} [m/s]")
+        ax3d.set_title(f"Latent space (colored by {label})")
+
+        ax12 = fig.add_subplot(gs[0, 1])
+        ax13 = fig.add_subplot(gs[0, 2])
+        ax23 = fig.add_subplot(gs[1, 1])
+        axh = fig.add_subplot(gs[1, 2])
+
+        ax12.scatter(all_s[:, 0], all_s[:, 1], c=y, cmap="viridis", s=6, alpha=0.8)
+        ax12.set_xlabel("s1")
+        ax12.set_ylabel("s2")
+        ax12.grid(True, alpha=0.3)
+
+        ax13.scatter(all_s[:, 0], all_s[:, 2], c=y, cmap="viridis", s=6, alpha=0.8)
+        ax13.set_xlabel("s1")
+        ax13.set_ylabel("s3")
+        ax13.grid(True, alpha=0.3)
+
+        ax23.scatter(all_s[:, 1], all_s[:, 2], c=y, cmap="viridis", s=6, alpha=0.8)
+        ax23.set_xlabel("s2")
+        ax23.set_ylabel("s3")
+        ax23.grid(True, alpha=0.3)
+
+        axh.hist(y, bins=40, color="#4C72B0", alpha=0.8, density=False)
+        axh.set_xlabel(f"{label} [m/s]")
+        axh.set_ylabel("N")
+        axh.grid(True, alpha=0.3)
+        axh.text(
+            0.02,
+            0.98,
+            annotation,
+            transform=axh.transAxes,
+            va="top",
+            ha="left",
+            bbox=dict(boxstyle="round,pad=0.4", fc="white", ec="0.7", alpha=0.9),
+            fontsize=9,
+        )
+
+        fig.tight_layout()
+        out_path = os.path.join(out_root_dir, f"latent_analysis_{label}.png")
+        fig.savefig(out_path, dpi=200)
+        plt.close(fig)
+
+    else:
+        # Pairwise plots
+        pair_dir = os.path.join(out_root_dir, f"latent_pairs_{label}")
+        os.makedirs(pair_dir, exist_ok=True)
+        for i in range(S):
+            for j in range(i + 1, S):
+                fig, ax = plt.subplots(figsize=(5, 4))
+                sc = ax.scatter(
+                    all_s[:, i], all_s[:, j], c=y, cmap="viridis", s=6, alpha=0.8
+                )
+                ax.set_xlabel(f"s{i + 1}")
+                ax.set_ylabel(f"s{j + 1}")
+                ax.grid(True, alpha=0.3)
+                cbar = plt.colorbar(sc, ax=ax)
+                cbar.set_label(f"{label} [m/s]")
+                fig.tight_layout()
+                fig.savefig(
+                    os.path.join(
+                        pair_dir, f"latent_pair_s{i + 1}_s{j + 1}_{label}.png"
+                    ),
+                    dpi=200,
+                )
+                plt.close(fig)
+
+        # Histogram
+        fig, ax = plt.subplots(figsize=(5, 4))
+        ax.hist(y, bins=40, color="#4C72B0", alpha=0.8)
+        ax.set_xlabel(f"{label} [m/s]")
+        ax.set_ylabel("N")
+        ax.grid(True, alpha=0.3)
+        ax.text(
+            0.02,
+            0.98,
+            annotation,
+            transform=ax.transAxes,
+            va="top",
+            ha="left",
+            bbox=dict(boxstyle="round,pad=0.4", fc="white", ec="0.7", alpha=0.9),
+            fontsize=9,
+        )
+        fig.tight_layout()
+        fig.savefig(os.path.join(out_root_dir, f"hist_{label}.png"), dpi=200)
+        plt.close(fig)
+
+    print(f"📊 Activity comparison plot saved: {filename}")

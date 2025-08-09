@@ -8,7 +8,11 @@
 # --------------------------------------------------------------------------
 # Données
 # --------------------------------------------------------------------------
-dataset_filepath: "data/npz_datasets/dataset_1000specs_5000_5300_Kp1e-1_P100.npz"  # Chemin complet du NPZ standardisé
+experiment_name: "aestra_local_experiment_range_50"                 # Nom de l'expérience (créera un sous-dossier)
+
+dataset_filepath: "data/npz_datasets/dataset_1000specs_5000_5050_Kp1e-1_P100_Phi0.npz"  # Chemin complet du NPZ standardisé
+output_root_dir: "experiments"                                # Répertoire racine pour tous les outputs (local)
+
 data_dtype: float32       # Type numpy/torch du tableau des spectres (float16/float32/float64)
 
 checkpoint_every: 100       # Fréquence de sauvegarde des checkpoints (en epochs)
@@ -38,8 +42,6 @@ sigma_c: 0.0001              # Écart-type pour le bruit spectral
 sigma_y: 1              # Écart-type pour le bruit de flux
 k_reg_init: 0.               # Coefficient de régularisation pour la perte
 cycle_length: 1000        # Nombre d'itérations pour le cycle de régularisation
-b_obs_trainable: false    # Spectre observé fixe ou ajustable ?
-b_rest_trainable: true    # Spectre template (repos) entraînable ?
 model_dtype: float32      # Type de données pour les poids du modèle (float16/float32/float64)
 
 # --------------------------------------------------------------------------
@@ -54,36 +56,28 @@ grad_scaler_growth_factor: 2.0  # Facteur de croissance du scaler
 grad_scaler_backoff_factor: 0.5 # Facteur de réduction du scaler
 grad_scaler_growth_interval: 2000 # Intervalle de croissance du scaler
 
-# --------------------------------------------------------------------------
-# Output Organization
-# --------------------------------------------------------------------------
-output_root_dir: "experiments"                                # Répertoire racine pour tous les outputs (local)
-experiment_name: "aestra_local_experiment"                 # Nom de l'expérience (créera un sous-dossier)
 
 # --------------------------------------------------------------------------
-# Logging des losses
+# Logging et plots
 # --------------------------------------------------------------------------
 save_losses_csv: true     # Sauver les losses dans un fichier CSV
 csv_save_every: 100       # Fréquence de sauvegarde CSV (en epochs)
-plot_every: 0             # Plot des losses tous les X epochs (0 = désactivé)
-plot_rv_every: 50          # Plot des prédictions RV (dataset complet) tous les X epochs (0 = désactivé)
-plot_rv_chunk_size: 256   # Taille des chunks pour le calcul des RV sur tout le dataset
+plot_every: 50             # Plot des losses tous les X epochs (0 = désactivé)
+plot_rv_every: 50         # Plot des prédictions RV tous les X epochs (0 = désactivé)
 
 # --------------------------------------------------------------------------
 # Phases d'entraînement
 # --------------------------------------------------------------------------
 phases:
   - name: rvonly
-    n_epochs: 200
+    n_epochs: 100
     optimizer: "torch.optim.Adam"
     optimizer_kwargs:
       lr: 0.0001
       weight_decay: 0.0
     b_obs_trainable: false
     b_rest_trainable: false
-    # plot_rv_every: 10           # (optionnel) override par-phase
-    # plot_rv_chunk_size: 512     # (optionnel) override par-phase
-
+    
   - name: joint
     n_epochs: 100
     optimizer: "torch.optim.Adam"
@@ -92,5 +86,4 @@ phases:
       weight_decay: 0.0
     b_obs_trainable: false
     b_rest_trainable: true
-    # plot_rv_every: 10           # (optionnel) override par-phase
-    # plot_rv_chunk_size: 512     # (optionnel) override par-phase
+    plot_activity_every: 20
