@@ -116,11 +116,11 @@ def save_experiment_checkpoint(
         if exp_dirs is not None:
             path = os.path.join(
                 exp_dirs["models_dir"],
-                f"aestra_{phase_name}_{epoch}.pth",
+                f"aestra_{phase_name}_checkpoint.pth",
             )
         else:
             # Fallback vers l'ancien système
-            path = f"models/aestra_{phase_name}_{epoch}.pth"
+            path = f"models/aestra_{phase_name}_checkpoint.pth"
 
     # Sauvegarde du checkpoint standard
     save_checkpoint(model, optimizer, path, scheduler)
