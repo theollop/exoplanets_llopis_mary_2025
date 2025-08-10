@@ -1167,8 +1167,8 @@ if __name__ == "__main__":
     create_soap_gpu_paper_dataset(
         spectra_filepath="data/soap_gpu_paper/spec_cube_tot.h5",
         spec_filepath="data/soap_gpu_paper/spec_master.npz",
-        output_filepath="data/npz_datasets/dataset_100specs_5000_5010_Kp1e-1_P100_Phi0.npz",
-        n_spectra=100,
+        output_filepath="data/npz_datasets/dataset_1000specs_5000_5010_Kp1e-1_P100_Phi0.npz",
+        n_spectra=1000,
         wavemin=5000,
         wavemax=5010,
         downscaling_factor=2,

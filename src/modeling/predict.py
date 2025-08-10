@@ -25,7 +25,7 @@ from sklearn.linear_model import LinearRegression
 import os
 import argparse
 import csv
-
+import glob
 # ==== PERIODOGRAM ANALYSIS ====
 
 
@@ -257,7 +257,7 @@ def compute_periodogram_metrics(
     if ls is None or np.all(np.isnan(power)):
         print("ERROR: Periodogram computation failed, returning empty metrics")
         metrics = {
-            "fap_at_Pinj": None,
+            "fap_at_PNj": None,
             "power_ratio": None,
             "n_sig_peaks_outside": 0,
             "P_detected": None,
@@ -269,7 +269,7 @@ def compute_periodogram_metrics(
     mask_planet_window = _get_planet_window_mask(periods, P_inj, exclude_width_frac)
 
     # Analyze planet detection
-    fap_at_Pinj, power_ratio, P_detected, delta_P = _analyze_planet_detection(
+    fap_at_PNj, power_ratio, P_detected, delta_P = _analyze_planet_detection(
         periods, power, mask_planet_window, P_inj, ls, ls_method
     )
 
@@ -285,7 +285,7 @@ def compute_periodogram_metrics(
     )
 
     metrics = {
-        "fap_at_Pinj": fap_at_Pinj,
+        "fap_at_PNj": fap_at_PNj,
         "power_ratio": power_ratio,
         "n_sig_peaks_outside": n_sig_peaks_outside,
         "P_detected": P_detected,
@@ -311,32 +311,6 @@ def plot_periodogram(
     """
     Plot periodogram with detection metrics and annotations.
     Supports multiple injected periods.
-
-    Parameters
-    ----------
-    periods : array
-        Period grid (days)
-    power : array
-        LS power values
-    metrics : dict or list of dict, optional
-        Detection metrics from compute_periodogram_metrics.
-        If list, should match length of P_inj list.
-    P_inj : float or list of float, optional
-        Injected period(s) for reference
-    fap_threshold : float
-        FAP threshold for display
-    exclude_width_frac : float
-        Planet window width fraction
-    peak_prominence : float, optional
-        Peak prominence for outside peak detection
-    title : str
-        Plot title
-    save_path : str, optional
-        If provided, save the figure to this path
-    show_plot : bool
-        If True, display the figure instead of closing
-    xlim : tuple, optional
-        If provided, apply x-axis limits (min, max)
     """
     fig, ax = plt.subplots(figsize=(12, 6))
 
@@ -347,28 +321,19 @@ def plot_periodogram(
     ax.set_title(title)
     ax.grid(True, which="both", alpha=0.25)
 
-    # Add FAP threshold line with validation
-    if np.any(np.isnan(power)) or np.any(np.isinf(power)):
-        print("Warning: power array contains NaN or Inf values")
-        power_clean = power[np.isfinite(power)]
-        if len(power_clean) == 0:
-            print("Error: All power values are NaN or Inf")
-            max_power = 1.0  # fallback value
-        else:
-            max_power = np.max(power_clean)
+    # Safe max/min power
+    power_clean = power[np.isfinite(power)]
+    if power_clean.size == 0:
+        max_power = 1.0
     else:
-        max_power = np.max(power)
-
-    if np.isnan(max_power) or np.isinf(max_power) or max_power <= 0:
-        print(f"Warning: max_power is invalid ({max_power}), using fallback")
+        max_power = (
+            float(np.max(power_clean)) if np.isfinite(np.max(power_clean)) else 1.0
+        )
+    if max_power <= 0:
         max_power = 1.0
 
+    # FAP horizontal level
     fap_level = max_power * fap_threshold
-
-    # print(
-    #     f"max_power: {max_power:.3f}, fap_threshold: {fap_threshold}, fap_level: {fap_level:.3f}"
-    # )
-
     if np.isfinite(fap_level) and fap_level > 0:
         ax.axhline(
             fap_level,
@@ -377,17 +342,14 @@ def plot_periodogram(
             color="red",
             label=f"Seuil FAP = {int(fap_threshold * 100)}%",
         )
-    else:
-        print(f"Skipping FAP threshold line due to invalid fap_level: {fap_level}")
 
-    # Handle multiple periods
+    # Handle multiple injected periods and draw bands + markers
+    P_inj_list = []
+    metrics_list = []
     if P_inj is not None:
-        # Convert to lists for uniform handling
         P_inj_list = P_inj if isinstance(P_inj, (list, tuple, np.ndarray)) else [P_inj]
-
         if metrics is not None:
             metrics_list = metrics if isinstance(metrics, list) else [metrics]
-            # Ensure metrics list matches P_inj list length
             if len(metrics_list) != len(P_inj_list):
                 metrics_list = (
                     [metrics_list[0]] * len(P_inj_list)
@@ -397,98 +359,97 @@ def plot_periodogram(
         else:
             metrics_list = [None] * len(P_inj_list)
 
-        # Color palette for multiple planets
         colors = plt.cm.Set1(np.linspace(0, 1, max(len(P_inj_list), 3)))
-
-        # Combined exclusion mask for all planets
-        combined_mask = np.zeros_like(periods, dtype=bool)
 
         for i, (P_planet, planet_metrics) in enumerate(zip(P_inj_list, metrics_list)):
             if P_planet is None or P_planet <= 0:
                 continue
-
             color = colors[i % len(colors)]
 
-            # Planet exclusion band
+            # Exclusion band around injected period
             ax.axvspan(
                 P_planet * (1 - exclude_width_frac),
                 P_planet * (1 + exclude_width_frac),
                 alpha=0.15,
                 color=color,
-                label=f"Planète {i + 1}: P = {P_planet:.3f} j",
+                label=f"Fenêtre planète {i + 1}: P={P_planet:.3f} j",
             )
 
-            # Update combined mask
-            planet_mask = np.abs(periods - P_planet) <= exclude_width_frac * P_planet
-            combined_mask |= planet_mask
+            # Reference line at injected period
+            ax.axvline(P_planet, color=color, lw=1.2, alpha=0.7)
 
-            # Reference line for P_inj
-            ax.axvline(P_planet, color=color, lw=1.5, alpha=0.7)
-
-            # Detected peak marker if metrics available
+            # Red circle marker for detected peak if available
             if planet_metrics and planet_metrics.get("P_detected") is not None:
                 P_detected = planet_metrics["P_detected"]
-                idx = np.argmin(np.abs(periods - P_detected))
-                ax.plot(
-                    periods[idx],
-                    power[idx],
-                    marker="o",
-                    ms=8,
-                    mec=color,
-                    mfc="none",
-                    mew=2,
-                    label=f"Détecté {i + 1}: {P_detected:.3f} j",
-                )
-    else:
-        combined_mask = np.zeros_like(periods, dtype=bool)
+                idx = int(np.argmin(np.abs(periods - P_detected)))
+                if idx >= 0 and idx < len(power) and np.isfinite(power[idx]):
+                    ax.plot(
+                        periods[idx],
+                        power[idx],
+                        marker="o",
+                        ms=8,
+                        mec="red",
+                        mfc="none",
+                        mew=2,
+                        label=f"Pic détecté {i + 1}: {P_detected:.3f} j",
+                    )
 
-    # Mark significant peaks outside all planet windows
+    # Mark significant peaks outside all planet windows (if any injected)
+    combined_mask = np.zeros_like(periods, dtype=bool)
+    if P_inj_list:
+        for P_planet in P_inj_list:
+            combined_mask |= np.abs(periods - P_planet) <= exclude_width_frac * P_planet
+
     if peak_prominence is None:
-        peak_prominence = 0.5 * np.std(power)
+        peak_prominence = (
+            0.5 * np.std(power[np.isfinite(power)])
+            if np.any(np.isfinite(power))
+            else 0.0
+        )
 
     if np.any(~combined_mask):
         p_out = power[~combined_mask]
         per_out = periods[~combined_mask]
-        peaks_out, _ = find_peaks(p_out, prominence=peak_prominence)
-
-        if peaks_out.size > 0:
-            ax.plot(
-                per_out[peaks_out],
-                p_out[peaks_out],
-                "x",
-                ms=6,
-                color="orange",
-                label="Pics significatifs",
-            )
-
-    # Add metrics text box (for first planet if multiple)
-    if metrics is not None:
-        first_metrics = metrics if not isinstance(metrics, list) else metrics[0]
-        if first_metrics:
-            lines = []
-            if first_metrics.get("fap_at_Pinj") is not None:
-                lines.append(f"FAP: {first_metrics['fap_at_Pinj']:.3g}")
-            if first_metrics.get("power_ratio") is not None:
-                lines.append(f"Ratio: {first_metrics['power_ratio']:.3g}")
-            if first_metrics.get("n_sig_peaks_outside") is not None:
-                lines.append(f"Pics ext.: {first_metrics['n_sig_peaks_outside']}")
-            if first_metrics.get("delta_P") is not None:
-                lines.append(f"ΔP: {first_metrics['delta_P']:.3g} j")
-
-            if lines:
-                txt = "\n".join(lines)
-                ax.text(
-                    0.02,
-                    0.98,
-                    txt,
-                    transform=ax.transAxes,
-                    va="top",
-                    ha="left",
-                    bbox=dict(
-                        boxstyle="round,pad=0.4", fc="white", ec="0.7", alpha=0.9
-                    ),
-                    fontsize=10,
+        if np.any(np.isfinite(p_out)):
+            peaks_out, _ = find_peaks(p_out, prominence=peak_prominence)
+            if peaks_out.size > 0:
+                ax.plot(
+                    per_out[peaks_out],
+                    p_out[peaks_out],
+                    "x",
+                    ms=6,
+                    color="orange",
+                    label="Pics significatifs",
                 )
+
+    # Add metrics text box: one line per injected period
+    if P_inj_list and metrics_list:
+        lines = []
+        for i, (P_planet, m) in enumerate(zip(P_inj_list, metrics_list)):
+            if not m:
+                continue
+            parts = [f"P={P_planet:.3g}j"]
+            if m.get("delta_P") is not None:
+                parts.append(f"ΔP={m['delta_P']:.3g}j")
+            if m.get("fap_at_Pinj") is not None:
+                parts.append(f"FAP={m['fap_at_Pinj']:.2g}")
+            if m.get("n_sig_peaks_outside") is not None:
+                parts.append(f"Nsig={m['n_sig_peaks_outside']}")
+            if m.get("power_ratio") is not None:
+                parts.append(f"Ratio={m['power_ratio']:.2g}")
+            lines.append("  ".join(parts))
+        if lines:
+            txt = "\n".join(lines)
+            ax.text(
+                0.02,
+                0.98,
+                txt,
+                transform=ax.transAxes,
+                va="top",
+                ha="left",
+                bbox=dict(boxstyle="round,pad=0.4", fc="white", ec="0.7", alpha=0.9),
+                fontsize=10,
+            )
 
     if xlim is not None:
         ax.set_xlim(*xlim)
@@ -939,148 +900,135 @@ def plot_latent_space_3d(
     show_plot=False,
     decorrelated=False,
 ):
-    """Plot a 3D latent space with 2D projections, colored by RV values.
+    """Latent space visualization.
 
-    Args:
-        latent_s (np.ndarray): latent vectors of shape (N, D)
-        rv_values (np.ndarray): RV values of shape (N,)
-        save_path (str, optional): path to save the figure
-        show_plot (bool): whether to display the plot
-        decorrelated (bool): flag to indicate decorrelated RV (for title)
-
-    Returns:
-        bool: True if plotted, False if latent space < 3D
+    - If D == 3: draw 3D scatter + 2D projections + RV histogram (no regression fits).
+    - If D > 3: skip 3D; draw only 2D projections (S1-S2, S1-S3, S2-S3) + RV histogram.
+    - If D < 3: return False.
     """
-    if latent_s.shape[1] < 3:
-        print(f"⚠️  L'espace latent n'est que {latent_s.shape[1]}D, plot 3D impossible")
+    D = latent_s.shape[1]
+    if D < 3:
+        print(f"⚠️  L'espace latent n'est que {D}D, projections insuffisantes")
         return False
 
     if save_path is None:
-        save_path = "reports/figures/latent_space_3d.png"
+        save_path = "reports/figures/latent_space.png"
 
     s1, s2, s3 = latent_s[:, 0], latent_s[:, 1], latent_s[:, 2]
 
     print(f"RV range: [{np.min(rv_values):.3f}, {np.max(rv_values):.3f}] m/s")
     print(f"Nombre de spectres: {len(rv_values)}")
 
-    fig = plt.figure(figsize=(20, 15))
-
-    # 3D scatter
-    ax_3d = fig.add_subplot(2, 3, (1, 4), projection="3d")
-    scatter_3d = ax_3d.scatter(
-        s1, s2, s3, c=rv_values, cmap="viridis", s=20, alpha=0.7, edgecolors="none"
-    )
-    ax_3d.set_xlabel("S₁")
-    ax_3d.set_ylabel("S₂")
-    ax_3d.set_zlabel("S₃")
-    ax_3d.set_title(
-        f"Espace latent 3D coloré par V_encode [m/s] {'DECORRELATED' if decorrelated else ''}"
-    )
-    cbar_3d = plt.colorbar(scatter_3d, ax=ax_3d, shrink=0.6)
-    cbar_3d.set_label("V_encode [m/s]")
-
-    def add_correlation_analysis(ax, x_data, y_data, x_label, y_label):
-        corr = np.corrcoef(x_data, y_data)[0, 1]
-        slope, intercept = np.polyfit(x_data, y_data, 1)
-        x_range = np.linspace(x_data.min(), x_data.max(), 100)
-        y_fit = slope * x_range + intercept
-        ax.plot(
-            x_range,
-            y_fit,
-            "r--",
-            linewidth=2,
-            alpha=0.8,
-            label=f"R={corr:.3f}, slope={slope:.3f}",
+    # Figure layout differs depending on dimensionality
+    if D == 3:
+        fig = plt.figure(figsize=(20, 15))
+        # 3D scatter
+        ax_3d = fig.add_subplot(2, 3, (1, 4), projection="3d")
+        scatter_3d = ax_3d.scatter(
+            s1, s2, s3, c=rv_values, cmap="viridis", s=20, alpha=0.7, edgecolors="none"
         )
-        ax.set_title(f"{ax.get_title()}\nR={corr:.3f}")
-        ax.legend(fontsize=8, loc="best")
-        return corr, slope
+        ax_3d.set_xlabel("S₁")
+        ax_3d.set_ylabel("S₂")
+        ax_3d.set_zlabel("S₃")
+        ax_3d.set_title(
+            f"Espace latent 3D coloré par V_encode [m/s] {'DECORRELATED' if decorrelated else ''}"
+        )
+        cbar_3d = plt.colorbar(scatter_3d, ax=ax_3d, shrink=0.6)
+        cbar_3d.set_label("V_encode [m/s]")
 
-    # 2D projections
-    ax_12 = fig.add_subplot(2, 3, 2)
-    ax_12.scatter(
-        s1, s2, c=rv_values, cmap="viridis", s=15, alpha=0.7, edgecolors="none"
-    )
-    ax_12.set_xlabel("S₁")
-    ax_12.set_ylabel("S₂")
-    ax_12.set_title("Projection S₁-S₂")
-    ax_12.grid(True, alpha=0.3)
-    corr_12, slope_12 = add_correlation_analysis(ax_12, s1, s2, "S₁", "S₂")
+        # 2D projections
+        ax_12 = fig.add_subplot(2, 3, 2)
+        ax_12.scatter(
+            s1, s2, c=rv_values, cmap="viridis", s=15, alpha=0.7, edgecolors="none"
+        )
+        ax_12.set_xlabel("S₁")
+        ax_12.set_ylabel("S₂")
+        ax_12.set_title("Projection S₁-S₂")
+        ax_12.grid(True, alpha=0.3)
 
-    ax_13 = fig.add_subplot(2, 3, 3)
-    ax_13.scatter(
-        s1, s3, c=rv_values, cmap="viridis", s=15, alpha=0.7, edgecolors="none"
-    )
-    ax_13.set_xlabel("S₁")
-    ax_13.set_ylabel("S₃")
-    ax_13.set_title("Projection S₁-S₃")
-    ax_13.grid(True, alpha=0.3)
-    corr_13, slope_13 = add_correlation_analysis(ax_13, s1, s3, "S₁", "S₃")
+        ax_13 = fig.add_subplot(2, 3, 3)
+        ax_13.scatter(
+            s1, s3, c=rv_values, cmap="viridis", s=15, alpha=0.7, edgecolors="none"
+        )
+        ax_13.set_xlabel("S₁")
+        ax_13.set_ylabel("S₃")
+        ax_13.set_title("Projection S₁-S₃")
+        ax_13.grid(True, alpha=0.3)
 
-    ax_23 = fig.add_subplot(2, 3, 6)
-    ax_23.scatter(
-        s2, s3, c=rv_values, cmap="viridis", s=15, alpha=0.7, edgecolors="none"
-    )
-    ax_23.set_xlabel("S₂")
-    ax_23.set_ylabel("S₃")
-    ax_23.set_title("Projection S₂-S₃")
-    ax_23.grid(True, alpha=0.3)
-    corr_23, slope_23 = add_correlation_analysis(ax_23, s2, s3, "S₂", "S₃")
+        ax_23 = fig.add_subplot(2, 3, 6)
+        ax_23.scatter(
+            s2, s3, c=rv_values, cmap="viridis", s=15, alpha=0.7, edgecolors="none"
+        )
+        ax_23.set_xlabel("S₂")
+        ax_23.set_ylabel("S₃")
+        ax_23.set_title("Projection S₂-S₃")
+        ax_23.grid(True, alpha=0.3)
 
-    # RV histogram and stats
-    ax_hist = fig.add_subplot(2, 3, 5)
-    ax_hist.hist(
-        rv_values,
-        bins=50,
-        alpha=0.8,
-        color="skyblue",
-        edgecolor="black",
-        label="Distribution RV",
-    )
-    ax_hist.set_xlabel("V_encode [m/s]")
-    ax_hist.set_ylabel("Fréquence")
-    ax_hist.set_title("Distribution des vitesses radiales")
-    ax_hist.grid(True, alpha=0.3)
-    ax_hist.legend(fontsize=8)
+        # RV histogram
+        ax_hist = fig.add_subplot(2, 3, 5)
+        ax_hist.hist(
+            rv_values,
+            bins=50,
+            alpha=0.8,
+            color="skyblue",
+            edgecolor="black",
+            label="Distribution RV",
+        )
+        ax_hist.set_xlabel("V_encode [m/s]")
+        ax_hist.set_ylabel("Fréquence")
+        ax_hist.set_title("Distribution des vitesses radiales")
+        ax_hist.grid(True, alpha=0.3)
+        ax_hist.legend(fontsize=8)
 
-    corr_s1_rv = np.corrcoef(s1, rv_values)[0, 1]
-    corr_s2_rv = np.corrcoef(s2, rv_values)[0, 1]
-    corr_s3_rv = np.corrcoef(s3, rv_values)[0, 1]
+    else:  # D > 3
+        fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+        ax_12, ax_13, ax_23, ax_hist = axes[0, 0], axes[0, 1], axes[1, 0], axes[1, 1]
 
-    stats_text = f"""Statistiques:
-N spectres: {len(rv_values)}
-RV:
-  Min: {np.min(rv_values):.3f} m/s
-  Max: {np.max(rv_values):.3f} m/s
-  Mean: {np.mean(rv_values):.3f} m/s
-  Std: {np.std(rv_values):.3f} m/s
-Dim latente: {latent_s.shape[1]}D
+        # 2D projections only
+        ax_12.scatter(
+            s1, s2, c=rv_values, cmap="viridis", s=15, alpha=0.7, edgecolors="none"
+        )
+        ax_12.set_xlabel("S₁")
+        ax_12.set_ylabel("S₂")
+        ax_12.set_title("Projection S₁-S₂")
+        ax_12.grid(True, alpha=0.3)
 
-Corrélations entre dimensions:
-  S₁-S₂: R={corr_12:.3f}
-  S₁-S₃: R={corr_13:.3f}
-  S₂-S₃: R={corr_23:.3f}
+        ax_13.scatter(
+            s1, s3, c=rv_values, cmap="viridis", s=15, alpha=0.7, edgecolors="none"
+        )
+        ax_13.set_xlabel("S₁")
+        ax_13.set_ylabel("S₃")
+        ax_13.set_title("Projection S₁-S₃")
+        ax_13.grid(True, alpha=0.3)
 
-Corrélations avec RV:
-  S₁-RV: R={corr_s1_rv:.3f}
-  S₂-RV: R={corr_s2_rv:.3f}
-  S₃-RV: R={corr_s3_rv:.3f}"""
+        ax_23.scatter(
+            s2, s3, c=rv_values, cmap="viridis", s=15, alpha=0.7, edgecolors="none"
+        )
+        ax_23.set_xlabel("S₂")
+        ax_23.set_ylabel("S₃")
+        ax_23.set_title("Projection S₂-S₃")
+        ax_23.grid(True, alpha=0.3)
 
-    ax_hist.text(
-        0.05,
-        0.95,
-        stats_text,
-        transform=ax_hist.transAxes,
-        verticalalignment="top",
-        fontsize=9,
-        bbox=dict(boxstyle="round", facecolor="wheat", alpha=0.8),
-    )
+        # RV histogram
+        ax_hist.hist(
+            rv_values,
+            bins=50,
+            alpha=0.8,
+            color="skyblue",
+            edgecolor="black",
+            label="Distribution RV",
+        )
+        ax_hist.set_xlabel("V_encode [m/s]")
+        ax_hist.set_ylabel("Fréquence")
+        ax_hist.set_title("Distribution des vitesses radiales")
+        ax_hist.grid(True, alpha=0.3)
+        ax_hist.legend(fontsize=8)
 
     plt.tight_layout()
 
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
     plt.savefig(save_path, dpi=300, bbox_inches="tight")
-    print(f"Plot 3D de l'espace latent sauvegardé: {save_path}")
+    print(f"Visualisation de l'espace latent sauvegardée: {save_path}")
 
     if show_plot:
         plt.show()
@@ -1092,6 +1040,470 @@ Corrélations avec RV:
 
 # ==== MAIN EXECUTION ====
 
+
+def rank_metrics_across_experiments(
+    experiments_root: str = "experiments",
+    metrics_rel_path: str = os.path.join("postprocessing", "data", "metrics.csv"),
+    top_k: int = 5,
+):
+    """
+    Parcourt experiments/*/postprocessing/data/metrics.csv et produit un classement simple par métrique.
+
+    Règles:
+    - pearson_r: on classe par |valeur| (plus grand est meilleur)
+    - power_ratio: plus grand est meilleur
+    - fap_at_PNj, delta_P, n_sig_peaks_outside: plus petit est meilleur
+
+    Retourne un dict {metric: [ {experiment, value, row}, ... ]} trié, et imprime le top-k.
+    """
+    pattern = os.path.join(experiments_root, "*", metrics_rel_path)
+    csv_paths = glob.glob(pattern)
+    if not csv_paths:
+        print(f"Aucun metrics.csv trouvé (pattern: {pattern})")
+        return {}
+
+    higher_is_better = {
+        "pearson_r": True,  # on utilisera la valeur absolue
+        "power_ratio": True,
+    }
+
+    bucket = {}
+    for csv_file in csv_paths:
+        exp_name = os.path.basename(
+            os.path.dirname(os.path.dirname(os.path.dirname(csv_file)))
+        )
+        try:
+            with open(csv_file, newline="") as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    metric = row.get("metric")
+                    val_str = row.get("value")
+                    if not metric or val_str in (None, ""):
+                        continue
+                    try:
+                        val = float(val_str)
+                    except Exception:
+                        continue
+                    rank_val = abs(val) if metric == "pearson_r" else val
+                    if np.isnan(rank_val):
+                        continue
+                    bucket.setdefault(metric, {}).setdefault(exp_name, []).append(
+                        (rank_val, row)
+                    )
+        except Exception as e:
+            print(f"Erreur en lisant {csv_file}: {e}")
+
+    rankings = {}
+    for metric, expmap in bucket.items():
+        rows = []
+        for exp_name, items in expmap.items():
+            if not items:
+                continue
+            if higher_is_better.get(metric, False):
+                best_val, best_row = max(items, key=lambda x: x[0])
+            else:
+                best_val, best_row = min(items, key=lambda x: x[0])
+            rows.append({"experiment": exp_name, "value": best_val, "row": best_row[1]})
+        rows.sort(key=lambda d: d["value"], reverse=higher_is_better.get(metric, False))
+        rankings[metric] = rows
+
+    for metric, ranked in rankings.items():
+        print(f"\n=== Classement {metric} ===")
+        for i, entry in enumerate(ranked[:top_k], start=1):
+            try:
+                print(f"{i:>2}. {entry['experiment']}: {entry['value']:.6g}")
+            except Exception:
+                print(f"{i:>2}. {entry['experiment']}: {entry['value']}")
+
+    return rankings
+
+
+def main(
+    experiment_name: str,
+    fap_threshold: float = 0.01,
+    exclude_width_frac: float = 0.05,
+    min_period: float = 2.0,
+    max_period: float = None,
+    n_periods: int = 5000,
+    zoom_frac: float = 0.15,
+    batch_size: int = 64,
+    perturbation_value: float = 1.0,
+):
+    # Paths
+    exp_dir = os.path.join("experiments", experiment_name)
+    ckpt_path = os.path.join(exp_dir, "models", "aestra_final.pth")
+    out_root = os.path.join(exp_dir, "postprocessing")
+    fig_dir = os.path.join(out_root, "figures")
+    fig_periodo_v = os.path.join(fig_dir, "periodograms", "v")
+    fig_periodo_s = os.path.join(fig_dir, "periodograms", "s")
+    fig_latent = os.path.join(fig_dir, "latent")
+    fig_corr = os.path.join(fig_dir, "correlations")
+    data_dir = os.path.join(out_root, "data")
+
+    for d in [fig_periodo_v, fig_periodo_s, fig_latent, fig_corr, data_dir]:
+        os.makedirs(d, exist_ok=True)
+
+    # Load experiment
+    exp = load_experiment_checkpoint(ckpt_path)
+    model = exp["model"]
+    dataset = exp["dataset"]
+
+    # Predictions
+    prediction_results = predict(
+        model=model,
+        dataset=dataset,
+        batch_size=batch_size,
+        perturbation_value=perturbation_value,
+    )
+
+    v_correct = prediction_results["all_vobs"]
+    times_values = dataset.time_values
+
+    # CCF analysis
+    CCF_params = {
+        "v_grid": np.arange(-20000, 20000, 250),
+        "window_size_velocity": 820,
+        "mask_type": "G2",
+        "verbose": False,
+        "batch_size": batch_size,
+        "normalize": True,
+    }
+
+    print("Calcul des vitesses par CCF classique...")
+    v_apparent, depth, span, fwhm = get_vapparent(dataset, CCF_params)
+    print("Calcul des vitesses de référence...")
+    v_ref, depth_ref, span_ref, fwhm_ref = get_vref(dataset, CCF_params)
+    print("Calcul des vitesses corrigées par méthode traditionnelle...")
+    v_traditionnal = get_vtraditionnal(v_apparent, depth, span, fwhm)
+
+    # Prepare series
+    v_series = {
+        "v_apparent": v_apparent,
+        "v_correct": v_correct,
+        "v_traditionnal": v_traditionnal,
+        "v_ref": v_ref,
+    }
+
+    # Store periodograms
+    periodo_store = {}
+
+    # CSV metrics rows
+    csv_rows = []
+
+    def add_metric(row_type, series, component, metric, value, P_inj=None):
+        csv_rows.append(
+            {
+                "row_type": row_type,
+                "series": series,
+                "component": component,
+                "metric": metric,
+                "value": value if value is None or np.isscalar(value) else float(value),
+                "P_inj": P_inj,
+            }
+        )
+
+    # Helper to compute metrics for multiple injected periods
+    def compute_metrics_multi(
+        periods, power, ls, P_inj_list, exclude_width_frac, fap_threshold
+    ):
+        metrics_list = []
+        if not P_inj_list:
+            return metrics_list
+        for P_val in P_inj_list:
+            mask = _get_planet_window_mask(periods, P_val, exclude_width_frac)
+            fap, ratio, P_det, dP = _analyze_planet_detection(
+                periods, power, mask, P_val, ls
+            )
+            n_sig = _count_significant_peaks_outside(
+                periods, power, mask, ls, fap_threshold=fap_threshold
+            )
+            metrics_list.append(
+                {
+                    "fap_at_Pinj": fap,
+                    "power_ratio": ratio,
+                    "n_sig_peaks_outside": n_sig,
+                    "P_detected": P_det,
+                    "delta_P": dP,
+                }
+            )
+        return metrics_list
+
+    # === Periodograms for RV series ===
+    for name, y in v_series.items():
+        print(f"Périodogramme: {name}")
+        periods = _calculate_period_grid(
+            times_values, min_period, max_period, n_periods
+        )
+        ls, power = _compute_lomb_scargle(
+            times_values, y, periods, fit_mean=True, center_data=True
+        )
+        periodo_store[f"{name}_periods"] = periods
+        periodo_store[f"{name}_power"] = power
+
+        metrics_list = (
+            compute_metrics_multi(
+                periods,
+                power,
+                ls,
+                dataset.planets_periods or [],
+                exclude_width_frac,
+                fap_threshold,
+            )
+            if ls is not None
+            else []
+        )
+
+        plot_periodogram(
+            periods=periods,
+            power=power,
+            metrics=metrics_list if metrics_list else None,
+            P_inj=dataset.planets_periods,
+            fap_threshold=fap_threshold,
+            exclude_width_frac=exclude_width_frac,
+            title=f"LS Periodogram - {name}",
+            save_path=os.path.join(fig_periodo_v, f"{name}_periodogram.png"),
+            show_plot=False,
+        )
+
+        if dataset.planets_periods:
+            for i, P_val in enumerate(dataset.planets_periods):
+                m = metrics_list[i] if i < len(metrics_list) else {}
+                add_metric(
+                    "periodogram", name, "rv", "fap_at_PNj", m.get("fap_at_PNj"), P_val
+                )
+                add_metric(
+                    "periodogram",
+                    name,
+                    "rv",
+                    "power_ratio",
+                    m.get("power_ratio"),
+                    P_val,
+                )
+                add_metric(
+                    "periodogram",
+                    name,
+                    "rv",
+                    "n_sig_peaks_outside",
+                    m.get("n_sig_peaks_outside"),
+                    P_val,
+                )
+                add_metric(
+                    "periodogram", name, "rv", "delta_P", m.get("delta_P"), P_val
+                )
+
+    # === Periodograms for latent coordinates ===
+    all_s = prediction_results["all_s"]
+    n_latent = all_s.shape[1]
+    for i in range(n_latent):
+        name = f"s_{i + 1}"
+        y = all_s[:, i]
+        print(f"Périodogramme: {name}")
+        periods = _calculate_period_grid(
+            times_values, min_period, max_period, n_periods
+        )
+        ls, power = _compute_lomb_scargle(
+            times_values, y, periods, fit_mean=True, center_data=True
+        )
+        periodo_store[f"{name}_periods"] = periods
+        periodo_store[f"{name}_power"] = power
+
+        metrics_list = (
+            compute_metrics_multi(
+                periods,
+                power,
+                ls,
+                dataset.planets_periods or [],
+                exclude_width_frac,
+                fap_threshold,
+            )
+            if ls is not None
+            else []
+        )
+
+        plot_periodogram(
+            periods=periods,
+            power=power,
+            metrics=metrics_list if metrics_list else None,
+            P_inj=None,
+            fap_threshold=fap_threshold,
+            exclude_width_frac=exclude_width_frac,
+            title=f"LS Periodogram - {name}",
+            save_path=os.path.join(fig_periodo_s, f"{name}_periodogram.png"),
+            show_plot=False,
+        )
+
+        if dataset.planets_periods:
+            for j, P_val in enumerate(dataset.planets_periods):
+                m = metrics_list[j] if j < len(metrics_list) else {}
+                add_metric(
+                    "periodogram",
+                    name,
+                    "latent",
+                    "fap_at_PNj",
+                    m.get("fap_at_PNj"),
+                    P_val,
+                )
+                add_metric(
+                    "periodogram",
+                    name,
+                    "latent",
+                    "power_ratio",
+                    m.get("power_ratio"),
+                    P_val,
+                )
+                add_metric(
+                    "periodogram",
+                    name,
+                    "latent",
+                    "n_sig_peaks_outside",
+                    m.get("n_sig_peaks_outside"),
+                    P_val,
+                )
+                add_metric(
+                    "periodogram", name, "latent", "delta_P", m.get("delta_P"), P_val
+                )
+
+    # Save NPZ with periodograms
+    np.savez(os.path.join(data_dir, "periodograms.npz"), **periodo_store)
+
+    # Latent distance distribution
+    delta_s_rand, delta_s_aug = compute_latent_distances(
+        prediction_results["all_s"], prediction_results["all_saug"], seed=42
+    )
+
+    plot_latent_distance_distribution(
+        delta_s_rand=delta_s_rand,
+        delta_s_aug=delta_s_aug,
+        save_path=os.path.join(fig_latent, "latent_distance_distribution.png"),
+        show_plot=False,
+    )
+
+    plot_latent_marginal_distributions(
+        prediction_results["all_s"],
+        save_path=os.path.join(fig_latent, "latent_marginal_distributions.png"),
+        show_plot=False,
+    )
+
+    np.savez(
+        os.path.join(data_dir, "latent_distances.npz"),
+        delta_s_rand=delta_s_rand,
+        delta_s_aug=delta_s_aug,
+    )
+
+    add_metric(
+        "latent_distance",
+        "latent",
+        "delta_s",
+        "delta_s_rand_mean",
+        float(np.mean(delta_s_rand)),
+    )
+    add_metric(
+        "latent_distance",
+        "latent",
+        "delta_s",
+        "delta_s_rand_std",
+        float(np.std(delta_s_rand)),
+    )
+    add_metric(
+        "latent_distance",
+        "latent",
+        "delta_s",
+        "delta_s_rand_median",
+        float(np.median(delta_s_rand)),
+    )
+    add_metric(
+        "latent_distance",
+        "latent",
+        "delta_s",
+        "delta_s_aug_mean",
+        float(np.mean(delta_s_aug)),
+    )
+    add_metric(
+        "latent_distance",
+        "latent",
+        "delta_s",
+        "delta_s_aug_std",
+        float(np.std(delta_s_aug)),
+    )
+    add_metric(
+        "latent_distance",
+        "latent",
+        "delta_s",
+        "delta_s_aug_median",
+        float(np.median(delta_s_aug)),
+    )
+
+    # Activity perturbations
+    y_act_original = prediction_results["all_yact"][0]
+    latent_dim = prediction_results["all_yact_perturbed"].shape[0]
+    y_act_perturbed_list = [
+        prediction_results["all_yact_perturbed"][dim][0] for dim in range(latent_dim)
+    ]
+    wave = dataset.wavegrid.cpu().detach().numpy()
+
+    plot_activity_perturbation(
+        y_act_original=y_act_original,
+        y_act_perturbed_list=y_act_perturbed_list,
+        wavelength=wave,
+        save_path=os.path.join(fig_latent, "activity_perturbations.png"),
+        show_plot=False,
+        wave_range=(5000, 5010),
+    )
+
+    # Correlation matrix
+    plot_correlation_matrix(
+        v_apparent=v_apparent,
+        v_correct=v_correct,
+        v_traditionnal=v_traditionnal,
+        v_ref=v_ref,
+        depth=depth,
+        span=span,
+        fwhm=fwhm,
+        latent_vectors=prediction_results["all_s"],
+        save_path=os.path.join(fig_corr, "correlation_matrix.png"),
+        show_plot=False,
+    )
+
+    # Export correlations to CSV
+    x_vars = {"FWHM": fwhm, "Span": span, "Depth": depth}
+    for i in range(n_latent):
+        x_vars[f"s_{i + 1}"] = prediction_results["all_s"][:, i]
+    y_vars = {
+        "v_apparent": v_apparent,
+        "v_correct": v_correct,
+        "v_traditionnal": v_traditionnal,
+        "v_ref": v_ref,
+    }
+    for y_name, y_vals in y_vars.items():
+        for x_name, x_vals in x_vars.items():
+            corr = float(np.corrcoef(y_vals, x_vals)[0, 1])
+            add_metric("correlation", y_name, x_name, "pearson_r", corr)
+
+    # Optional latent 3D plot
+    if prediction_results["all_s"].shape[1] >= 3:
+        try:
+            plot_latent_space_3d(
+                latent_s=prediction_results["all_s"],
+                rv_values=v_correct,
+                save_path=os.path.join(fig_latent, "latent_space_3d.png"),
+                show_plot=False,
+            )
+        except Exception as e:
+            print(f"Erreur lors du plot 3D de l'espace latent: {e}")
+
+    # Write metrics CSV
+    with open(os.path.join(data_dir, "metrics.csv"), mode="w", newline="") as f:
+        writer = csv.DictWriter(
+            f,
+            fieldnames=["row_type", "series", "component", "metric", "value", "P_inj"],
+        )
+        writer.writeheader()
+        for row in csv_rows:
+            writer.writerow(row)
+
+    print(f"Tous les résultats ont été enregistrés dans: {out_root}")
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="AESTRA postprocessing: compute metrics, periodograms, and plots"
@@ -1100,14 +1512,6 @@ if __name__ == "__main__":
         "experiment_name",
         type=str,
         help="Nom de l'expérience (dossier sous experiments/)",
-    )
-    parser.add_argument(
-        "--p-inj",
-        dest="p_inj",
-        type=float,
-        nargs="*",
-        default=None,
-        help="Périodes injectées (jours). Optionnel, une ou plusieurs valeurs.",
     )
     parser.add_argument(
         "--fap-threshold", type=float, default=0.01, help="Seuil FAP (par défaut 1%)."
@@ -1275,7 +1679,7 @@ if __name__ == "__main__":
                 periods,
                 power,
                 ls,
-                args.p_inj if args.p_inj is not None else [],
+                dataset.planets_periods if dataset.planets_periods is not None else [],
                 args.exclude_width_frac,
                 args.fap_threshold,
             )
@@ -1288,7 +1692,7 @@ if __name__ == "__main__":
             periods=periods,
             power=power,
             metrics=metrics_list if metrics_list else None,
-            P_inj=args.p_inj,
+            P_inj=dataset.planets_periods,
             fap_threshold=args.fap_threshold,
             exclude_width_frac=args.exclude_width_frac,
             title=f"LS Periodogram - {name}",
@@ -1297,34 +1701,34 @@ if __name__ == "__main__":
         )
 
         # Save zooms for each injected period
-        if args.p_inj:
-            for i, P_val in enumerate(args.p_inj):
-                xlim = (P_val * (1 - args.zoom_frac), P_val * (1 + args.zoom_frac))
-                plot_periodogram(
-                    periods=periods,
-                    power=power,
-                    metrics=metrics_list[i] if metrics_list else None,
-                    P_inj=P_val,
-                    fap_threshold=args.fap_threshold,
-                    exclude_width_frac=args.exclude_width_frac,
-                    title=f"LS Periodogram - {name} (zoom P={P_val:.3f} j)",
-                    save_path=os.path.join(
-                        fig_periodo_v, f"{name}_periodogram_zoom_P{P_val:.3f}.png"
-                    ),
-                    show_plot=False,
-                    xlim=xlim,
-                )
+        # if dataset.planets_periods:
+        #     for i, P_val in enumerate(dataset.planets_periods):
+        #         xlim = (P_val * (1 - args.zoom_frac), P_val * (1 + args.zoom_frac))
+        #         plot_periodogram(
+        #             periods=periods,
+        #             power=power,
+        #             metrics=metrics_list[i] if metrics_list else None,
+        #             P_inj=P_val,
+        #             fap_threshold=args.fap_threshold,
+        #             exclude_width_frac=args.exclude_width_frac,
+        #             title=f"LS Periodogram - {name} (zoom P={P_val:.3f} j)",
+        #             save_path=os.path.join(
+        #                 fig_periodo_v, f"{name}_periodogram_zoom_P{P_val:.3f}.png"
+        #             ),
+        #             show_plot=False,
+        #             xlim=xlim,
+        #         )
 
         # Register metrics in CSV rows
-        if args.p_inj:
-            for i, P_val in enumerate(args.p_inj):
+        if dataset.planets_periods:
+            for i, P_val in enumerate(dataset.planets_periods):
                 m = metrics_list[i] if i < len(metrics_list) else {}
                 add_metric(
                     "periodogram",
                     name,
                     "rv",
-                    "fap_at_Pinj",
-                    m.get("fap_at_Pinj"),
+                    "fap_at_PNj",
+                    m.get("fap_at_PNj"),
                     P_val,
                 )
                 add_metric(
@@ -1368,7 +1772,7 @@ if __name__ == "__main__":
                 periods,
                 power,
                 ls,
-                args.p_inj if args.p_inj is not None else [],
+                dataset.planets_periods if dataset.planets_periods is not None else [],
                 args.exclude_width_frac,
                 args.fap_threshold,
             )
@@ -1380,7 +1784,7 @@ if __name__ == "__main__":
             periods=periods,
             power=power,
             metrics=metrics_list if metrics_list else None,
-            P_inj=args.p_inj,
+            P_inj=None,  # Période de rotation du Soleil = 27 jours on peut la mettre ici (optionnel)
             fap_threshold=args.fap_threshold,
             exclude_width_frac=args.exclude_width_frac,
             title=f"LS Periodogram - {name}",
@@ -1388,33 +1792,33 @@ if __name__ == "__main__":
             show_plot=False,
         )
 
-        if args.p_inj:
-            for j, P_val in enumerate(args.p_inj):
-                xlim = (P_val * (1 - args.zoom_frac), P_val * (1 + args.zoom_frac))
-                plot_periodogram(
-                    periods=periods,
-                    power=power,
-                    metrics=metrics_list[j] if j < len(metrics_list) else None,
-                    P_inj=P_val,
-                    fap_threshold=args.fap_threshold,
-                    exclude_width_frac=args.exclude_width_frac,
-                    title=f"LS Periodogram - {name} (zoom P={P_val:.3f} j)",
-                    save_path=os.path.join(
-                        fig_periodo_s, f"{name}_periodogram_zoom_P{P_val:.3f}.png"
-                    ),
-                    show_plot=False,
-                    xlim=xlim,
-                )
+        # if dataset.planets_periods:
+        #     for j, P_val in enumerate(dataset.planets_periods):
+        #         xlim = (P_val * (1 - args.zoom_frac), P_val * (1 + args.zoom_frac))
+        #         plot_periodogram(
+        #             periods=periods,
+        #             power=power,
+        #             metrics=metrics_list[j] if j < len(metrics_list) else None,
+        #             P_inj=P_val,
+        #             fap_threshold=args.fap_threshold,
+        #             exclude_width_frac=args.exclude_width_frac,
+        #             title=f"LS Periodogram - {name} (zoom P={P_val:.3f} j)",
+        #             save_path=os.path.join(
+        #                 fig_periodo_s, f"{name}_periodogram_zoom_P{P_val:.3f}.png"
+        #             ),
+        #             show_plot=False,
+        #             xlim=xlim,
+        #         )
 
-        if args.p_inj:
-            for j, P_val in enumerate(args.p_inj):
+        if dataset.planets_periods:
+            for j, P_val in enumerate(dataset.planets_periods):
                 m = metrics_list[j] if j < len(metrics_list) else {}
                 add_metric(
                     "periodogram",
                     name,
                     "latent",
-                    "fap_at_Pinj",
-                    m.get("fap_at_Pinj"),
+                    "fap_at_PNj",
+                    m.get("fap_at_PNj"),
                     P_val,
                 )
                 add_metric(

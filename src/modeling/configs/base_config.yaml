@@ -8,7 +8,7 @@
 # --------------------------------------------------------------------------
 # Données
 # --------------------------------------------------------------------------
-experiment_name: "aestra_local_experiment_range_50"                 # Nom de l'expérience (créera un sous-dossier)
+experiment_name: "exp1"                 # Nom de l'expérience (créera un sous-dossier)
 
 dataset_filepath: "data/npz_datasets/dataset_1000specs_5000_5010_Kp1e-1_P100_Phi0.npz"  # Chemin complet du NPZ standardisé
 output_root_dir: "experiments"                                # Répertoire racine pour tous les outputs (local)
@@ -20,7 +20,7 @@ checkpoint_every: 100       # Fréquence de sauvegarde des checkpoints (en epoch
 # --------------------------------------------------------------------------
 # DataLoader
 # --------------------------------------------------------------------------
-batch_size: 32            # Nombre d'échantillons par batch
+batch_size: 64            # Nombre d'échantillons par batch
 shuffle: false            # True pour mélanger à chaque epoch
 
 # --------------------------------------------------------------------------
@@ -70,7 +70,7 @@ plot_rv_every: 50         # Plot des prédictions RV tous les X epochs (0 = dés
 # --------------------------------------------------------------------------
 phases:
   - name: rvonly
-    n_epochs: 100
+    n_epochs: 200
     optimizer: "torch.optim.Adam"
     optimizer_kwargs:
       lr: 0.0001
@@ -79,11 +79,15 @@ phases:
     b_rest_trainable: false
     
   - name: joint
-    n_epochs: 100
+    n_epochs: 200
     optimizer: "torch.optim.Adam"
     optimizer_kwargs:
       lr: 0.0001
       weight_decay: 0.0
+    scheduler: "torch.optim.lr_scheduler.StepLR"
+    scheduler_kwargs:
+      step_size: 50
+      gamma: 0.7
     b_obs_trainable: false
     b_rest_trainable: true
     plot_activity_every: 20

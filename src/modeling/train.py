@@ -175,7 +175,7 @@ def load_experiment_checkpoint(path, device="cuda"):
         k_reg_init=config["k_reg_init"],
         cycle_length=config["cycle_length"],
         b_obs=dataset.template,
-        b_rest=dataset.template,
+        b_rest=dataset.spectra.mean(dim=0),
         device=device,
         dtype=getattr(torch, config.get("model_dtype", "float32")),
     )
@@ -721,7 +721,7 @@ def main(cfg_name=None, checkpoint=None, device="cuda"):
                 k_reg_init=config["k_reg_init"],
                 cycle_length=config["cycle_length"],
                 b_obs=dataset.template,
-                b_rest=dataset.template,
+                b_rest=dataset.spectra.mean(dim=0),
                 device=args.device,  # ⚠️ NOUVEAU: Passer le device explicitement
                 dtype=getattr(
                     torch, config.get("model_dtype", "float32")
