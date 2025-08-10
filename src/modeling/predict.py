@@ -1119,7 +1119,7 @@ def rank_metrics_across_experiments(
 
 
 def main(
-    experiment_name: str,
+    experiment_dir: str,
     fap_threshold: float = 0.01,
     exclude_width_frac: float = 0.05,
     min_period: float = 2.0,
@@ -1130,9 +1130,8 @@ def main(
     perturbation_value: float = 1.0,
 ):
     # Paths
-    exp_dir = os.path.join("experiments", experiment_name)
-    ckpt_path = os.path.join(exp_dir, "models", "aestra_final.pth")
-    out_root = os.path.join(exp_dir, "postprocessing")
+    ckpt_path = os.path.join(experiment_dir, "models", "aestra_final.pth")
+    out_root = os.path.join(experiment_dir, "postprocessing")
     fig_dir = os.path.join(out_root, "figures")
     fig_periodo_v = os.path.join(fig_dir, "periodograms", "v")
     fig_periodo_s = os.path.join(fig_dir, "periodograms", "s")
