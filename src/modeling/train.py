@@ -3,14 +3,17 @@
 Script d'entraînement professionnel pour AESTRA avec gestion de config YAML et checkpoints.
 
 Usage:
-    python train_pro.py exp0 [--checkpoint path/to/checkpoint.pth]
+    python train.py experiment_name config_name [checkpoint_path]
 
-Exemple:
-    python train_pro.py exp0                           # Nouvel entraînement avec config exp0
-    python train_pro.py exp0 --checkpoint aestra_joint_100.pth  # Reprendre depuis checkpoint (recherché dans models/)
+Exemples:
+    python train.py exp0 base_config                                     # Nouvel entraînement
+    python train.py exp0 base_config models/aestra_joint_100.pth         # Reprendre depuis checkpoint
+    python train.py exp1 colab_config exp0/models/aestra_final.pth       # Reprendre avec nouvelle config
+
+Note: La config utilisée est TOUJOURS celle spécifiée en argument, pas celle du checkpoint.
+      Cela permet de faire des modifications à la config même lors de la reprise d'un checkpoint.
 """
 
-import argparse
 import os
 import yaml
 import torch
@@ -623,122 +626,126 @@ def train_phase(
         )
 
 
-def main(cfg_name=None, checkpoint_path=None, device="cuda"):
+def main(experiment_name, config_name, checkpoint_path=None, device="cuda"):
     """
     Fonction principale d'entraînement AESTRA.
 
     Args:
-        cfg_name: Nom de la configuration (ex: "base_config", "colab_config")
-        checkpoint: Chemin vers un checkpoint pour reprendre l'entraînement
+        experiment_name: Nom de l'expérience (ex: "exp0", "test_joint")
+        config_name: Nom de la configuration (ex: "base_config", "colab_config")
+        checkpoint_path: Chemin vers un checkpoint pour reprendre l'entraînement (optionnel)
         device: Device à utiliser ("cuda" ou "cpu")
     """
-    # Si aucun argument n'est fourni, utiliser argparse pour la ligne de commande
-    if cfg_name is None:
-        parser = argparse.ArgumentParser(
-            description="Entraînement AESTRA avec config YAML"
-        )
-        parser.add_argument(
-            "--cfg_name", help="Nom de l'expérience (ex: exp0)", default="base_config"
-        )
-        parser.add_argument(
-            "--checkpoint",
-            help="Chemin vers un checkpoint pour reprendre l'entraînement",
-        )
-        parser.add_argument(
-            "--device", default="cuda", help="Device à utiliser (cuda/cpu)"
-        )
+    console.rule(
+        f"[bold blue]AESTRA Training - Experiment: {experiment_name} | Config: {config_name}[/]"
+    )
 
-        args = parser.parse_args()
-        cfg_name = args.cfg_name
-        checkpoint_path = args.checkpoint or checkpoint_path
-        device = args.device
-    else:
-        # Création d'un objet args simulé pour compatibilité avec le reste du code
-        class Args:
-            def __init__(self, cfg_name, checkpoint_path, device):
-                self.cfg_name = cfg_name
-                self.checkpoint_path = checkpoint_path
-                self.device = device
+    # TOUJOURS charger la config depuis le fichier (jamais depuis le checkpoint)
+    config = load_config(config_name)
+    console.log("✅ Configuration chargée avec succès")
 
-        args = Args(cfg_name, checkpoint_path, device)
-
-    console.rule(f"[bold blue]AESTRA Training - Experiment: {args.cfg_name}[/]")
+    # Configuration de la structure de dossiers pour l'expérience
+    exp_dirs = setup_experiment_directories(config, experiment_name)
 
     # Chargement depuis checkpoint ou nouvelle expérience
-    if args.checkpoint_path:
-        # Reprendre depuis checkpoint
-        exp_data = load_experiment_checkpoint(args.checkpoint_path, args.device)
-        model = exp_data["model"]
-        dataset = exp_data["dataset"]
-        config = exp_data["config"]
+    if checkpoint_path:
+        # Reprendre depuis checkpoint - mais on garde la config fraîchement chargée
+        console.log(f"🔄 Loading checkpoint: {checkpoint_path}")
+
+        exp_data = load_experiment_checkpoint(checkpoint_path, device)
         start_epoch = exp_data["epoch"]
         current_phase = exp_data["current_phase"]
 
-        # Récupérer la structure de dossiers depuis la config
-        exp_dirs = setup_experiment_directories(config, args.cfg_name)
-
         console.log(f"🔄 Resuming from epoch {start_epoch}, phase '{current_phase}'")
+        console.log(
+            "⚠️  Using current config (not checkpoint config) - modifications allowed"
+        )
 
     else:
         # Nouvelle expérience
-        config = load_config(args.cfg_name)
-        console.log("✅ Configuration chargée avec succès")
-
-        # Configuration de la structure de dossiers pour l'expérience
-        exp_dirs = setup_experiment_directories(config, args.cfg_name)
-
         current_phase = None
         start_epoch = 0
 
-        console.log("🔧 Début de la création du dataset...")
-        console.log(f"📁 dataset_filepath: {config.get('dataset_filepath')}")
+    # Création du dataset et du modèle à partir de la config actuelle (toujours)
+    console.log("🔧 Début de la création du dataset...")
+    console.log(f"📁 dataset_filepath: {config.get('dataset_filepath')}")
 
-        # Création du dataset (NPZ standardisé uniquement)
-        try:
-            dataset = SpectrumDataset(
-                dataset_filepath=config.get(
-                    "dataset_filepath",
-                    "data/npz_datasets/dataset_1000specs_5000_5050_Kp1e-1_P100.npz",
-                ),
-                data_dtype=getattr(torch, config.get("data_dtype", "float32")),
-                cuda=True,
+    # Création du dataset (NPZ standardisé uniquement)
+    try:
+        dataset = SpectrumDataset(
+            dataset_filepath=config.get(
+                "dataset_filepath",
+                "data/npz_datasets/dataset_1000specs_5000_5050_Kp1e-1_P100.npz",
+            ),
+            data_dtype=getattr(torch, config.get("data_dtype", "float32")),
+            cuda=True,
+        )
+        console.log("✅ Dataset créé avec succès")
+    except Exception as e:
+        console.log(f"❌ Erreur lors de la création du dataset: {e}")
+        raise
+
+    console.log("🤖 Début de la création du modèle...")
+
+    # Création du modèle
+    try:
+        model = AESTRA(
+            n_pixels=dataset.n_pixels,
+            S=config["latent_dim"],
+            sigma_v=config["sigma_v"],
+            sigma_c=config["sigma_c"],
+            sigma_y=config["sigma_y"],
+            k_reg_init=config["k_reg_init"],
+            cycle_length=config["cycle_length"],
+            b_obs=dataset.template,
+            b_rest=dataset.spectra.mean(dim=0),
+            device=device,
+            dtype=getattr(torch, config.get("model_dtype", "float32")),
+        )
+        console.log("✅ Modèle créé avec succès")
+    except Exception as e:
+        console.log(f"❌ Erreur lors de la création du modèle: {e}")
+        raise
+
+    # Si on charge depuis un checkpoint, charger les poids du modèle
+    if checkpoint_path:
+        console.log("🔄 Loading model weights from checkpoint...")
+        exp_data = load_experiment_checkpoint(checkpoint_path, device)
+        checkpoint_model_state = exp_data["checkpoint_data"]["model_state_dict"]
+
+        # Charger les poids avec gestion de compatibilité
+        current_model_keys = set(model.state_dict().keys())
+        saved_model_keys = set(checkpoint_model_state.keys())
+
+        # Filtrer les clés inattendues (compatibilité backward)
+        unexpected_keys = saved_model_keys - current_model_keys
+        if unexpected_keys:
+            console.log(
+                f"⚠️  Filtering out unexpected keys from checkpoint: {unexpected_keys}"
             )
-            console.log("✅ Dataset créé avec succès")
-        except Exception as e:
-            console.log(f"❌ Erreur lors de la création du dataset: {e}")
-            raise
-
-        console.log("🤖 Début de la création du modèle...")
-
-        # Création du modèle
-        try:
-            model = AESTRA(
-                n_pixels=dataset.n_pixels,
-                S=config["latent_dim"],
-                sigma_v=config["sigma_v"],
-                sigma_c=config["sigma_c"],
-                sigma_y=config["sigma_y"],
-                k_reg_init=config["k_reg_init"],
-                cycle_length=config["cycle_length"],
-                b_obs=dataset.template,
-                b_rest=dataset.spectra.mean(dim=0),
-                device=args.device,  # ⚠️ NOUVEAU: Passer le device explicitement
-                dtype=getattr(
-                    torch, config.get("model_dtype", "float32")
-                ),  # ⚠️ NOUVEAU: Support dtype modèle
-            )
-            console.log("✅ Modèle créé avec succès")
-        except Exception as e:
-            console.log(f"❌ Erreur lors de la création du modèle: {e}")
-            raise
-
-        if torch.cuda.is_available():
-            console.log("🚀 Déplacement du modèle vers le GPU...")
-            model = model.cuda()
-            console.log("✅ Modèle sur GPU")
+            filtered_state_dict = {
+                k: v
+                for k, v in checkpoint_model_state.items()
+                if k in current_model_keys
+            }
         else:
-            console.log("⚠️  CUDA non disponible, utilisation du CPU")
+            filtered_state_dict = checkpoint_model_state
 
+        # Charger le state dict filtré
+        model.load_state_dict(filtered_state_dict, strict=False)
+        model.set_phase(exp_data["checkpoint_data"].get("model_phase", "joint"))
+        console.log("✅ Model weights loaded from checkpoint")
+
+    if torch.cuda.is_available():
+        console.log("🚀 Déplacement du modèle vers le GPU...")
+        model = model.cuda()
+        console.log("✅ Modèle sur GPU")
+    else:
+        console.log("⚠️  CUDA non disponible, utilisation du CPU")
+
+    if checkpoint_path:
+        console.log("🔄 Resuming from checkpoint with new config")
+    else:
         console.log("🆕 Starting new experiment")
 
     # Création du DataLoader
@@ -776,7 +783,7 @@ def main(cfg_name=None, checkpoint_path=None, device="cuda"):
                     dataloader,
                     phase_config,
                     config,
-                    args.cfg_name,
+                    experiment_name,
                     start_epoch,
                     exp_dirs,
                 )
@@ -790,7 +797,7 @@ def main(cfg_name=None, checkpoint_path=None, device="cuda"):
                         dataloader,
                         next_phase_config,
                         config,
-                        args.cfg_name,
+                        experiment_name,
                         0,
                         exp_dirs,
                     )
@@ -807,7 +814,7 @@ def main(cfg_name=None, checkpoint_path=None, device="cuda"):
                     dataloader,
                     phase_config,
                     config,
-                    args.cfg_name,
+                    experiment_name,
                     0,
                     exp_dirs,
                 )
@@ -820,7 +827,7 @@ def main(cfg_name=None, checkpoint_path=None, device="cuda"):
                 dataloader,
                 phase_config,
                 config,
-                args.cfg_name,
+                experiment_name,
                 0,
                 exp_dirs,
             )
@@ -835,7 +842,7 @@ def main(cfg_name=None, checkpoint_path=None, device="cuda"):
     ckpt = {
         "model_state_dict": model.state_dict(),
         "model_phase": model.phase,
-        "cfg_name": args.cfg_name,
+        "cfg_name": experiment_name,
         "epoch": "final",
         "config": config,
         "dataset_metadata": dataset.to_dict(),
@@ -848,4 +855,17 @@ def main(cfg_name=None, checkpoint_path=None, device="cuda"):
 
 
 if __name__ == "__main__":
-    main()
+    import sys
+
+    if len(sys.argv) < 3:
+        print("Usage: python train.py experiment_name config_name [checkpoint_path]")
+        print("Examples:")
+        print("  python train.py exp0 base_config")
+        print("  python train.py exp0 base_config models/checkpoint.pth")
+        sys.exit(1)
+
+    experiment_name = sys.argv[1]
+    config_name = sys.argv[2]
+    checkpoint_path = sys.argv[3] if len(sys.argv) > 3 else None
+
+    main(experiment_name, config_name, checkpoint_path)
