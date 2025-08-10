@@ -623,7 +623,7 @@ def train_phase(
         )
 
 
-def main(cfg_name=None, checkpoint=None, device="cuda"):
+def main(cfg_name=None, checkpoint_path=None, device="cuda"):
     """
     Fonction principale d'entraînement AESTRA.
 
@@ -650,24 +650,24 @@ def main(cfg_name=None, checkpoint=None, device="cuda"):
 
         args = parser.parse_args()
         cfg_name = args.cfg_name
-        checkpoint = args.checkpoint or checkpoint
+        checkpoint_path = args.checkpoint or checkpoint_path
         device = args.device
     else:
         # Création d'un objet args simulé pour compatibilité avec le reste du code
         class Args:
-            def __init__(self, cfg_name, checkpoint, device):
+            def __init__(self, cfg_name, checkpoint_path, device):
                 self.cfg_name = cfg_name
-                self.checkpoint = checkpoint
+                self.checkpoint_path = checkpoint_path
                 self.device = device
 
-        args = Args(cfg_name, checkpoint, device)
+        args = Args(cfg_name, checkpoint_path, device)
 
     console.rule(f"[bold blue]AESTRA Training - Experiment: {args.cfg_name}[/]")
 
     # Chargement depuis checkpoint ou nouvelle expérience
-    if args.checkpoint:
+    if args.checkpoint_path:
         # Reprendre depuis checkpoint
-        exp_data = load_experiment_checkpoint(f"models/{args.checkpoint}", args.device)
+        exp_data = load_experiment_checkpoint(args.checkpoint_path, args.device)
         model = exp_data["model"]
         dataset = exp_data["dataset"]
         config = exp_data["config"]

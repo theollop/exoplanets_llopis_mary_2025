@@ -20,7 +20,7 @@ checkpoint_every: 100       # Fréquence de sauvegarde des checkpoints (en epoch
 # --------------------------------------------------------------------------
 # DataLoader
 # --------------------------------------------------------------------------
-batch_size: 64            # Nombre d'échantillons par batch
+batch_size: 32            # Nombre d'échantillons par batch
 shuffle: false            # True pour mélanger à chaque epoch
 
 # --------------------------------------------------------------------------
