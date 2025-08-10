@@ -354,6 +354,9 @@ def train_phase(
     console.log(f"Configuration pour la phase '{phase_name}':")
     console.log(phase_config)
 
+    console.log(f"Configuration totale pour '{cfg_name}':")
+    console.log(config)
+
     # Configuration de la trainabilité des paramètres
     model.set_b_spectra_trainable(
         phase_config.get("b_obs_trainable", True),
