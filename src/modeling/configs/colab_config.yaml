@@ -8,11 +8,14 @@
 # --------------------------------------------------------------------------
 # Données
 # --------------------------------------------------------------------------
-data_root_dir: "/content/drive/MyDrive/PFE/data"     # Répertoire racine des données (peut être modifié pour Colab)
-dataset_filename: "dataset_1000specs_5000_5050_Kp1e-1_P100.npz"  # Fichier NPZ dans data/npz_datasets
+experiment_name: "exp1"                 # Nom de l'expérience (créera un sous-dossier)
+
+dataset_filepath: "/content/drive/MyDrive/aestra_training/data/npz_datasets/dataset_1000specs_5000_5500_Kp1e-1_P100_Phi0.npz"  # Chemin complet du NPZ standardisé
+output_root_dir: "/content/drive/MyDrive/aestra_training/experiments"                                # Répertoire racine pour tous les outputs (local)
+
 data_dtype: float32       # Type numpy/torch du tableau des spectres (float16/float32/float64)
 
-checkpoint_every: 20       # Fréquence de sauvegarde des checkpoints (en epochs)
+checkpoint_every: 100       # Fréquence de sauvegarde des checkpoints (en epochs)
 
 # --------------------------------------------------------------------------
 # DataLoader
@@ -39,8 +42,6 @@ sigma_c: 0.0001              # Écart-type pour le bruit spectral
 sigma_y: 1              # Écart-type pour le bruit de flux
 k_reg_init: 0.               # Coefficient de régularisation pour la perte
 cycle_length: 1000        # Nombre d'itérations pour le cycle de régularisation
-b_obs_trainable: false    # Spectre observé fixe ou ajustable ?
-b_rest_trainable: true    # Spectre template (repos) entraînable ?
 model_dtype: float32      # Type de données pour les poids du modèle (float16/float32/float64)
 
 # --------------------------------------------------------------------------
@@ -55,56 +56,38 @@ grad_scaler_growth_factor: 2.0  # Facteur de croissance du scaler
 grad_scaler_backoff_factor: 0.5 # Facteur de réduction du scaler
 grad_scaler_growth_interval: 2000 # Intervalle de croissance du scaler
 
-# --------------------------------------------------------------------------
-# Output Organization
-# --------------------------------------------------------------------------
-output_root_dir: "/content/drive/MyDrive/PFE/experiments"                                # Répertoire racine pour tous les outputs (local)
-# Pour Colab, changer vers: "/content/drive/MyDrive/PFE/experiments"
-experiment_name: "aestra_colab_experiment"                 # Nom de l'expérience (créera un sous-dossier)
-# Structure créée automatiquement :
-# output_root_dir/experiment_name/
-# ├── models/          # Checkpoints et modèles finaux
-# ├── figures/         # Plots d'entraînement
-# ├── spectra/         # Plots de spectres
-# ├── logs/            # Fichiers CSV des losses
-# └── config.yaml      # Copie de la configuration utilisée
 
 # --------------------------------------------------------------------------
-# Logging des losses
+# Logging et plots
 # --------------------------------------------------------------------------
 save_losses_csv: true     # Sauver les losses dans un fichier CSV
-csv_save_every: 20       # Fréquence de sauvegarde CSV (en epochs)
+csv_save_every: 100       # Fréquence de sauvegarde CSV (en epochs)
+plot_every: 50             # Plot des losses tous les X epochs (0 = désactivé)
+plot_rv_every: 50         # Plot des prédictions RV tous les X epochs (0 = désactivé)
 
 # --------------------------------------------------------------------------
 # Phases d'entraînement
 # --------------------------------------------------------------------------
-# Liste d'étapes séquentielles, chacune avec ses propres optimiseur,
-# hyperparamètres de scheduler et réglages de trainabilité.
 phases:
   - name: rvonly
-    n_epochs: 40
-    optimizer: "torch.optim.Adam"                # Chemin complet de la classe
-    optimizer_kwargs:
-      lr: 0.0001
-      weight_decay: 0.0
-    b_obs_trainable: false
-    b_rest_trainable: false
-    # scheduler: "torch.optim.lr_scheduler.StepLR"
-    # scheduler_kwargs:
-    #   step_size: 50
-    #   gamma: 0.5
-
-
-  - name: joint
-    n_epochs: 100
+    n_epochs: 200
     optimizer: "torch.optim.Adam"
     optimizer_kwargs:
       lr: 0.0001
       weight_decay: 0.0
     b_obs_trainable: false
-    b_rest_trainable: true
+    b_rest_trainable: false
+    
+  - name: joint
+    n_epochs: 200
+    optimizer: "torch.optim.Adam"
+    optimizer_kwargs:
+      lr: 0.0001
+      weight_decay: 0.0
     scheduler: "torch.optim.lr_scheduler.StepLR"
     scheduler_kwargs:
       step_size: 50
       gamma: 0.7
-    plot_spectra_every: 10     # Plot des spectres toutes les X epochs (0 = désactivé)
+    b_obs_trainable: false
+    b_rest_trainable: true
+    plot_activity_every: 20
