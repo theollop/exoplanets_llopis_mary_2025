@@ -350,13 +350,6 @@ def train_phase(
 
     console.rule(f"[bold green]Phase: {phase_name}[/]")
 
-    # affichage propre de la config
-    console.log(f"Configuration pour la phase '{phase_name}':")
-    console.log(phase_config)
-
-    console.log(f"Configuration totale pour '{cfg_name}':")
-    console.log(config)
-
     # Configuration de la trainabilité des paramètres
     model.set_b_spectra_trainable(
         phase_config.get("b_obs_trainable", True),
@@ -768,6 +761,7 @@ def main(cfg_name=None, checkpoint_path=None, device="cuda"):
 
     console.log(f"📊 Dataset: {len(dataset)} spectres, {dataset.n_pixels} pixels")
     console.log(f"🔧 Modèle: {sum(p.numel() for p in model.parameters())} paramètres")
+    console.log(f"Batch size: {config['batch_size']}")
 
     # Entraînement par phases
     if current_phase is not None:
