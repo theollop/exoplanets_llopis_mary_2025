@@ -97,5 +97,5 @@ def get_mask(mask_type: str = "G2") -> np.ndarray:
         np.ndarray: Tableau numpy contenant les positions et poids des lignes.
     """
     return np.loadtxt(
-        f"data/rv_datachallenge/masks/{mask_type}_mask.txt",
+        f"data/masks/{mask_type}_mask.txt",
     )
