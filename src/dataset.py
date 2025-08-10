@@ -140,6 +140,9 @@ class SpectrumDataset(Dataset):
 
         # Données principales
         spectra_np = ds["spectra"]
+        spectra_no_activity_np = (
+            ds["spectra_no_activity"] if "spectra_no_activity" in ds else None
+        )
         wavegrid_np = ds["wavegrid"]
         time_values_np = ds["time_values"]
         template_np = ds["template"] if "template" in ds else None
@@ -147,6 +150,11 @@ class SpectrumDataset(Dataset):
 
         # Conversion vers torch
         self.spectra = torch.tensor(spectra_np).to(dtype=data_dtype).contiguous()
+        self.spectra_no_activity = (
+            torch.tensor(spectra_no_activity_np).to(dtype=data_dtype).contiguous()
+            if spectra_no_activity_np is not None
+            else None
+        )
         self.wavegrid = torch.tensor(wavegrid_np).to(dtype=data_dtype).contiguous()
         self.template = (
             torch.tensor(template_np).to(dtype=data_dtype).contiguous()
