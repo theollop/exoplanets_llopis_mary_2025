@@ -337,6 +337,108 @@ def create_grad_scaler(config):
     return scaler
 
 
+class EarlyStopping:
+    """
+    Early Stopping pour arrêter l'entraînement quand la métrique surveillée ne s'améliore plus.
+    """
+
+    def __init__(
+        self,
+        patience=10,
+        min_delta=0.0,
+        metric="total",
+        mode="min",
+        restore_best_weights=True,
+    ):
+        """
+        Args:
+            patience: Nombre d'epochs sans amélioration avant d'arrêter
+            min_delta: Amélioration minimale pour être considérée comme significative
+            metric: Métrique à surveiller ("total", "rv", "fid", "c", "reg")
+            mode: "min" pour minimiser, "max" pour maximiser
+            restore_best_weights: Restaurer les meilleurs poids à l'arrêt
+        """
+        self.patience = patience
+        self.min_delta = min_delta
+        self.metric = metric
+        self.mode = mode
+        self.restore_best_weights = restore_best_weights
+
+        self.best_value = float("inf") if mode == "min" else float("-inf")
+        self.best_epoch = 0
+        self.counter = 0
+        self.best_weights = None
+        self.stopped_epoch = 0
+
+    def __call__(self, current_value, epoch, model=None):
+        """
+        Vérifie si l'Early Stopping doit être déclenché.
+
+        Args:
+            current_value: Valeur actuelle de la métrique
+            epoch: Epoch actuel
+            model: Modèle (pour sauvegarder les meilleurs poids)
+
+        Returns:
+            bool: True si l'entraînement doit s'arrêter
+        """
+        if self._is_improvement(current_value):
+            self.best_value = current_value
+            self.best_epoch = epoch
+            self.counter = 0
+
+            # Sauvegarder les meilleurs poids
+            if self.restore_best_weights and model is not None:
+                self.best_weights = {
+                    k: v.clone() for k, v in model.state_dict().items()
+                }
+
+        else:
+            self.counter += 1
+
+        if self.counter >= self.patience:
+            self.stopped_epoch = epoch
+            return True
+
+        return False
+
+    def _is_improvement(self, current_value):
+        """Vérifie si la valeur actuelle est une amélioration."""
+        if self.mode == "min":
+            return current_value < (self.best_value - self.min_delta)
+        else:
+            return current_value > (self.best_value + self.min_delta)
+
+    def restore_weights(self, model):
+        """Restaure les meilleurs poids dans le modèle."""
+        if self.best_weights is not None and model is not None:
+            model.load_state_dict(self.best_weights)
+            console.log(f"🔄 Meilleurs poids restaurés (epoch {self.best_epoch})")
+
+
+def create_early_stopping(phase_config):
+    """Crée un objet Early Stopping depuis la config d'une phase."""
+    if "early_stopping" not in phase_config:
+        return None
+
+    es_config = phase_config["early_stopping"]
+
+    early_stopping = EarlyStopping(
+        patience=int(es_config.get("patience", 10)),
+        min_delta=float(es_config.get("min_delta", 0.0)),
+        metric=es_config.get("metric", "total"),
+        mode=es_config.get("mode", "min"),
+        restore_best_weights=es_config.get("restore_best_weights", True),
+    )
+
+    console.log(
+        f"⏹️  Early Stopping activé: patience={early_stopping.patience}, "
+        f"metric={early_stopping.metric}, mode={early_stopping.mode}"
+    )
+
+    return early_stopping
+
+
 def train_phase(
     model,
     dataset,
@@ -368,6 +470,9 @@ def train_phase(
         config.get("use_mixed_precision", False) and scaler is not None
     )
     autocast_enabled = config.get("autocast_enabled", True) and use_mixed_precision
+
+    # Création de l'Early Stopping
+    early_stopping = create_early_stopping(phase_config)
 
     if use_mixed_precision:
         console.log(f"🔧 Mixed precision activée pour la phase '{phase_name}'")
@@ -476,6 +581,27 @@ def train_phase(
             # Affichage
             console.clear()
             console.print(table)
+
+            # Vérification Early Stopping
+            if early_stopping is not None:
+                # Obtenir la métrique à surveiller
+                metric_value = epoch_losses.get(early_stopping.metric, total_loss)
+
+                if early_stopping(metric_value, epoch + 1, model):
+                    console.log(f"⏹️  Early Stopping déclenché à l'epoch {epoch + 1}")
+                    console.log(
+                        f"📈 Pas d'amélioration depuis {early_stopping.patience} epochs"
+                    )
+                    console.log(
+                        f"🏆 Meilleure valeur: {early_stopping.best_value:.6e} à l'epoch {early_stopping.best_epoch}"
+                    )
+
+                    # Restaurer les meilleurs poids si configuré
+                    if early_stopping.restore_best_weights:
+                        early_stopping.restore_weights(model)
+
+                    # Sortir de la boucle d'epochs
+                    break
 
             # Plotting Losses périodique
             plot_every = config.get(

@@ -77,6 +77,12 @@ phases:
       weight_decay: 0.0
     b_obs_trainable: false
     b_rest_trainable: false
+    early_stopping:
+      patience: 20
+      min_delta: 1e-6
+      metric: "total"
+      mode: "min"
+      restore_best_weights: true
     
   - name: joint
     n_epochs: 200
@@ -91,3 +97,9 @@ phases:
     b_obs_trainable: false
     b_rest_trainable: true
     plot_activity_every: 20
+    early_stopping:
+      patience: 15
+      min_delta: 1e-7
+      metric: "rv"
+      mode: "min"
+      restore_best_weights: true
