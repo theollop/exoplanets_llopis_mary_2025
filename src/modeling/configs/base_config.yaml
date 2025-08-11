@@ -8,9 +8,9 @@
 # --------------------------------------------------------------------------
 # Données
 # --------------------------------------------------------------------------
-experiment_name: "exp1"                 # Nom de l'expérience (créera un sous-dossier)
+# experiment_name: "exp1"                 # Nom de l'expérience (créera un sous-dossier)
 
-dataset_filepath: "data/npz_datasets/dataset_A_specs_5000_5300_Kp1e-1_P100_Phi0_downscaledx4_and_smoothed.npz"  # Chemin complet du NPZ standardisé
+dataset_filepath: "data/npz_datasets/soapgpu_ns120_5000-5010_dx4_sm3_rassine_noise_p53_k0p1_phi0.npz"  # Chemin complet du NPZ standardisé
 output_root_dir: "experiments"                                # Répertoire racine pour tous les outputs (local)
 
 data_dtype: float32       # Type numpy/torch du tableau des spectres (float16/float32/float64)
@@ -77,12 +77,12 @@ phases:
       weight_decay: 0.0
     b_obs_trainable: false
     b_rest_trainable: false
-    early_stopping:
-      patience: 20
-      min_delta: 1e-6
-      metric: "total"
-      mode: "min"
-      restore_best_weights: true
+    # early_stopping:
+    #   patience: 20
+    #   min_delta: 1e-6
+    #   metric: "total"
+    #   mode: "min"
+    #   restore_best_weights: true
     
   - name: joint
     n_epochs: 200
@@ -97,9 +97,9 @@ phases:
     b_obs_trainable: false
     b_rest_trainable: true
     plot_activity_every: 20
-    early_stopping:
-      patience: 15
-      min_delta: 1e-7
-      metric: "rv"
-      mode: "min"
-      restore_best_weights: true
+    # early_stopping:
+    #   patience: 15
+    #   min_delta: 1e-7
+    #   metric: "rv"
+    #   mode: "min"
+    #   restore_best_weights: true

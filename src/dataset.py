@@ -10,6 +10,7 @@ import sys
 import tempfile
 import pickle
 from src.interpolate import shift_spectra_linear
+import re, unicodedata  # <-- NEW: local import pour le slug
 
 ##############################################################################
 ##############################################################################
@@ -496,12 +497,13 @@ def inject_dataset(
 def create_soap_gpu_paper_dataset(
     spectra_filepath,
     spec_filepath,
-    output_filepath,
-    idx_spectra_start,
-    idx_spectra_end,
-    wavemin,
-    wavemax,
-    downscaling_factor,
+    output_dir,
+    output_filename=None,
+    idx_spectra_start=0,
+    idx_spectra_end=100,
+    wavemin=5000,
+    wavemax=5050,
+    downscaling_factor=2,
     use_rassine=True,
     rassine_config=None,
     add_photon_noise=False,
@@ -527,7 +529,7 @@ def create_soap_gpu_paper_dataset(
         Chemin vers le fichier HDF5 contenant le dataset 'spec_cube' avec les spectres.
     spec_filepath : str
         Chemin vers le fichier .npz contenant 'spec' et 'wavelength'.
-    output_filepath : str
+    output_filename : str
         Chemin du .npz de sortie qui sera créé.
     n_spectra : int
         Nombre de spectres à extraire du dataset.
@@ -568,8 +570,64 @@ def create_soap_gpu_paper_dataset(
 
     # 3) Récupérer le nombre de spectres sélectionnés
     n_spectra = idx_spectra_end - idx_spectra_start
+    with h5py.File(spectra_filepath, "r") as f:
+        n_spectra_tot = f["spec_cube"].shape[0]
+    time_values = np.arange(n_spectra_tot)
 
-    time_values = np.arange(idx_spectra_start, idx_spectra_end)
+    # ---------- NEW: auto-nom si output_filename manquant ----------
+    def _slugify(text: str, max_len: int = 80) -> str:
+        """Slug ASCII court, [a-z0-9._-], taille bornée."""
+        text = unicodedata.normalize("NFKD", str(text))
+        text = text.encode("ascii", "ignore").decode("ascii")
+        text = re.sub(r"[^a-zA-Z0-9._-]+", "-", text).strip("-._")
+        text = text.lower()
+        return (text[:max_len] or "dataset").strip("-._")
+
+    def _fmt_num(x):
+        """Format court: entier sans décimales, sinon g avec '.'→'p'."""
+        try:
+            xf = float(x)
+            if xf.is_integer():
+                return str(int(xf))
+            return f"{xf:g}".replace(".", "p")
+        except Exception:
+            return _slugify(x)
+
+    def _fmt_list(lst):
+        return "+".join(_fmt_num(x) for x in lst) if lst else "na"
+
+    if not output_filename:
+        # Racine par défaut proche des données source
+        # ex: data/soap_gpu_paper/spec_master.npz -> data/npz_datasets/
+        default_out_dir = output_dir
+        if not os.path.isdir(default_out_dir):
+            default_out_dir = os.path.join("data", "npz_datasets")
+
+        bits = [
+            f"ns{n_spectra}",
+            f"{int(wavemin)}-{int(wavemax)}",
+        ]
+        if downscaling_factor and downscaling_factor > 1:
+            bits.append(f"dx{downscaling_factor}")
+        if smooth_after_downscaling:
+            bits.append(f"sm{smooth_kernel_size}")
+        if use_rassine:
+            bits.append("rassine")
+        if add_photon_noise:
+            bits.append("noise" if snr_target is None else f"snr{_fmt_num(snr_target)}")
+
+        # Planètes si dispo
+        if planets_periods and planets_amplitudes and planets_phases:
+            bits.append(f"P{_fmt_list(planets_periods)}")
+            bits.append(f"K{_fmt_list(planets_amplitudes)}")
+            bits.append(f"Phi{_fmt_list(planets_phases)}")
+
+        base = _slugify("soapgpu_" + "_".join(bits), max_len=80)
+        filename = f"{base}.npz"
+        os.makedirs(default_out_dir, exist_ok=True)
+        output_filepath = os.path.join(default_out_dir, filename)
+        print(f"🧾 Nom auto du dataset: {output_filepath}")
+    # ---------- /NEW ------------------------------------------------
 
     # 3) Chargement des spectres par chunks pour éviter les problèmes de mémoire
     print("📊 Chargement des spectres de données...")
@@ -590,6 +648,7 @@ def create_soap_gpu_paper_dataset(
                     spectra_masked, specs_to_remove_filtered, axis=0
                 )
                 time_values = np.delete(time_values, specs_to_remove_filtered)
+                time_values = time_values[idx_spectra_start:idx_spectra_end]
                 # Update n_spectra to reflect the actual number of spectra after removal
                 n_spectra = spectra_masked.shape[0]
 
@@ -727,6 +786,8 @@ def create_soap_gpu_paper_dataset(
 
         print("✅ Lissage terminé")
 
+    activity_ds = spectra_ds - template_ds
+
     # 8) Ajout de bruit photonique réaliste (optionnel)
     if add_photon_noise:
         print("\n🔊 Ajout de bruit photonique réaliste...")
@@ -814,7 +875,7 @@ def create_soap_gpu_paper_dataset(
         "wavegrid": wavegrid_ds,
         "template": template_ds,
         "spectra": spectra_ds,
-        "activity": spectra_ds - template_ds,
+        "activity": activity_ds,
         "time_values": time_values[:n_spectra],
         "metadata": metadata,
     }
@@ -1119,62 +1180,39 @@ def _normalize_spectrum_with_rassine(wave, flux, config):
         return flux / np.median(flux)
 
 
-def _add_photon_noise(spectrum, snr_target=None):
+def _add_photon_noise(spectrum, snr_target=None, default_snr=100.0):
     """
-    Ajoute du bruit photonique réaliste à un spectre.
-    Le bruit photonique suit une distribution de Poisson.
-
-    Parameters
-    ----------
-    spectrum : np.ndarray
-        Spectre auquel ajouter le bruit
-    snr_target : float, optional
-        SNR cible. Si None, utilise le niveau de signal existant pour déterminer le bruit.
-
-    Returns
-    -------
-    np.ndarray
-        Spectre avec bruit photonique ajouté
+    Ajoute du bruit de Poisson en conservant l'échelle du spectre.
+    - Si snr_target est donné: SNR(médiane) ~= snr_target
+    - Sinon: SNR(médiane) ~= default_snr
     """
-    # Convertir les valeurs négatives en zéro (nécessaire pour Poisson)
-    spectrum_positive = np.maximum(spectrum, 0)
+    spec = np.asarray(spectrum, dtype=float)
+    # éviter lambda=0 et valeurs négatives
+    spec = np.maximum(spec, 1e-12)
 
-    if snr_target is not None:
-        # Calcul du niveau de signal pour atteindre le SNR cible
-        # SNR = signal / sqrt(signal) = sqrt(signal)
-        # Donc: signal = SNR²
-        signal_level = snr_target**2
+    # flux de référence pour fixer le SNR (médiane plus robuste que la moyenne)
+    mu = (
+        float(np.median(spec)) if np.isfinite(np.median(spec)) else float(np.mean(spec))
+    )
 
-        # Normaliser le spectre pour avoir le bon niveau de signal moyen
-        current_mean = np.mean(spectrum_positive)
-        if current_mean > 0:
-            scaling_factor = signal_level / current_mean
-            spectrum_scaled = spectrum_positive * scaling_factor
-        else:
-            spectrum_scaled = spectrum_positive
-    else:
-        # Utiliser le niveau de signal existant
-        spectrum_scaled = spectrum_positive
+    if mu <= 0:
+        # fallback: pas de bruit si flux pathologique
+        return spec.copy()
 
-        # Assurer un niveau minimum pour éviter un bruit trop faible
-        min_signal = 100  # Niveau minimum de photons
-        spectrum_scaled = np.maximum(spectrum_scaled, min_signal)
+    S = float(snr_target) if (snr_target is not None) else float(default_snr)
+    S = max(S, 1.0)  # borne basse raisonnable
 
-    # Générer le bruit photonique (distribution de Poisson)
-    # Le bruit de Poisson a une variance égale à la moyenne
-    try:
-        # Utiliser poisson pour générer des échantillons
-        noisy_spectrum = np.random.poisson(spectrum_scaled).astype(float)
-    except ValueError:
-        # Si les valeurs sont trop grandes pour Poisson, utiliser une approximation gaussienne
-        # Pour de grands nombres, Poisson(λ) ≈ Normal(λ, √λ)
-        noise = np.random.normal(0, np.sqrt(spectrum_scaled))
-        noisy_spectrum = spectrum_scaled + noise
+    # facteur de mise à l'échelle vers des "comptes"
+    k = (S * S) / mu  # => SNR(médiane) ≈ S
 
-    # Éviter les valeurs négatives
-    noisy_spectrum = np.maximum(noisy_spectrum, 0)
+    lam = k * spec
+    # prudence: éviter les lambdas énormes qui peuvent ralentir/overflow
+    # (optionnel) lam = np.clip(lam, 0, 1e8)
 
-    return noisy_spectrum
+    counts = np.random.poisson(lam)
+    noisy = counts / k  # revenir à l'échelle originale
+
+    return noisy
 
 
 if __name__ == "__main__":
@@ -1192,18 +1230,18 @@ if __name__ == "__main__":
     create_soap_gpu_paper_dataset(
         spectra_filepath="data/soap_gpu_paper/spec_cube_tot.h5",
         spec_filepath="data/soap_gpu_paper/spec_master.npz",
-        output_filepath="data/npz_datasets/dataset_A_specs_5000_5300_Kp1e-1_P100_Phi0_downscaledx4_and_smoothed.npz",
+        output_dir="data/npz_datasets/",
         idx_spectra_start=100,
         idx_spectra_end=220,
         wavemin=5000,
-        wavemax=5300,
+        wavemax=5010,
         downscaling_factor=4,
         smooth_after_downscaling=True,
         use_rassine=True,
         rassine_config=None,
-        add_photon_noise=False,
+        add_photon_noise=True,
         planets_amplitudes=[0.1],
-        planets_periods=[100],
+        planets_periods=[53],
         planets_phases=[0.0],
     )
 

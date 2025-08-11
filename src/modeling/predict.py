@@ -16,7 +16,7 @@ from astropy.timeseries import LombScargle
 from scipy.signal import find_peaks
 
 # Local imports
-from src.modeling.train import load_experiment_checkpoint
+from src.modeling.train import load_experiment_checkpoint, find_latest_checkpoint
 from torch.utils.data import DataLoader
 from src.dataset import generate_collate_fn
 from src.ccf import get_full_ccf_analysis
@@ -742,22 +742,51 @@ def main(
     n_periods: int = 5000,
     zoom_frac: float = 0.15,
     batch_size: int = 64,
-    perturbation_value: float = 1.0,
+    perturbation_value: float = 0.02,
+    **overrides,
 ):
+    """
+    AESTRA prediction pipeline with automated analysis and visualization.
+
+    Parameters
+    ----------
+    experiment_dir : str
+        Path to experiment directory containing models/ subfolder
+    fap_threshold : float
+        False alarm probability threshold for significant peaks
+    exclude_width_frac : float
+        Relative width of exclusion window around injected period
+    min_period : float
+        Minimum period for periodogram analysis (days)
+    max_period : float
+        Maximum period for periodogram analysis (days)
+    n_periods : int
+        Number of periods in logarithmic grid
+    zoom_frac : float
+        Zoom fraction for periodogram plots
+    batch_size : int
+        Batch size for model predictions
+    perturbation_value : float
+        Perturbation value for latent space analysis
+    **overrides
+        Additional parameter overrides
+    """
     # Paths
     ckpt_path = os.path.join(experiment_dir, "models", "aestra_final.pth")
     out_root = os.path.join(experiment_dir, "postprocessing")
     fig_dir = os.path.join(out_root, "figures")
-    fig_periodo_v = os.path.join(fig_dir, "periodograms", "v")
-    fig_periodo_s = os.path.join(fig_dir, "periodograms", "s")
+    fig_periodo_rv = os.path.join(fig_dir, "periodograms", "rv")
+    fig_periodo_latent = os.path.join(fig_dir, "periodograms", "latent")
     fig_latent = os.path.join(fig_dir, "latent")
     fig_corr = os.path.join(fig_dir, "correlations")
     data_dir = os.path.join(out_root, "data")
 
-    for d in [fig_periodo_v, fig_periodo_s, fig_latent, fig_corr, data_dir]:
+    for d in [fig_periodo_rv, fig_periodo_latent, fig_latent, fig_corr, data_dir]:
         os.makedirs(d, exist_ok=True)
 
     # Load experiment
+    if ckpt_path is None or not os.path.exists(ckpt_path):
+        ckpt_path = find_latest_checkpoint(exp_path=experiment_dir)
     exp = load_experiment_checkpoint(ckpt_path)
     model = exp["model"]
     dataset = exp["dataset"]
@@ -875,7 +904,7 @@ def main(
             fap_threshold=fap_threshold,
             exclude_width_frac=exclude_width_frac,
             title=f"LS Periodogram - {name}",
-            save_path=os.path.join(fig_periodo_v, f"{name}_periodogram.png"),
+            save_path=os.path.join(fig_periodo_rv, f"{name}.png"),
             show_plot=False,
         )
 
@@ -942,7 +971,7 @@ def main(
             fap_threshold=fap_threshold,
             exclude_width_frac=exclude_width_frac,
             title=f"LS Periodogram - {name}",
-            save_path=os.path.join(fig_periodo_s, f"{name}_periodogram.png"),
+            save_path=os.path.join(fig_periodo_latent, f"{name}.png"),
             show_plot=False,
         )
 
@@ -988,13 +1017,13 @@ def main(
     plot_latent_distance_distribution(
         delta_s_rand=delta_s_rand,
         delta_s_aug=delta_s_aug,
-        save_path=os.path.join(fig_latent, "latent_distance_distribution.png"),
+        save_path=os.path.join(fig_latent, "distance_distribution.png"),
         show_plot=False,
     )
 
     plot_latent_marginal_distributions(
         prediction_results["all_s"],
-        save_path=os.path.join(fig_latent, "latent_marginal_distributions.png"),
+        save_path=os.path.join(fig_latent, "marginal_distributions.png"),
         show_plot=False,
     )
 
@@ -1153,5 +1182,13 @@ def main(
 
 if __name__ == "__main__":
     main(
-        experiment_dir="experiments/exp1",
+        experiment_dir="experiments/soapgpu_ns120_5000-5010_dx4_sm3_rassine_noise_p53_k0p1_phi0",
+        # fap_threshold=0.01,
+        # exclude_width_frac=0.05,
+        min_period=2.0,
+        max_period=120,
+        # n_periods=5000,
+        # zoom_frac=0.15,
+        # batch_size=64,
+        perturbation_value=0.1,
     )

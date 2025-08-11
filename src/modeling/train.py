@@ -1,14 +1,24 @@
 #!/usr/bin/env python3
 """
-Script d'entraînement professionnel pour AESTRA avec gestion de config YAML et checkpoints.
+Module d'entraînement professionnel pour AESTRA avec gestion de config YAML et checkpoints.
 
-Usage:
-    python train.py experiment_name config_name [checkpoint_path]
+Usage principal:
+    from src.modeling.train import main
 
-Exemples:
-    python train.py exp0 base_config                                     # Nouvel entraînement
-    python train.py exp0 base_config models/aestra_joint_100.pth         # Reprendre depuis checkpoint
-    python train.py exp1 colab_config exp0/models/aestra_final.pth       # Reprendre avec nouvelle config
+    # Nouvelle expérience
+    main(config_path="src/modeling/configs/base_config.yaml")
+
+    # Reprendre depuis checkpoint
+    main(checkpoint_path="experiments/exp1/models/model_joint_epoch_100.pth")
+
+    # Reprendre avec nouvelle config
+    main(
+        config_path="src/modeling/configs/base_config.yaml",
+        checkpoint_path="experiments/exp1/models/model_joint_epoch_100.pth"
+    )
+
+    # Reprendre depuis le dernier checkpoint d'une expérience
+    main(exp_path="experiments/exp1")
 
 Note: La config utilisée est TOUJOURS celle spécifiée en argument, pas celle du checkpoint.
       Cela permet de faire des modifications à la config même lors de la reprise d'un checkpoint.
@@ -44,30 +54,45 @@ from src.plots_aestra import (
 console = Console()
 
 
-def setup_experiment_directories(config, config_name):
+def setup_experiment_directories(config, config_path=None):
     """
     Crée la structure de dossiers pour une expérience d'entraînement.
 
     Args:
         config: Configuration de l'expérience
-        config_name: Nom du fichier de configuration
+        config_path: Chemin du fichier de config (pour extraction automatique du nom)
 
     Returns:
         dict: Dictionnaire avec les chemins des dossiers créés
     """
-    # Nom de l'expérience depuis la config ou défaut
-    experiment_name = config.get("experiment_name", f"experiment_{config_name}")
+    # Déterminer le nom de l'expérience
+    experiment_name = config.get("experiment_name")
+
+    if not experiment_name:
+        # Extraire le nom depuis le dataset_filepath
+        dataset_filepath = config.get("dataset_filepath", "")
+        if dataset_filepath:
+            # Extraire juste le nom de fichier sans extension
+            dataset_filename = os.path.splitext(os.path.basename(dataset_filepath))[0]
+            experiment_name = dataset_filename
+        else:
+            # Fallback : utiliser le nom du fichier de config si disponible
+            if config_path:
+                config_filename = os.path.splitext(os.path.basename(config_path))[0]
+                experiment_name = f"experiment_{config_filename}"
+            else:
+                experiment_name = "experiment_default"
+
     output_root = config.get("output_root_dir", "experiments")
 
     # Dossier principal de l'expérience
     exp_dir = os.path.join(output_root, experiment_name)
 
-    # Structure des sous-dossiers
+    # Structure des sous-dossiers (nouvelle organisation)
     subdirs = {
         "experiment_dir": exp_dir,
         "models_dir": os.path.join(exp_dir, "models"),
         "figures_dir": os.path.join(exp_dir, "figures"),
-        "spectra_dir": os.path.join(exp_dir, "spectra"),
         "logs_dir": os.path.join(exp_dir, "logs"),
     }
 
@@ -75,15 +100,15 @@ def setup_experiment_directories(config, config_name):
     for dir_path in subdirs.values():
         os.makedirs(dir_path, exist_ok=True)
 
-    # Sauvegarder la configuration utilisée dans le dossier d'expérience
-    config_save_path = os.path.join(exp_dir, f"{config_name}_config.yaml")
+    # Sauvegarder la configuration sous le nom standard "config.yaml"
+    config_save_path = os.path.join(exp_dir, "config.yaml")
     with open(config_save_path, "w") as f:
         yaml.dump(config, f, default_flow_style=False, indent=2)
 
     console.print(f"📁 Structure d'expérience créée dans: {exp_dir}")
     console.print(f"📋 Configuration sauvegardée: {config_save_path}")
 
-    return subdirs
+    return subdirs, experiment_name
 
 
 def save_experiment_checkpoint(
@@ -92,7 +117,7 @@ def save_experiment_checkpoint(
     scheduler,
     dataset,
     config,
-    cfg_name,
+    exp_name,
     epoch,
     phase_name,
     scaler=None,
@@ -108,7 +133,7 @@ def save_experiment_checkpoint(
         scheduler: Le scheduler (peut être None)
         dataset: Le dataset utilisé
         config: La configuration complète
-        cfg_name: Nom de l'expérience (ex: "exp0")
+        exp_name: Nom de l'expérience (ex: "exp0")
         epoch: Numéro d'epoch actuel
         phase_name: Nom de la phase actuelle
         scaler: Le GradScaler pour mixed precision (peut être None)
@@ -117,22 +142,30 @@ def save_experiment_checkpoint(
     """
     if path is None:
         if exp_dirs is not None:
-            path = os.path.join(
-                exp_dirs["models_dir"],
-                f"aestra_{phase_name}_checkpoint.pth",
-            )
+            # Nouvelle convention: {model_name}_{phase}_epoch_{epoch}.pth
+            filename = f"model_{phase_name}_epoch_{epoch}.pth"
+            path = os.path.join(exp_dirs["models_dir"], filename)
         else:
             # Fallback vers l'ancien système
-            path = f"models/aestra_{phase_name}_checkpoint.pth"
+            path = f"models/model_{phase_name}_epoch_{epoch}.pth"
 
     # Sauvegarde du checkpoint standard
-    save_checkpoint(model, optimizer, path, scheduler)
+    if optimizer is not None:
+        save_checkpoint(model, optimizer, path, scheduler)
+    else:
+        # Sauvegarde minimale pour modèle final (sans optimizer/scheduler)
+        ckpt = {
+            "model_state_dict": model.state_dict(),
+            "model_phase": model.phase,
+        }
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        torch.save(ckpt, path)
 
     # Ajout des métadonnées de l'expérience
     ckpt = torch.load(path)
     ckpt.update(
         {
-            "cfg_name": cfg_name,
+            "exp_name": exp_name,
             "epoch": epoch,
             "current_phase": phase_name,  # Phase actuelle
             "config": config,
@@ -153,7 +186,7 @@ def load_experiment_checkpoint(path, device="cuda"):
     Charge un checkpoint d'expérience complet.
 
     Returns:
-        dict: Contient model, optimizer, scheduler, dataset, config, cfg_name, epoch, scaler_state_dict
+        dict: Contient model, optimizer, scheduler, dataset, config, exp_name, epoch, scaler_state_dict
     """
     console.log(f"📂 Loading experiment checkpoint: {path}")
 
@@ -213,7 +246,9 @@ def load_experiment_checkpoint(path, device="cuda"):
         "model": model,
         "dataset": dataset,
         "config": config,
-        "cfg_name": ckpt["cfg_name"],
+        "exp_name": ckpt.get(
+            "exp_name", ckpt.get("cfg_name", "unknown")
+        ),  # Compatibilité
         "epoch": ckpt["epoch"],
         "current_phase": ckpt.get("current_phase", "joint"),
         "checkpoint_data": ckpt,
@@ -221,10 +256,16 @@ def load_experiment_checkpoint(path, device="cuda"):
     }
 
 
-def load_config(config_name):
-    """Charge un fichier de configuration depuis configs/"""
-    config_path = f"src/modeling/configs/{config_name}.yaml"
+def load_config(config_path):
+    """
+    Charge un fichier de configuration depuis un chemin complet.
 
+    Args:
+        config_path: Chemin complet vers le fichier YAML
+
+    Returns:
+        dict: Configuration chargée
+    """
     if not os.path.exists(config_path):
         raise FileNotFoundError(f"Config file not found: {config_path}")
 
@@ -235,13 +276,13 @@ def load_config(config_name):
     return config
 
 
-def save_losses_to_csv(losses_history, cfg_name, phase_name, epoch, csv_dir, config):
+def save_losses_to_csv(losses_history, exp_name, phase_name, epoch, csv_dir, config):
     """
-    Sauvegarde les losses dans un fichier CSV.
+    Sauvegarde les losses dans un fichier CSV unique.
 
     Args:
         losses_history: Dict avec les listes de losses {'rv': [...], 'fid': [...], etc.}
-        cfg_name: Nom de l'expérience
+        exp_name: Nom de l'expérience
         phase_name: Nom de la phase actuelle
         epoch: Epoch actuelle
         csv_dir: Répertoire de sauvegarde des CSV
@@ -252,8 +293,8 @@ def save_losses_to_csv(losses_history, cfg_name, phase_name, epoch, csv_dir, con
 
     os.makedirs(csv_dir, exist_ok=True)
 
-    # Nom du fichier CSV
-    csv_filename = f"{cfg_name}_{phase_name}_losses.csv"
+    # Nom du fichier CSV unique
+    csv_filename = "losses.csv"
     csv_path = os.path.join(csv_dir, csv_filename)
 
     # Vérifier si le fichier existe déjà pour savoir si on ajoute les headers
@@ -262,7 +303,7 @@ def save_losses_to_csv(losses_history, cfg_name, phase_name, epoch, csv_dir, con
     with open(csv_path, "w" if not file_exists else "a", newline="") as csvfile:
         fieldnames = [
             "timestamp",
-            "cfg_name",
+            "exp_name",
             "phase",
             "epoch",
             "rv_loss",
@@ -285,7 +326,7 @@ def save_losses_to_csv(losses_history, cfg_name, phase_name, epoch, csv_dir, con
             writer.writerow(
                 {
                     "timestamp": timestamp,
-                    "cfg_name": cfg_name,
+                    "exp_name": exp_name,
                     "phase": phase_name,
                     "epoch": current_epoch,
                     "rv_loss": losses_history["rv"][-1],
@@ -335,6 +376,51 @@ def create_grad_scaler(config):
 
     console.log("🚀 Mixed precision activée avec GradScaler")
     return scaler
+
+
+def find_latest_checkpoint(exp_path):
+    """
+    Trouve le dernier checkpoint dans un dossier d'expérience.
+
+    Args:
+        exp_path: Chemin vers le dossier d'expérience
+
+    Returns:
+        str or None: Chemin vers le dernier checkpoint ou None si aucun trouvé
+    """
+    models_dir = os.path.join(exp_path, "models")
+    if not os.path.exists(models_dir):
+        return None
+
+    # Chercher tous les fichiers .pth dans models/
+    checkpoint_files = []
+    for file in os.listdir(models_dir):
+        if file.endswith(".pth") and "epoch_" in file:
+            try:
+                # Extraire le numéro d'epoch du nom de fichier
+                # Format attendu: model_{phase}_epoch_{epoch}.pth
+                parts = file.split("_")
+                epoch_part = None
+                for i, part in enumerate(parts):
+                    if part == "epoch" and i + 1 < len(parts):
+                        epoch_str = parts[i + 1].split(".")[0]  # Enlever .pth
+                        epoch_num = int(epoch_str)
+                        epoch_part = epoch_num
+                        break
+
+                if epoch_part is not None:
+                    checkpoint_files.append(
+                        (os.path.join(models_dir, file), epoch_part)
+                    )
+            except (ValueError, IndexError):
+                continue  # Ignorer les fichiers avec un format inattendu
+
+    if not checkpoint_files:
+        return None
+
+    # Retourner le checkpoint avec le numéro d'epoch le plus élevé
+    latest_checkpoint = max(checkpoint_files, key=lambda x: x[1])
+    return latest_checkpoint[0]
 
 
 class EarlyStopping:
@@ -445,7 +531,7 @@ def train_phase(
     dataloader,
     phase_config,
     config,
-    cfg_name,
+    exp_name,
     start_epoch=0,
     exp_dirs=None,
 ):
@@ -614,7 +700,7 @@ def train_phase(
                     else config.get("plot_dir", "reports/figures")
                 )
                 plot_losses(
-                    losses_history, cfg_name, phase_name, epoch + 1, plot_dir, console
+                    losses_history, exp_name, phase_name, epoch + 1, plot_dir, console
                 )
 
             # Plotting RV predictions périodique (dataset complet)
@@ -631,7 +717,7 @@ def train_phase(
                     plot_rv_predictions_dataset(
                         dataset,
                         model,
-                        cfg_name,
+                        exp_name,
                         phase_name,
                         epoch + 1,
                         rv_plot_dir,
@@ -658,7 +744,7 @@ def train_phase(
                         batch,
                         dataset,
                         model,
-                        cfg_name,
+                        exp_name,
                         phase_name,
                         epoch + 1,
                         activity_plot_dir,
@@ -682,7 +768,7 @@ def train_phase(
                     batch,
                     dataset,
                     model,
-                    cfg_name,
+                    exp_name,
                     phase_name,
                     epoch + 1,
                     spectra_plot_dir,
@@ -699,7 +785,7 @@ def train_phase(
                     else config.get("csv_dir", "reports/logs")
                 )
                 save_losses_to_csv(
-                    losses_history, cfg_name, phase_name, epoch + 1, csv_dir, config
+                    losses_history, exp_name, phase_name, epoch + 1, csv_dir, config
                 )
 
             # Sauvegarde périodique (tous les 50 epochs)
@@ -710,7 +796,7 @@ def train_phase(
                     scheduler,
                     dataset,
                     config,
-                    cfg_name,
+                    exp_name,
                     epoch + 1,
                     phase_name,
                     scaler,
@@ -732,6 +818,24 @@ def train_phase(
 
     console.log(f"✅ Phase '{phase_name}' terminée.")
 
+    # Sauvegarde finale de la phase (TOUJOURS, même si early stopping)
+    final_epoch = min(len(losses_history["total"]), n_epochs)
+    save_experiment_checkpoint(
+        model,
+        optimizer,
+        scheduler,
+        dataset,
+        config,
+        exp_name,
+        final_epoch,
+        phase_name,
+        scaler,
+        exp_dirs=exp_dirs,
+    )
+    console.log(
+        f"💾 Final checkpoint saved for phase '{phase_name}' at epoch {final_epoch}"
+    )
+
     # Plot final de la phase
     plot_every = config.get("plot_every", 0)
     if plot_every > 0:
@@ -740,7 +844,7 @@ def train_phase(
             if exp_dirs
             else config.get("plot_dir", "reports/figures")
         )
-        plot_losses(losses_history, cfg_name, phase_name, n_epochs, plot_dir, console)
+        plot_losses(losses_history, exp_name, phase_name, n_epochs, plot_dir, console)
 
     # Sauvegarde CSV finale de la phase
     if config.get("save_losses_csv", False):
@@ -748,49 +852,86 @@ def train_phase(
             exp_dirs["logs_dir"] if exp_dirs else config.get("csv_dir", "reports/logs")
         )
         save_losses_to_csv(
-            losses_history, cfg_name, phase_name, n_epochs, csv_dir, config
+            losses_history, exp_name, phase_name, n_epochs, csv_dir, config
         )
 
 
-def main(experiment_name, config_name, checkpoint_path=None, device="cuda"):
+def main(
+    config_path: str = None,
+    checkpoint_path: str = None,
+    exp_path: str = None,
+    device: str = "cuda",
+):
     """
     Fonction principale d'entraînement AESTRA.
 
     Args:
-        experiment_name: Nom de l'expérience (ex: "exp0", "test_joint")
-        config_name: Nom de la configuration (ex: "base_config", "colab_config")
+        config_path: Chemin vers le fichier de configuration YAML (optionnel)
         checkpoint_path: Chemin vers un checkpoint pour reprendre l'entraînement (optionnel)
+        exp_path: Chemin vers un dossier d'expérience pour reprendre depuis le dernier checkpoint (optionnel)
         device: Device à utiliser ("cuda" ou "cpu")
     """
-    console.rule(
-        f"[bold blue]AESTRA Training - Experiment: {experiment_name} | Config: {config_name}[/]"
-    )
 
-    # TOUJOURS charger la config depuis le fichier (jamais depuis le checkpoint)
-    config = load_config(config_name)
-    console.log("✅ Configuration chargée avec succès")
+    # Déterminer le mode d'opération
+    if exp_path and not checkpoint_path:
+        # Cas 4: Reprendre depuis le dernier checkpoint d'une expérience
+        checkpoint_path = find_latest_checkpoint(exp_path)
+        if checkpoint_path:
+            console.log(f"🔍 Latest checkpoint found: {checkpoint_path}")
+        else:
+            raise FileNotFoundError(f"No checkpoint found in {exp_path}")
 
-    # Configuration de la structure de dossiers pour l'expérience
-    exp_dirs = setup_experiment_directories(config, experiment_name)
+    # Chargement de la configuration
+    config = None
+    config_source = None
 
-    # Chargement depuis checkpoint ou nouvelle expérience
     if checkpoint_path:
-        # Reprendre depuis checkpoint - mais on garde la config fraîchement chargée
+        # Cas 2 ou 3: Reprendre depuis checkpoint
         console.log(f"🔄 Loading checkpoint: {checkpoint_path}")
-
         exp_data = load_experiment_checkpoint(checkpoint_path, device)
+
+        if config_path:
+            # Cas 3: Reprendre avec nouvelle config
+            config = load_config(config_path)
+            config_source = f"config from {config_path} (overriding checkpoint config)"
+        else:
+            # Cas 2: Reprendre avec config du checkpoint
+            exp_dir = os.path.dirname(
+                os.path.dirname(checkpoint_path)
+            )  # Remonter depuis models/ vers exp/
+            exp_config_path = os.path.join(exp_dir, "config.yaml")
+            if os.path.exists(exp_config_path):
+                config = load_config(exp_config_path)
+                config_source = f"config from experiment directory {exp_config_path}"
+            else:
+                config = exp_data["config"]
+                config_source = "config from checkpoint (fallback)"
+
         start_epoch = exp_data["epoch"]
         current_phase = exp_data["current_phase"]
-
-        console.log(f"🔄 Resuming from epoch {start_epoch}, phase '{current_phase}'")
-        console.log(
-            "⚠️  Using current config (not checkpoint config) - modifications allowed"
-        )
+        exp_name = exp_data["exp_name"]
 
     else:
-        # Nouvelle expérience
-        current_phase = None
+        # Cas 1: Nouvelle expérience
+        if not config_path:
+            raise ValueError("config_path is required for new experiments")
+
+        config = load_config(config_path)
+        config_source = f"config from {config_path}"
         start_epoch = 0
+        current_phase = None
+        exp_name = None  # Sera déterminé par setup_experiment_directories
+
+    console.log(f"✅ Configuration loaded: {config_source}")
+
+    # Configuration de la structure de dossiers pour l'expérience
+    exp_dirs, determined_exp_name = setup_experiment_directories(config, config_path)
+
+    # Utiliser le nom d'expérience déterminé si on n'en a pas encore
+    if exp_name is None:
+        exp_name = determined_exp_name
+
+    console.rule(f"[bold blue]AESTRA Training - Experiment: {exp_name}[/]")
 
     # Création du dataset et du modèle à partir de la config actuelle (toujours)
     console.log("🔧 Début de la création du dataset...")
@@ -836,7 +977,6 @@ def main(experiment_name, config_name, checkpoint_path=None, device="cuda"):
     # Si on charge depuis un checkpoint, charger les poids du modèle
     if checkpoint_path:
         console.log("🔄 Loading model weights from checkpoint...")
-        exp_data = load_experiment_checkpoint(checkpoint_path, device)
         checkpoint_model_state = exp_data["checkpoint_data"]["model_state_dict"]
 
         # Charger les poids avec gestion de compatibilité
@@ -847,7 +987,7 @@ def main(experiment_name, config_name, checkpoint_path=None, device="cuda"):
         unexpected_keys = saved_model_keys - current_model_keys
         if unexpected_keys:
             console.log(
-                f"⚠️  Filtering out unexpected keys from checkpoint: {unexpected_keys}"
+                f"⚠️  Filtering unexpected keys from checkpoint: {list(unexpected_keys)[:5]}..."
             )
             filtered_state_dict = {
                 k: v
@@ -857,22 +997,19 @@ def main(experiment_name, config_name, checkpoint_path=None, device="cuda"):
         else:
             filtered_state_dict = checkpoint_model_state
 
-        # Charger le state dict filtré
         model.load_state_dict(filtered_state_dict, strict=False)
-        model.set_phase(exp_data["checkpoint_data"].get("model_phase", "joint"))
         console.log("✅ Model weights loaded from checkpoint")
 
     if torch.cuda.is_available():
-        console.log("🚀 Déplacement du modèle vers le GPU...")
         model = model.cuda()
-        console.log("✅ Modèle sur GPU")
+        console.log("✅ Modèle déplacé vers GPU")
     else:
-        console.log("⚠️  CUDA non disponible, utilisation du CPU")
+        console.log("💻 Modèle utilise le CPU")
 
     if checkpoint_path:
-        console.log("🔄 Resuming from checkpoint with new config")
+        console.log(f"🔄 Resuming from epoch {start_epoch}, phase '{current_phase}'")
     else:
-        console.log("🆕 Starting new experiment")
+        console.log("🆕 Starting new training")
 
     # Création du DataLoader
     collate_fn = generate_collate_fn(
@@ -900,30 +1037,32 @@ def main(experiment_name, config_name, checkpoint_path=None, device="cuda"):
     if current_phase is not None:
         # Reprendre depuis une phase spécifique
         phase_found = False
-        for i, phase_config in enumerate(config["phases"]):
+        for phase_config in config["phases"]:
             if phase_config["name"] == current_phase:
-                # Continuer la phase actuelle avec start_epoch
+                phase_found = True
+                console.log(
+                    f"🔄 Resuming phase '{current_phase}' from epoch {start_epoch}"
+                )
                 train_phase(
                     model,
                     dataset,
                     dataloader,
                     phase_config,
                     config,
-                    experiment_name,
+                    exp_name,
                     start_epoch,
                     exp_dirs,
                 )
-                phase_found = True
-
-                # Puis continuer avec les phases suivantes (s'il y en a)
-                for next_phase_config in config["phases"][i + 1 :]:
+                # Continuer avec les phases suivantes s'il y en a
+                current_idx = config["phases"].index(phase_config)
+                for next_phase_config in config["phases"][current_idx + 1 :]:
                     train_phase(
                         model,
                         dataset,
                         dataloader,
                         next_phase_config,
                         config,
-                        experiment_name,
+                        exp_name,
                         0,
                         exp_dirs,
                     )
@@ -931,7 +1070,7 @@ def main(experiment_name, config_name, checkpoint_path=None, device="cuda"):
 
         if not phase_found:
             console.log(
-                f"❌ Phase '{current_phase}' introuvable dans la config, démarrage normal"
+                f"⚠️  Phase '{current_phase}' not found in config, starting from beginning"
             )
             for phase_config in config["phases"]:
                 train_phase(
@@ -940,7 +1079,7 @@ def main(experiment_name, config_name, checkpoint_path=None, device="cuda"):
                     dataloader,
                     phase_config,
                     config,
-                    experiment_name,
+                    exp_name,
                     0,
                     exp_dirs,
                 )
@@ -953,45 +1092,34 @@ def main(experiment_name, config_name, checkpoint_path=None, device="cuda"):
                 dataloader,
                 phase_config,
                 config,
-                experiment_name,
+                exp_name,
                 0,
                 exp_dirs,
             )
 
-    # Sauvegarde finale
-    if "exp_dirs" in locals():
-        final_path = os.path.join(exp_dirs["models_dir"], "aestra_final.pth")
-    else:
-        final_path = "models/aestra_final.pth"
-
-    # Pour la sauvegarde finale, on sauve juste le modèle et la config
-    ckpt = {
-        "model_state_dict": model.state_dict(),
-        "model_phase": model.phase,
-        "cfg_name": experiment_name,
-        "epoch": "final",
-        "config": config,
-        "dataset_metadata": dataset.to_dict(),
-    }
-    os.makedirs(os.path.dirname(final_path), exist_ok=True)
-    torch.save(ckpt, final_path)
+    # Sauvegarde finale globale avec nom conventionnel pour predict.py
+    final_model_path = os.path.join(exp_dirs["models_dir"], "aestra_final.pth")
+    save_experiment_checkpoint(
+        model,
+        None,  # Pas d'optimizer pour le modèle final
+        None,  # Pas de scheduler pour le modèle final
+        dataset,
+        config,
+        exp_name,
+        0,  # Epoch final
+        "final",
+        None,  # Pas de scaler pour le modèle final
+        path=final_model_path,
+        exp_dirs=exp_dirs,
+    )
+    console.log(f"💾 Final model saved: {final_model_path}")
 
     console.rule("[bold green]🎉 Entraînement terminé ![/]")
-    console.log(f"Modèle final sauvé: {final_path}")
+    console.log(f"Tous les checkpoints sont sauvés dans: {exp_dirs['models_dir']}")
+    console.log("Le dernier modèle correspond au dernier checkpoint epoch sauvé")
 
 
 if __name__ == "__main__":
-    import sys
-
-    if len(sys.argv) < 3:
-        print("Usage: python train.py experiment_name config_name [checkpoint_path]")
-        print("Examples:")
-        print("  python train.py exp0 base_config")
-        print("  python train.py exp0 base_config models/checkpoint.pth")
-        sys.exit(1)
-
-    experiment_name = sys.argv[1]
-    config_name = sys.argv[2]
-    checkpoint_path = sys.argv[3] if len(sys.argv) > 3 else None
-
-    main(experiment_name, config_name, checkpoint_path)
+    main(
+        config_path="src/modeling/configs/base_config.yaml",
+    )
