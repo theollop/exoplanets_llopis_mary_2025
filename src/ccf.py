@@ -32,6 +32,7 @@ def get_full_ccf_analysis(
     verbose: bool = False,
     batch_size: Optional[int] = None,
     normalize: bool = True,
+    return_raw_ccfs: bool = False,
 ) -> Dict[str, NDArray[np.floating]]:
     """
     Calcule les CCFs puis réalise l'analyse (RV, profondeur, FWHM, span).
@@ -60,7 +61,10 @@ def get_full_ccf_analysis(
         batch_size=batch_size,
         normalize=normalize,
     )
-    return analyze_ccfs(CCFs, v_grid)
+    if return_raw_ccfs:
+        return analyze_ccfs(CCFs, v_grid), CCFs
+    else:
+        return analyze_ccfs(CCFs, v_grid)
 
 
 def compute_CCFs(

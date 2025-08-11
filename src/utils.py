@@ -3,6 +3,7 @@ import importlib
 import torch
 import gc
 import numpy as np
+import os
 
 ##############################################################################
 ##############################################################################
@@ -96,6 +97,7 @@ def get_mask(mask_type: str = "G2") -> np.ndarray:
     Returns:
         np.ndarray: Tableau numpy contenant les positions et poids des lignes.
     """
-    return np.loadtxt(
-        f"data/masks/{mask_type}_mask.txt",
-    )
+    # Chemin absolu basé sur la racine du projet
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    mask_path = os.path.join(project_root, "data", "masks", f"{mask_type}_mask.txt")
+    return np.loadtxt(mask_path)

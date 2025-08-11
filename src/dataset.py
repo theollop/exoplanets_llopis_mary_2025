@@ -497,7 +497,8 @@ def create_soap_gpu_paper_dataset(
     spectra_filepath,
     spec_filepath,
     output_filepath,
-    n_spectra,
+    idx_spectra_start,
+    idx_spectra_end,
     wavemin,
     wavemax,
     downscaling_factor,
@@ -511,6 +512,8 @@ def create_soap_gpu_paper_dataset(
     planets_periods=None,
     planets_phases=None,
     batch_size=100,  # Nouveau paramètre pour traitement par batches
+    smooth_after_downscaling=False,
+    smooth_kernel_size=3,
 ):
     """
     Charge le template et les spectres, masque par longueur d'onde,
@@ -563,30 +566,32 @@ def create_soap_gpu_paper_dataset(
     template_masked = template[mask]
     wavegrid_masked = wavegrid[mask]
 
-    # 3) Récupérer le nombre total de spectres dans le dataset
-    with h5py.File(spectra_filepath, "r") as f:
-        n_spectra_tot = f["spec_cube"].shape[0]
+    # 3) Récupérer le nombre de spectres sélectionnés
+    n_spectra = idx_spectra_end - idx_spectra_start
 
-    if n_spectra is None:
-        n_spectra = n_spectra_tot
-
-    time_values = np.arange(n_spectra)
+    time_values = np.arange(idx_spectra_start, idx_spectra_end)
 
     # 3) Chargement des spectres par chunks pour éviter les problèmes de mémoire
     print("📊 Chargement des spectres de données...")
 
     # Estimer la taille de données à charger
     with h5py.File(spectra_filepath, "r") as f:
-        spectra_masked = f["spec_cube"][:n_spectra, mask]
+        spectra_masked = f["spec_cube"][idx_spectra_start:idx_spectra_end, mask]
 
         if specs_to_remove:
             print(f"⚠️ Suppression des spectres {specs_to_remove} du template")
             specs_to_remove = np.array(specs_to_remove)
-            specs_to_remove = specs_to_remove[specs_to_remove < n_spectra]
-            spectra_masked = np.delete(spectra_masked, specs_to_remove, axis=0)
-            time_values = np.delete(time_values, specs_to_remove)
-            # Update n_spectra to reflect the actual number of spectra after removal
-            n_spectra = spectra_masked.shape[0]
+            specs_to_remove_filtered = []
+            for spec_idx in specs_to_remove:
+                if idx_spectra_start <= spec_idx < idx_spectra_end:
+                    specs_to_remove_filtered.append(spec_idx - idx_spectra_start)
+            if specs_to_remove_filtered:
+                spectra_masked = np.delete(
+                    spectra_masked, specs_to_remove_filtered, axis=0
+                )
+                time_values = np.delete(time_values, specs_to_remove_filtered)
+                # Update n_spectra to reflect the actual number of spectra after removal
+                n_spectra = spectra_masked.shape[0]
 
     print(f"Données chargées: {n_spectra} spectres, {wavegrid_masked.size} pixels")
     print(f"Gamme spectrale: {wavemin:.1f} - {wavemax:.1f} Å")
@@ -704,6 +709,24 @@ def create_soap_gpu_paper_dataset(
     template_ds = template_trim.mean(axis=1)
     spectra_ds = spectra_trim.mean(axis=2)
 
+    # 7) Lissage optionnel après downscaling
+    if smooth_after_downscaling:
+        print(f"\n🔄 Lissage avec kernel de taille {smooth_kernel_size}...")
+        from scipy.ndimage import uniform_filter1d
+
+        # Lissage du template
+        template_ds = uniform_filter1d(
+            template_ds, size=smooth_kernel_size, mode="reflect"
+        )
+
+        # Lissage des spectres
+        for i in range(n_spectra):
+            spectra_ds[i] = uniform_filter1d(
+                spectra_ds[i], size=smooth_kernel_size, mode="reflect"
+            )
+
+        print("✅ Lissage terminé")
+
     # 8) Ajout de bruit photonique réaliste (optionnel)
     if add_photon_noise:
         print("\n🔊 Ajout de bruit photonique réaliste...")
@@ -780,6 +803,8 @@ def create_soap_gpu_paper_dataset(
         "add_photon_noise": add_photon_noise,
         "snr_target": snr_target,
         "noise_seed": noise_seed,
+        "smooth_after_downscaling": smooth_after_downscaling,
+        "smooth_kernel_size": smooth_kernel_size,
         "original_pixels": int(Npix),
         "downscaled_pixels": int(n_bins),
         "batch_size": int(batch_size),
@@ -1167,11 +1192,13 @@ if __name__ == "__main__":
     create_soap_gpu_paper_dataset(
         spectra_filepath="data/soap_gpu_paper/spec_cube_tot.h5",
         spec_filepath="data/soap_gpu_paper/spec_master.npz",
-        output_filepath="data/npz_datasets/dataset_1000specs_5000_5010_Kp1e-1_P100_Phi0.npz",
-        n_spectra=1000,
+        output_filepath="data/npz_datasets/dataset_A_specs_5000_5300_Kp1e-1_P100_Phi0_downscaledx4_and_smoothed.npz",
+        idx_spectra_start=100,
+        idx_spectra_end=220,
         wavemin=5000,
-        wavemax=5010,
-        downscaling_factor=2,
+        wavemax=5300,
+        downscaling_factor=4,
+        smooth_after_downscaling=True,
         use_rassine=True,
         rassine_config=None,
         add_photon_noise=False,
