@@ -32,6 +32,225 @@ from src.plots_aestra import (
     plot_correlation_matrix,
     plot_latent_space_3d,
 )
+import emcee
+import corner
+import matplotlib.pyplot as plt
+from scipy.optimize import minimize
+
+# ==== MCMC ORBITAL INFERENCE ====
+
+
+def run_mcmc_for_fig9(times, rv, rv_err=None, truths=None, out_path="fig9.png"):
+    """
+    Modélise des RV circulaires avec MCMC et produit un corner plot "Figure 9-like".
+
+    Modèle: v(t) = γ + K*sin(2π*t/P + φ)
+
+    Parameters
+    ----------
+    times : array
+        Temps en jours
+    rv : array
+        Vitesses radiales en m/s
+    rv_err : array, optional
+        Erreurs sur les RV. Si None, utilise std(rv - mean(rv))
+    truths : dict, optional
+        Valeurs vraies {"P": period, "K": semi_amp, "phi_deg": phase_deg, "gamma": gamma}
+    out_path : str
+        Chemin de sauvegarde du corner plot
+
+    Returns
+    -------
+    samples : array
+        Échantillons MCMC (nwalkers*nsteps, 4) pour [P, K, phi, gamma]
+    summary : dict
+        Médianes et erreurs à 1σ pour chaque paramètre
+    """
+    times = np.asarray(times)
+    rv = np.asarray(rv)
+
+    # Estimation des erreurs si non fournies
+    if rv_err is None:
+        rv_err = np.full_like(rv, np.std(rv - np.mean(rv)))
+    else:
+        rv_err = np.asarray(rv_err)
+
+    # Modèle orbital circulaire
+    def orbital_model(params, t):
+        P, K, phi, gamma = params
+        return gamma + K * np.sin(2 * np.pi * t / P + phi)
+
+    # Log-prior
+    def log_prior(params):
+        P, K, phi, gamma = params
+        if (
+            10 <= P <= 200
+            and 0 <= K <= 10
+            and -np.pi <= phi <= np.pi
+            and -5 <= gamma <= 5
+        ):
+            return 0.0
+        return -np.inf
+
+    # Log-likelihood
+    def log_likelihood(params, t, y, yerr):
+        model = orbital_model(params, t)
+        chi2 = np.sum(((y - model) / yerr) ** 2)
+        return -0.5 * chi2
+
+    # Log-posterior
+    def log_posterior(params, t, y, yerr):
+        lp = log_prior(params)
+        if not np.isfinite(lp):
+            return -np.inf
+        return lp + log_likelihood(params, t, y, yerr)
+
+    # Estimation initiale avec périodogramme de Lomb-Scargle
+    print("Estimation initiale avec Lomb-Scargle...")
+    periods_ls = np.linspace(10, 200, 1000)
+    frequencies = 1.0 / periods_ls
+    ls = LombScargle(times, rv)
+    power = ls.power(frequencies)
+    P_init = periods_ls[np.argmax(power)]
+
+    # Optimisation MAP pour l'initialisation
+    def neg_log_posterior(params):
+        return -log_posterior(params, times, rv, rv_err)
+
+    # Point de départ proche du pic LS
+    initial_guess = [P_init, np.std(rv), 0.0, np.mean(rv)]
+
+    print(f"Optimisation MAP depuis P_init = {P_init:.2f} jours...")
+    result = minimize(
+        neg_log_posterior,
+        initial_guess,
+        method="L-BFGS-B",
+        bounds=[(10, 200), (0, 10), (-np.pi, np.pi), (-5, 5)],
+    )
+
+    if result.success:
+        map_params = result.x
+        print(f"MAP trouvé: P={map_params[0]:.2f}d, K={map_params[1]:.3f}m/s")
+    else:
+        map_params = initial_guess
+        print("Optimisation MAP échouée, utilisation du guess initial")
+
+    # Configuration MCMC
+    ndim = 4
+    nwalkers = 32
+    nsteps = 10000
+    burnin = 2000
+
+    # Initialisation des walkers autour du MAP
+    pos = map_params + 1e-4 * np.random.randn(nwalkers, ndim)
+    # S'assurer que les walkers respectent les priors
+    pos[:, 0] = np.clip(pos[:, 0], 10.1, 199.9)  # P
+    pos[:, 1] = np.clip(pos[:, 1], 0.001, 9.999)  # K
+    pos[:, 2] = np.clip(pos[:, 2], -np.pi + 0.01, np.pi - 0.01)  # phi
+    pos[:, 3] = np.clip(pos[:, 3], -4.999, 4.999)  # gamma
+
+    # Exécution MCMC
+    print(f"Démarrage MCMC: {nwalkers} walkers, {nsteps} steps...")
+    sampler = emcee.EnsembleSampler(
+        nwalkers, ndim, log_posterior, args=(times, rv, rv_err)
+    )
+
+    sampler.run_mcmc(pos, nsteps, progress=True)
+
+    # Extraction des échantillons après burn-in
+    samples = sampler.get_chain(discard=burnin, flat=True)
+
+    # Calcul des statistiques
+    percentiles = [16, 50, 84]
+    summary = {}
+    param_names = ["P", "K", "phi", "gamma"]
+
+    for i, name in enumerate(param_names):
+        mcmc_vals = np.percentile(samples[:, i], percentiles)
+        median = mcmc_vals[1]
+        minus_err = median - mcmc_vals[0]
+        plus_err = mcmc_vals[2] - median
+        summary[name] = {"median": median, "minus_err": minus_err, "plus_err": plus_err}
+
+    # Conversion de phi en degrés pour l'affichage
+    samples_plot = samples.copy()
+    samples_plot[:, 2] = np.degrees(samples_plot[:, 2])  # phi en degrés
+
+    # Préparation du corner plot
+    labels = ["Period [day]", "K [m/s]", "Phase [deg]", r"$\gamma$ [m/s]"]
+
+    # Valeurs vraies pour le plot (conversion phi en degrés)
+    truths_plot = None
+    if truths is not None:
+        truths_plot = [
+            truths.get("P", None),
+            truths.get("K", None),
+            truths.get("phi_deg", None),
+            truths.get("gamma", None),
+        ]
+
+    # Création du corner plot "Figure 9-like"
+    fig = corner.corner(
+        samples_plot,
+        labels=labels,
+        truths=truths_plot,
+        truth_color="blue",
+        show_titles=True,
+        title_kwargs={"fontsize": 14},
+        label_kwargs={"fontsize": 16},
+        quantiles=[0.16, 0.5, 0.84],
+        bins=50,
+        smooth=1.0,
+        color="black",
+        hist_kwargs={"alpha": 0.8},
+        plot_datapoints=False,
+    )
+
+    # Amélioration du style pour une lisibilité maximale
+    for ax in fig.axes:
+        if ax is not None:
+            ax.tick_params(labelsize=12)
+            ax.xaxis.set_tick_params(which="major", size=5, width=1)
+            ax.yaxis.set_tick_params(which="major", size=5, width=1)
+
+    plt.suptitle("MCMC Orbital Fit - Figure 9 Style", fontsize=18, y=0.98)
+    plt.savefig(out_path, dpi=300, bbox_inches="tight")
+    plt.close()
+
+    # Impression du résumé
+    print("\n" + "=" * 50)
+    print("RÉSUMÉ MCMC - AJUSTEMENT ORBITAL")
+    print("=" * 50)
+
+    # Conversion phi en degrés pour le résumé
+    phi_deg_median = np.degrees(summary["phi"]["median"])
+    phi_deg_minus = np.degrees(summary["phi"]["minus_err"])
+    phi_deg_plus = np.degrees(summary["phi"]["plus_err"])
+
+    print(
+        f"P = {summary['P']['median']:.2f} +{summary['P']['plus_err']:.2f} -{summary['P']['minus_err']:.2f} d"
+    )
+    print(
+        f"K = {summary['K']['median']:.3f} +{summary['K']['plus_err']:.3f} -{summary['K']['minus_err']:.3f} m/s"
+    )
+    print(f"Phase = {phi_deg_median:.1f} +{phi_deg_plus:.1f} -{phi_deg_minus:.1f} °")
+    print(
+        f"γ = {summary['gamma']['median']:.3f} +{summary['gamma']['plus_err']:.3f} -{summary['gamma']['minus_err']:.3f} m/s"
+    )
+
+    if truths is not None:
+        print("\nVALEURS VRAIES:")
+        print(f"P_true = {truths.get('P', 'N/A')} d")
+        print(f"K_true = {truths.get('K', 'N/A')} m/s")
+        print(f"Phase_true = {truths.get('phi_deg', 'N/A')} °")
+        print(f"γ_true = {truths.get('gamma', 'N/A')} m/s")
+
+    print(f"\nCorner plot sauvegardé: {out_path}")
+    print("=" * 50)
+
+    return samples, summary
+
+
 # ==== PERIODOGRAM ANALYSIS ====
 
 
@@ -885,6 +1104,39 @@ def main(
             )
         except Exception as e:
             print(f"Erreur lors du plot 3D de l'espace latent: {e}")
+
+    # MCMC orbital fit for v_correct
+    print("\nMCMC orbital fit...")
+    try:
+        truths = (
+            {"P": dataset.planets_periods[0], "K": 5.0, "phi_deg": 0.0, "gamma": 0.0}
+            if dataset.planets_periods
+            else None
+        )
+        samples, summary = run_mcmc_for_fig9(
+            times=times_values,
+            rv=v_correct,
+            truths=truths,
+            out_path=os.path.join(fig_dir, "mcmc_orbital_fit.png"),
+        )
+        # Add MCMC metrics to CSV
+        for param in ["P", "K", "phi", "gamma"]:
+            add_metric(
+                "mcmc",
+                "v_correct",
+                "orbital",
+                f"{param}_median",
+                summary[param]["median"],
+            )
+            add_metric(
+                "mcmc",
+                "v_correct",
+                "orbital",
+                f"{param}_err",
+                (summary[param]["plus_err"] + summary[param]["minus_err"]) / 2,
+            )
+    except Exception as e:
+        print(f"Erreur MCMC: {e}")
 
     # Write metrics CSV
     with open(os.path.join(data_dir, "metrics.csv"), mode="w", newline="") as f:
