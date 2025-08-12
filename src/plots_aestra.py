@@ -53,7 +53,7 @@ def create_typed_plot_dir(plot_dir: str, phase_name: str, plot_type: str) -> str
     return typed_dir
 
 
-def plot_losses(losses_history, exp_name, phase_name, epoch, plot_dir, console):
+def plot_losses(losses_history, phase_name, epoch, plot_dir, console):
     """
     Crée une mosaïque avec tous les plots des losses sur une seule figure.
 
@@ -183,7 +183,6 @@ def plot_losses(losses_history, exp_name, phase_name, epoch, plot_dir, console):
 def plot_rv_predictions_dataset(
     dataset,
     model: torch.nn.Module,
-    exp_name: str,
     phase_name: str,
     epoch: int,
     plot_dir: str,
@@ -273,7 +272,7 @@ def plot_rv_predictions_dataset(
 
     plt.tight_layout()
     # Nom de fichier simplifié
-    filename = f"rv_predictions_full_epoch_{epoch}.png"
+    filename = f"rv_predictions_epoch_{epoch}.png"
     filepath = os.path.join(typed_plot_dir, filename)
     plt.savefig(filepath, dpi=200, bbox_inches="tight")
     plt.close()
@@ -1112,7 +1111,7 @@ def plot_activity(
     plt.tight_layout()
 
     # Nom de fichier simplifié
-    filename = f"activity_comparison_epoch_{epoch}.png"
+    filename = f"activity_epoch_{epoch}.png"
     filepath = os.path.join(typed_plot_dir, filename)
     plt.savefig(filepath, dpi=300, bbox_inches="tight")
     plt.close()

@@ -699,9 +699,7 @@ def train_phase(
                     if exp_dirs
                     else config.get("plot_dir", "reports/figures")
                 )
-                plot_losses(
-                    losses_history, exp_name, phase_name, epoch + 1, plot_dir, console
-                )
+                plot_losses(losses_history, phase_name, epoch + 1, plot_dir, console)
 
             # Plotting RV predictions périodique (dataset complet)
             plot_rv_every = phase_config.get(
@@ -717,7 +715,6 @@ def train_phase(
                     plot_rv_predictions_dataset(
                         dataset,
                         model,
-                        exp_name,
                         phase_name,
                         epoch + 1,
                         rv_plot_dir,
@@ -844,7 +841,7 @@ def train_phase(
             if exp_dirs
             else config.get("plot_dir", "reports/figures")
         )
-        plot_losses(losses_history, exp_name, phase_name, n_epochs, plot_dir, console)
+        plot_losses(losses_history, phase_name, n_epochs, plot_dir, console)
 
     # Sauvegarde CSV finale de la phase
     if config.get("save_losses_csv", False):
