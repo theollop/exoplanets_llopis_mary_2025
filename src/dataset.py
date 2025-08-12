@@ -84,218 +84,194 @@ def check_system_resources():
 
 
 # * -- Classe principale standardisée: charge UNIQUEMENT un NPZ depuis data/npz_datasets --
+def _to_tensor(x, dtype):
+    return torch.tensor(x).to(dtype=dtype).contiguous() if x is not None else None
+
 class SpectrumDataset(Dataset):
     """
-    Dataset pour charger des spectres depuis un fichier .npz standardisé.
+    Dataset pour charger des spectres depuis un .npz 'nouveau format'.
 
-    Le fichier doit contenir au minimum les clés suivantes:
-      - spectra (np.ndarray [N, P])
-      - wavegrid (np.ndarray [P])
-      - time_values (np.ndarray [N])
-      - metadata (dict) avec: n_spectra, n_pixels, wavemin, wavemax, data_dtype,
-        planets_periods, planets_amplitudes, planets_phases
+    Clés attendues:
+      - wavegrid (P,), template (P,)
+      - spectra_train (Ntr,P), spectra_val (Nv,P)
+      - time_values_train (Ntr,), time_values_val (Nv,)
+      - Optionnel: activity_train/val, spectra_no_activity_train/val, v_true_train/val
+      - metadata (dict) incluant: n_spectra_train, n_spectra_val, n_pixels, wavemin, wavemax,
+        planets_periods, planets_amplitudes, planets_phases (pour fallback v_true)
     """
 
     def __init__(
         self,
-        dataset_filepath: str = "",
+        dataset_filepath: str,
+        split: str = "train",          # "train" | "val" | "all"
         data_dtype: torch.dtype = torch.float32,
         cuda: bool = True,
     ):
-        print("Initialisation du SpectrumDataset...")
-
-        if not dataset_filepath or not dataset_filepath.endswith(".npz"):
-            raise ValueError(
-                "dataset_filepath doit être un chemin complet vers un fichier .npz"
-            )
+        if not dataset_filepath.endswith(".npz"):
+            raise ValueError("dataset_filepath doit pointer vers un fichier .npz")
         if not os.path.exists(dataset_filepath):
             raise FileNotFoundError(f"NPZ dataset not found: {dataset_filepath}")
 
-        # Stocker le chemin du fichier
         self.dataset_filepath = dataset_filepath
+        self.split = split
+        self.data_dtype = data_dtype
 
-        # Chargement
-        self._init_from_npz(self.dataset_filepath, data_dtype)
-
-        print(self)
-        print("Déplacement des données vers le GPU si disponible...")
+        self._init_from_npz(dataset_filepath, data_dtype)
 
         if cuda and torch.cuda.is_available():
-            print("CUDA est activé, les données seront déplacées vers le GPU.")
-            print(f"CUDA disponible: {get_free_memory() / 1e9:.3f} GB")
             self.move_to_cuda()
-            print(f"CUDA disponible: {get_free_memory() / 1e9:.3f} GB")
 
-        print("Dataset initialisé avec succès.")
-
+    # --------- lecture / assemblage ----------
     def _init_from_npz(self, npz_path: str, data_dtype: torch.dtype):
-        """
-        Initialise le dataset depuis un fichier NPZ standardisé.
-        Attend les clés: spectra, wavegrid, time_values et metadata.
-        """
         ds = np.load(npz_path, allow_pickle=True)
 
-        # Validation des clés requises
-        required_keys = {"spectra", "wavegrid", "time_values", "metadata"}
-        missing = required_keys - set(ds.files)
-        if missing:
-            raise KeyError(
-                f"Clés manquantes dans {npz_path}: {sorted(missing)} (requis: {sorted(required_keys)})"
-            )
+        # Fixes
+        if "metadata" not in ds.files:
+            raise KeyError("Clé 'metadata' manquante dans le npz.")
+        self.metadata = dict(ds["metadata"].item())
 
-        # Données principales
-        spectra_np = ds["spectra"]
-        spectra_no_activity_np = (
-            ds["spectra_no_activity"] if "spectra_no_activity" in ds else None
-        )
+        # Invariants (communs)
+        if "wavegrid" not in ds.files or "template" not in ds.files:
+            raise KeyError("Clés 'wavegrid' et 'template' requises.")
         wavegrid_np = ds["wavegrid"]
-        time_values_np = ds["time_values"]
-        template_np = ds["template"] if "template" in ds else None
-        activity_np = ds["activity"] if "activity" in ds else None
+        template_np = ds["template"]
 
-        # Conversion vers torch
-        self.spectra = torch.tensor(spectra_np).to(dtype=data_dtype).contiguous()
-        self.spectra_no_activity = (
-            torch.tensor(spectra_no_activity_np).to(dtype=data_dtype).contiguous()
-            if spectra_no_activity_np is not None
-            else None
-        )
-        self.wavegrid = torch.tensor(wavegrid_np).to(dtype=data_dtype).contiguous()
-        self.template = (
-            torch.tensor(template_np).to(dtype=data_dtype).contiguous()
-            if template_np is not None
-            else self.spectra.mean(dim=0)
-        )
-        self.time_values = (
-            torch.tensor(time_values_np).to(dtype=data_dtype).contiguous()
-        )
-        self.activity = (
-            torch.tensor(activity_np).to(dtype=data_dtype).contiguous()
-            if activity_np is not None
-            else None
-        )
-        # Métadonnées unifiées
-        metadata = ds["metadata"].item()
-        self.metadata = metadata
-        self.n_spectra = int(metadata.get("n_spectra", self.spectra.shape[0]))
-        self.n_pixels = int(metadata.get("n_pixels", self.spectra.shape[1]))
-        self.data_dtype = data_dtype
-        self.wavemin = float(metadata.get("wavemin", float(self.wavegrid.min())))
-        self.wavemax = float(metadata.get("wavemax", float(self.wavegrid.max())))
-        # Quelques alias utiles
-        self.planets_periods = metadata.get("planets_periods", None)
-        self.planets_amplitudes = metadata.get("planets_amplitudes", None)
-        self.planets_phases = metadata.get("planets_phases", None)
+        # --- Sélection split ---
+        def pick(name):
+            # name sans suffixe, ex: "spectra", "time_values", "activity", "spectra_no_activity", "v_true"
+            if self.split == "train":
+                key = f"{name}_train"
+                return ds[key] if key in ds.files else None
+            elif self.split == "val":
+                key = f"{name}_val"
+                return ds[key] if key in ds.files else None
+            elif self.split == "all":
+                ktr, kval = f"{name}_train", f"{name}_val"
+                a = ds[ktr] if ktr in ds.files else None
+                b = ds[kval] if kval in ds.files else None
+                if a is None and b is None:
+                    return None
+                if a is None:  return b
+                if b is None:  return a
+                # Concat sur l'axe 0 si 2D, sinon 1D
+                axis = 0 if a.ndim > 1 else 0
+                return np.concatenate([a, b], axis=axis)
+            else:
+                raise ValueError("split doit être 'train', 'val' ou 'all'.")
 
-        self.v_true = torch.zeros_like(self.time_values)
-        for Kp, P, Phi in zip(
-            self.planets_amplitudes, self.planets_periods, self.planets_phases
-        ):
-            v = Kp * torch.sin(2 * np.pi * self.time_values / P + Phi)
-            self.v_true += v
+        spectra_np = pick("spectra")
+        if spectra_np is None:
+            raise KeyError(f"Clés '{'spectra_train/val'}' manquantes pour split={self.split}.")
 
-        # Normaliser cohérence
-        assert self.n_spectra == self.spectra.shape[0]
-        assert self.n_pixels == self.spectra.shape[1]
+        time_values_np = pick("time_values")
+        if time_values_np is None:
+            raise KeyError(f"Clés '{'time_values_train/val'}' manquantes pour split={self.split}.")
 
+        activity_np = pick("activity")
+        spectra_no_activity_np = pick("spectra_no_activity")
+        v_true_np = pick("v_true")
+
+        # Fallback v_true si absent -> sinus de metadata
+        if v_true_np is None:
+            P = self.metadata.get("planets_periods", []) or []
+            K = self.metadata.get("planets_amplitudes", []) or []
+            PHI = self.metadata.get("planets_phases", []) or []
+            if len(P) == len(K) == len(PHI) and len(P) > 0:
+                t = time_values_np.astype(np.float64)
+                v = np.zeros_like(t, dtype=np.float64)
+                for k, p, phi in zip(K, P, PHI):
+                    v += k * np.sin(2 * np.pi * t / p + phi)
+                v_true_np = v.astype(np.float32)
+            else:
+                # sinon, vecteur nul
+                v_true_np = np.zeros_like(time_values_np, dtype=np.float32)
+
+        # Conversion -> torch
+        self.spectra = _to_tensor(spectra_np, data_dtype)
+        self.wavegrid = _to_tensor(wavegrid_np, data_dtype)
+        self.template = _to_tensor(template_np, data_dtype)
+        self.planet_periods = self.metadata.get("planets_periods", [])
+        self.planet_amplitudes = self.metadata.get("planets_amplitudes", [])
+        self.planet_phases = self.metadata.get("planets_phases", [])
+        self.time_values = _to_tensor(time_values_np, data_dtype)
+        self.activity = _to_tensor(activity_np, data_dtype)
+        self.spectra_no_activity = _to_tensor(spectra_no_activity_np, data_dtype)
+        self.v_true = _to_tensor(v_true_np, data_dtype)
+
+        # Tailles / bornes
+        self.n_spectra = self.spectra.shape[0]
+        self.n_pixels = self.spectra.shape[1]
+        self.wavemin = float(self.metadata.get("wavemin", float(self.wavegrid.min().item())))
+        self.wavemax = float(self.metadata.get("wavemax", float(self.wavegrid.max().item())))
+
+        # Sanity checks rapides
+        assert self.time_values.shape[0] == self.n_spectra, "time_values et spectra désalignés"
+        assert self.v_true.shape[0] == self.n_spectra, "v_true et spectra désalignés"
+        if self.activity is not None:
+            assert self.activity.shape == self.spectra.shape, "activity et spectra doivent avoir la même forme"
+        if self.spectra_no_activity is not None:
+            assert self.spectra_no_activity.shape == self.spectra.shape, "spectra_no_activity et spectra doivent avoir la même forme"
+
+    # --------- API Dataset ----------
     def __len__(self):
-        return self.spectra.shape[0]
+        return self.n_spectra
 
     def __getitem__(self, idx):
-        """
-        Retourne un spectre, sa grille de longueurs d'onde, le template stellaire et la date julienne.
-        """
+        # On conserve ton comportement minimal (retourne le spectre).
+        # Si tu veux plus d’info, tu peux changer ici pour retourner un dict.
         return self.spectra[idx]
 
-    def __repr__(self):
-        dtype_info = ""
-        if self.data_dtype == torch.float16:
-            dtype_info = " (HALF PRECISION - économie mémoire ~50%)"
-        elif self.data_dtype == torch.float32:
-            dtype_info = " (SINGLE PRECISION - standard)"
-        elif self.data_dtype == torch.float64:
-            dtype_info = " (DOUBLE PRÉCISION - haute précision)"
-
-        return (
-            f"\n======== SpectrumDataset ========\n"
-            f"n_spectra={self.spectra.shape[0]}, n_pixels={self.spectra.shape[1]}\n"
-            f"spectra_shape={self.spectra.shape} | {self.spectra.dtype}{dtype_info}\n"
-            f"wavegrid_shape={self.wavegrid.shape} | {self.wavegrid.dtype}\n"
-            f"template_shape={self.template.shape} | {self.template.dtype}\n"
-            f"time_values_shape={self.time_values.shape} | {self.time_values.dtype})\n"
-            f"Memory footprint: ~{self._estimate_memory_usage():.2f} MB\n"
-            f"======== End of SpectrumDataset ========\n"
-        )
-
+    # --------- utilitaires ----------
     def _estimate_memory_usage(self):
-        """
-        Estime l'utilisation mémoire du dataset en MB.
-        """
-
-        def tensor_memory_mb(tensor):
-            return tensor.numel() * tensor.element_size() / (1024 * 1024)
-
-        total_memory = 0
-        total_memory += tensor_memory_mb(self.spectra)
-        total_memory += tensor_memory_mb(self.wavegrid)
-        total_memory += tensor_memory_mb(self.template)
-        total_memory += tensor_memory_mb(self.time_values)
-
-        return total_memory
+        def mb(t):
+            return 0 if t is None else t.numel() * t.element_size() / (1024 * 1024)
+        return mb(self.spectra) + mb(self.wavegrid) + mb(self.template) + mb(self.time_values)
 
     def move_to_cuda(self):
-        """
-        Déplace les données du dataset vers le GPU si disponible.
-        """
         if torch.cuda.is_available():
-            self.spectra = self.spectra.cuda()
-            self.wavegrid = self.wavegrid.cuda()
-            self.template = self.template.cuda()
-            self.v_true = self.v_true.cuda()
-        else:
-            print("CUDA n'est pas disponible, les données restent sur le CPU.")
+            for name in ["spectra","wavegrid","template","time_values","activity","spectra_no_activity","v_true"]:
+                t = getattr(self, name, None)
+                if t is not None:
+                    setattr(self, name, t.cuda())
 
-    def convert_dtype(self, new_dtype):
-        """
-        Convertit le dataset vers un nouveau type de données.
-
-        Args:
-            new_dtype (torch.dtype): Nouveau type de données (ex: torch.float16, torch.float32)
-
-        Returns:
-            SpectrumDataset: Nouveau dataset avec le type de données converti
-        """
-        print(f"Conversion du dataset de {self.data_dtype} vers {new_dtype}...")
-
-        old_memory = self._estimate_memory_usage()
-
-        # Conversion des tenseurs
-        self.spectra = self.spectra.to(dtype=new_dtype)
-        self.wavegrid = self.wavegrid.to(dtype=new_dtype)
-        self.template = self.template.to(dtype=new_dtype)
-        self.time_values = self.time_values.to(dtype=new_dtype)
+    def convert_dtype(self, new_dtype: torch.dtype):
+        def cast(name):
+            t = getattr(self, name, None)
+            if t is not None:
+                setattr(self, name, t.to(dtype=new_dtype))
+        old = self._estimate_memory_usage()
+        for k in ["spectra","wavegrid","template","time_values","activity","spectra_no_activity","v_true"]:
+            cast(k)
         self.data_dtype = new_dtype
-
-        new_memory = self._estimate_memory_usage()
-        memory_savings = ((old_memory - new_memory) / old_memory) * 100
-
-        print("Conversion terminée:")
-        print(f"  Mémoire avant: {old_memory:.2f} MB")
-        print(f"  Mémoire après: {new_memory:.2f} MB")
-        print(f"  Économie: {memory_savings:.1f}%")
-
+        new = self._estimate_memory_usage()
+        print(f"Conversion dtype: {old:.2f} -> {new:.2f} MB (-{(old-new)/old*100:.1f}%)")
         return self
 
+    def __repr__(self):
+        def shape_dtype(t):
+            return f"{tuple(t.shape)} | {t.dtype}" if t is not None else "None"
+        return (
+            f"\n======== SpectrumDataset ({self.split}) ========\n"
+            f"n_spectra={self.n_spectra}, n_pixels={self.n_pixels}\n"
+            f"spectra={shape_dtype(self.spectra)}\n"
+            f"spectra_no_activity={shape_dtype(self.spectra_no_activity)}\n"
+            f"activity={shape_dtype(self.activity)}\n"
+            f"wavegrid={shape_dtype(self.wavegrid)}\n"
+            f"template={shape_dtype(self.template)}\n"
+            f"time_values={shape_dtype(self.time_values)}\n"
+            f"v_true={shape_dtype(self.v_true)}\n"
+            f"[{self.wavemin:.3f}, {self.wavemax:.3f}]  dtype={self.data_dtype}\n"
+            f"Memory ~{self._estimate_memory_usage():.2f} MB\n"
+            f"===============================================\n"
+        )
+
     def to_dict(self):
-        """
-        Retourne un dict minimal pour recharger ce dataset.
-        """
         return {
             "dataset_filepath": self.dataset_filepath,
+            "split": self.split,
             "data_dtype": self.data_dtype,
             "cuda": self.spectra.is_cuda,
         }
-
 
 # * -- Fonction de collate pour le DataLoader (simplifie la vie) --
 def generate_collate_fn(
@@ -354,4 +330,6 @@ def generate_collate_fn(
 
 
 if __name__ == "__main__":
-    pass
+    spec_dset = SpectrumDataset(
+        dataset_filepath="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/npz_datasets/soapgpu_nst120_nsv120_5000-5050_dx2_sm3_p60_k0p1_phi0.npz"
+    )

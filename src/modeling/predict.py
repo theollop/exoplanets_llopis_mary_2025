@@ -18,7 +18,7 @@ from scipy.signal import find_peaks
 # Local imports
 from src.modeling.train import load_experiment_checkpoint, find_latest_checkpoint
 from torch.utils.data import DataLoader
-from src.dataset import generate_collate_fn
+from src.dataset import SpectrumDataset, generate_collate_fn
 from src.ccf import get_full_ccf_analysis
 from sklearn.linear_model import LinearRegression
 import os
@@ -800,7 +800,7 @@ def main(
     )
 
     v_correct = prediction_results["all_vobs"]
-    times_values = dataset.time_values
+    times_values = dataset.time_values.cpu().detach().numpy()
 
     # CCF analysis
     CCF_params = {
@@ -888,7 +888,7 @@ def main(
                 periods,
                 power,
                 ls,
-                dataset.planets_periods or [],
+                dataset.planet_periods or [],
                 exclude_width_frac,
                 fap_threshold,
             )
@@ -900,7 +900,7 @@ def main(
             periods=periods,
             power=power,
             metrics=metrics_list if metrics_list else None,
-            P_inj=dataset.planets_periods,
+            P_inj=dataset.planet_periods,
             fap_threshold=fap_threshold,
             exclude_width_frac=exclude_width_frac,
             title=f"LS Periodogram - {name}",
@@ -908,8 +908,8 @@ def main(
             show_plot=False,
         )
 
-        if dataset.planets_periods:
-            for i, P_val in enumerate(dataset.planets_periods):
+        if dataset.planet_periods:
+            for i, P_val in enumerate(dataset.planet_periods):
                 m = metrics_list[i] if i < len(metrics_list) else {}
                 add_metric(
                     "periodogram", name, "rv", "fap_at_PNj", m.get("fap_at_PNj"), P_val
@@ -955,7 +955,7 @@ def main(
                 periods,
                 power,
                 ls,
-                dataset.planets_periods or [],
+                dataset.planet_periods or [],
                 exclude_width_frac,
                 fap_threshold,
             )
@@ -975,8 +975,8 @@ def main(
             show_plot=False,
         )
 
-        if dataset.planets_periods:
-            for j, P_val in enumerate(dataset.planets_periods):
+        if dataset.planet_periods:
+            for j, P_val in enumerate(dataset.planet_periods):
                 m = metrics_list[j] if j < len(metrics_list) else {}
                 add_metric(
                     "periodogram",
@@ -1138,8 +1138,8 @@ def main(
     print("\nMCMC orbital fit...")
     try:
         truths = (
-            {"P": dataset.planets_periods[0], "K": 5.0, "phi_deg": 0.0, "gamma": 0.0}
-            if dataset.planets_periods
+            {"P": dataset.planet_periods[0], "K": 5.0, "phi_deg": 0.0, "gamma": 0.0}
+            if dataset.planet_periods
             else None
         )
         samples, summary = run_mcmc_for_fig9(
@@ -1181,14 +1181,38 @@ def main(
 
 
 if __name__ == "__main__":
-    main(
-        experiment_dir="experiments/soapgpu_ns120_5000-5010_dx4_sm3_rassine_noise_p53_k0p1_phi0",
-        # fap_threshold=0.01,
-        # exclude_width_frac=0.05,
-        min_period=2.0,
-        max_period=120,
-        # n_periods=5000,
-        # zoom_frac=0.15,
-        # batch_size=64,
-        perturbation_value=0.1,
+    dset = SpectrumDataset(
+        dataset_filepath="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/npz_datasets/soapgpu_nst120_nsv120_5000-5050_dx2_sm3_p60_k0p1_phi0.npz",
+        split="val",
+        cuda=True,
     )
+    v_ref, depth, span, fwhm = get_vref(
+        dataset=dset,
+        CCF_params = {
+            "v_grid": np.arange(-20000, 20000, 250),
+            "window_size_velocity": 820,
+            "mask_type": "G2",
+            "verbose": False,
+            "batch_size": 100,
+            "normalize": True,
+        }
+    )
+
+    plt.figure(figsize=(10, 5))
+    plt.plot(dset.time_values.cpu().numpy(), v_ref, label="v_ref")
+    plt.xlabel("Time (days)")
+    plt.ylabel("Radial Velocity (m/s)")
+    plt.title("Reference Radial Velocity")
+    plt.legend()
+    plt.show()
+    # main(
+    #     experiment_dir="experiments/soapgpu_nst120_nsv120_5000-5050_dx2_sm3_p60_k0p1_phi0",
+    #     # fap_threshold=0.01,
+    #     # exclude_width_frac=0.05,
+    #     min_period=2.0,
+    #     max_period=120,
+    #     # n_periods=5000,
+    #     # zoom_frac=0.15,
+    #     # batch_size=64,
+    #     perturbation_value=0.1,
+    # )

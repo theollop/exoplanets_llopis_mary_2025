@@ -637,7 +637,7 @@ def create_soap_gpu_paper_dataset(
         v_true_tot = v_np
 
         # tensors
-        dtype = torch.float32
+        dtype = torch.float64
         spectra_t = torch.tensor(spectra_ds, device=device, dtype=dtype)
         wave_t = torch.tensor(wavegrid_ds, device=device, dtype=dtype)
         v_t = torch.tensor(v_np, device=device, dtype=dtype)
@@ -701,8 +701,6 @@ def create_soap_gpu_paper_dataset(
         downscaled_pixels=n_bins,
         planets=planets_obj,
     )
-
-    print(metadata)
 
     payload = {
         "wavegrid": wavegrid_ds,

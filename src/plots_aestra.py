@@ -80,6 +80,7 @@ def plot_losses(losses_history, phase_name, epoch, plot_dir, console):
 
     # Plot 1: RV Loss
     axes[0, 0].plot(epochs, losses_history["rv"], "b-", linewidth=2, label="RV Loss")
+    axes[0, 0].plot(epochs, losses_history["rv_val"], "b--", linewidth=2, label="RV Val Loss")
     axes[0, 0].set_xlabel("Epoch")
     axes[0, 0].set_ylabel("RV Loss")
     axes[0, 0].set_title("Radial Velocity Loss")
@@ -90,6 +91,9 @@ def plot_losses(losses_history, phase_name, epoch, plot_dir, console):
     # Plot 2: Fidelity Loss
     axes[0, 1].plot(
         epochs, losses_history["fid"], "r-", linewidth=2, label="Fidelity Loss"
+    )
+    axes[0, 1].plot(
+        epochs, losses_history["fid_val"], "r--", linewidth=2, label="Fidelity Val Loss"
     )
     axes[0, 1].set_xlabel("Epoch")
     axes[0, 1].set_ylabel("Fidelity Loss")
@@ -102,6 +106,9 @@ def plot_losses(losses_history, phase_name, epoch, plot_dir, console):
     axes[0, 2].plot(
         epochs, losses_history["reg"], "m-", linewidth=2, label="Regularization Loss"
     )
+    axes[0, 2].plot(
+        epochs, losses_history["reg_val"], "m--", linewidth=2, label="Regularization Val Loss"
+    )
     axes[0, 2].set_xlabel("Epoch")
     axes[0, 2].set_ylabel("Regularization Loss")
     axes[0, 2].set_title("Ridge Regularization Loss")
@@ -112,6 +119,9 @@ def plot_losses(losses_history, phase_name, epoch, plot_dir, console):
     # Plot 4: Consistency Loss (C)
     axes[1, 0].plot(
         epochs, losses_history["c"], "g-", linewidth=2, label="Consistency Loss"
+    )
+    axes[1, 0].plot(
+        epochs, losses_history["c_val"], "g--", linewidth=2, label="Consistency Val Loss"
     )
     axes[1, 0].set_xlabel("Epoch")
     axes[1, 0].set_ylabel("Consistency Loss")
