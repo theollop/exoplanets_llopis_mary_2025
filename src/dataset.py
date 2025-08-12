@@ -292,88 +292,6 @@ class SpectrumDataset(Dataset):
             "cuda": self.spectra.is_cuda,
         }
 
-    def init_rvdatachallenge_dataset(
-        self,
-        star_name="STAR1136",
-        data_root_dir="data",
-        n_spectra=None,
-        wavemin=None,
-        wavemax=None,
-        data_dtype=torch.float32,
-    ):
-        """
-        Retourne le dataset du RV Data Challenge pour l'étoile spécifiée.
-        """
-        if star_name == "STAR1136":
-            dataset_dirpath = f"{data_root_dir}/rv_datachallenge/Sun_B57001_E61001_planet-FallChallenge1"
-        elif star_name == "STAR1138":
-            dataset_dirpath = f"{data_root_dir}/rv_datachallenge/Sun_B57002_E61002_planet-FallChallenge2"
-        elif star_name == "STAR1134":
-            dataset_dirpath = f"{data_root_dir}/rv_datachallenge/Sun_B57000_E61000_planet-FallChallenge3"
-        else:
-            raise ValueError(
-                f"Nom d'étoile inconnu: {star_name}. Utilisez 'STAR1136', 'STAR1138' ou 'STAR1134'."
-            )
-
-        dataset_filepath = f"{dataset_dirpath}/HARPN/{star_name}_HPN_flux_YVA.npy"
-
-        analyse_material = np.load(
-            f"{data_root_dir}/rv_datachallenge/Sun_B57001_E61001_planet-FallChallenge1/HARPN/{star_name}_HPN_Analyse_material.p",
-            allow_pickle=True,
-        )
-
-        wavegrid = analyse_material["wave"].to_numpy()
-        template = analyse_material["stellar_template"].to_numpy()
-
-        if wavemin is None:
-            wavemin = wavegrid.min()
-        if wavemax is None:
-            wavemax = wavegrid.max()
-
-        wave_mask = (wavegrid >= wavemin) & (wavegrid <= wavemax)
-        wavegrid = wavegrid[wave_mask]
-        template = template[wave_mask]
-
-        analyse_summary = pd.read_csv(
-            f"{data_root_dir}/rv_datachallenge/Sun_B57001_E61001_planet-FallChallenge1/HARPN/{star_name}_HPN_Analyse_summary.csv"
-        )
-
-        if n_spectra is None:
-            n_spectra = analyse_summary.shape[0]
-        data = np.load(dataset_filepath)
-        data = data[:n_spectra, wave_mask]
-
-        self.spectra = torch.tensor(data).to(dtype=data_dtype).contiguous()
-        self.wavegrid = torch.tensor(wavegrid).to(dtype=data_dtype).contiguous()
-        self.template = torch.tensor(template).to(dtype=data_dtype).contiguous()
-        self.time_values = (
-            torch.tensor(analyse_summary["jdb"][:n_spectra])
-            .to(dtype=data_dtype)
-            .contiguous()
-        )
-        self.n_spectra = n_spectra
-        self.n_pixels = wavegrid.shape[0]
-        self.data_dtype = data_dtype
-        self.wavemin = wavemin
-        self.wavemax = wavemax
-
-        transit_information = pd.read_csv(
-            f"{dataset_dirpath}/{star_name}_HPN_Transit_information.csv"
-        )
-        self.known_periods = transit_information["p"].to_numpy()
-
-    def init_soap_gpu_paper_dataset(
-        self,
-        dataset_filename="dataset_1000specs_5000_5050_Kp1e-1_P100.npz",
-        data_dtype=torch.float32,
-    ):
-        """
-        DEPRECATED: Les chargements doivent passer par le NPZ standardisé via __init__.
-        """
-        raise NotImplementedError(
-            "Utiliser SpectrumDataset(data_root_dir, dataset_filename) pour charger le NPZ."
-        )
-
 
 # * -- Fonction de collate pour le DataLoader (simplifie la vie) --
 def generate_collate_fn(
@@ -491,12 +409,12 @@ def inject_dataset(
 
         injected_spectra = torch.cat(injected_spectra_list, dim=0)
 
-    return injected_spectra
+    return injected_spectra, velocities
 
 
 def create_soap_gpu_paper_dataset(
     spectra_filepath,
-    spec_filepath,
+    tmp_filepath,
     output_dir,
     output_filename=None,
     idx_train_start=0,
@@ -506,8 +424,6 @@ def create_soap_gpu_paper_dataset(
     wavemin=5000,
     wavemax=5050,
     downscaling_factor=2,
-    use_rassine=True,
-    rassine_config=None,
     add_photon_noise=False,
     snr_target=None,
     noise_seed=None,
@@ -528,7 +444,7 @@ def create_soap_gpu_paper_dataset(
     ----------
     spectra_filepath : str
         Chemin vers le fichier HDF5 contenant le dataset 'spec_cube' avec les spectres.
-    spec_filepath : str
+    tmp_filepath : str
         Chemin vers le fichier .npz contenant 'spec' et 'wavelength'.
     output_filename : str
         Chemin du .npz de sortie qui sera créé.
@@ -538,8 +454,6 @@ def create_soap_gpu_paper_dataset(
         Bornes de longueur d'onde en Angstrom.
     downscaling_factor : int
         Facteur de binning (nombre de pixels à moyenner).
-    use_rassine : bool, optional
-        Si True, utilise Rassine pour normaliser les spectres (défaut: True).
     rassine_config : dict, optional
         Configuration personnalisée pour Rassine. Si None, utilise la config par défaut.
     add_photon_noise : bool, optional
@@ -555,9 +469,12 @@ def create_soap_gpu_paper_dataset(
     print("🔄 Création du dataset SOAP GPU Paper...")
 
     # 1) Chargement
-    spec_data = np.load(spec_filepath)
+    spec_data = np.load(tmp_filepath)
     template = spec_data["spec"]
     wavegrid = spec_data["wavelength"]
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Utilisation de l'appareil : {device}")
 
     if wavemin is None:
         wavemin = wavegrid.min()
@@ -577,12 +494,13 @@ def create_soap_gpu_paper_dataset(
         n_spectra_val = 0
     else:
         n_spectra_val = idx_val_end - idx_val_start
+
     with h5py.File(spectra_filepath, "r") as f:
         n_spectra_tot = f["spec_cube"].shape[0]
-    time_values = np.arange(n_spectra_tot)
+        time_values = np.arange(n_spectra_tot)
 
     if (
-        "filtered" in spec_filepath
+        "filtered" in spectra_filepath
     ):  # si filtered dans le path alors le cube est déjà filtré donc les indices suivant sont déjà enlevés pour ne pas perdre la cohérence avec le cube, on l'enlève du time values
         specs_removed = [246, 249, 1196, 1453, 2176]
         time_values = np.delete(time_values, specs_removed)
@@ -591,13 +509,17 @@ def create_soap_gpu_paper_dataset(
     time_values_val = (
         time_values[idx_val_start:idx_val_end]
         if idx_val_start is not None and idx_val_end is not None
-        else None
+        else np.array([], dtype=time_values.dtype)
     )
-    time_values_tot = (
-        np.concatenate([time_values_train, time_values_val], axis=0)
-        if time_values_val is not None
-        else time_values_train
-    )
+    time_values_tot = np.concatenate([time_values_train, time_values_val])
+
+    if any(x is None for x in [planets_amplitudes, planets_periods, planets_phases]):
+        inject = False
+    else:
+        assert len(planets_amplitudes) == len(planets_periods) == len(planets_phases), (
+            "Planets lists must have same length."
+        )
+        inject = len(planets_periods) > 0
 
     # ---------- NEW: auto-nom si output_filename manquant ----------
     def _slugify(text: str, max_len: int = 80) -> str:
@@ -619,7 +541,7 @@ def create_soap_gpu_paper_dataset(
             return _slugify(x)
 
     def _fmt_list(lst):
-        return "+".join(_fmt_num(x) for x in lst) if lst else "na"
+        return "+".join(_fmt_num(x) for x in list(lst))
 
     if not output_filename:
         # Racine par défaut proche des données source
@@ -637,13 +559,11 @@ def create_soap_gpu_paper_dataset(
             bits.append(f"dx{downscaling_factor}")
         if smooth_after_downscaling:
             bits.append(f"sm{smooth_kernel_size}")
-        if use_rassine:
-            bits.append("rassine")
         if add_photon_noise:
             bits.append("noise" if snr_target is None else f"snr{_fmt_num(snr_target)}")
 
         # Planètes si dispo
-        if planets_periods and planets_amplitudes and planets_phases:
+        if inject:
             bits.append(f"P{_fmt_list(planets_periods)}")
             bits.append(f"K{_fmt_list(planets_amplitudes)}")
             bits.append(f"Phi{_fmt_list(planets_phases)}")
@@ -672,106 +592,18 @@ def create_soap_gpu_paper_dataset(
             if n_spectra_val > 0
             else spectra_train
         )
+        n_spectra_sel = spectra_tot.shape[0]
+
+    assert time_values_tot.shape[0] == n_spectra_sel, (
+        f"Mismatch time({time_values_tot.shape[0]}) != data({n_spectra_sel})"
+    )
 
     print(
-        f"Données chargées: {n_spectra_tot} spectres \n{n_spectra_train} Train | {n_spectra_val} Val\n{wavegrid_masked.size} pixels"
+        f"Données chargées: fichier={n_spectra_tot} | sélection={n_spectra_sel} "
+        f"({n_spectra_train} train / {n_spectra_val} val)"
     )
+
     print(f"Gamme spectrale: {wavemin:.1f} - {wavemax:.1f} Å")
-
-    # 4) Normalisation avec Rassine (optionnel)
-    if use_rassine:
-        print("\n🔄 Normalisation avec Rassine...")
-
-        # Configuration par défaut conservative pour Rassine
-        default_rassine_config = {
-            "axes_stretching": "auto_0.3",  # Plus conservative (0.3 au lieu de 0.5)
-            "vicinity_local_max": 5,  # Fenêtre plus petite pour préserver détails
-            "smoothing_box": 3,  # Moins de lissage (3 au lieu de 6)
-            "smoothing_kernel": "gaussian",
-            "fwhm_ccf": "auto",
-            "CCF_mask": "master",
-            "RV_sys": 0,
-            "mask_telluric": [[6275, 6330], [6470, 6577], [6866, 8000]],
-            "mask_broadline": [[3960, 3980], [6560, 6562], [10034, 10064]],
-            "min_radius": "auto",
-            "max_radius": "auto",
-            "model_penality_radius": "poly_0.5",  # Pénalité plus faible (0.5 au lieu de 1.0)
-            "denoising_dist": 3,  # Distance plus petite (3 au lieu de 5)
-            "number_of_cut": 2,  # Moins de coupes itératives (2 au lieu de 3)
-            "number_of_cut_outliers": 1,
-            "interpol": "linear",  # Interpolation linéaire plus conservative
-            "feedback": False,
-            "only_print_end": True,
-            "plot_end": False,
-            "save_last_plot": False,
-            "outputs_interpolation_save": "linear",  # Sortie linéaire
-            "outputs_denoising_save": "undenoised",
-            "light_file": True,
-            "speedup": 0.5,  # Plus lent mais plus précis (0.5 au lieu de 1.0)
-            "float_precision": "float64",
-            "column_wave": "wave",
-            "column_flux": "flux",
-            "synthetic_spectrum": False,
-            "anchor_file": "",
-        }
-
-        # Mise à jour avec la config utilisateur si fournie
-        if rassine_config is not None:
-            default_rassine_config.update(rassine_config)
-
-        # Ajouter le chemin de Rassine au PYTHONPATH
-        rassine_path = os.path.join(os.path.dirname(__file__), "..", "Rassine_public")
-        rassine_path = os.path.abspath(rassine_path)
-        if rassine_path not in sys.path:
-            sys.path.insert(0, rassine_path)
-
-        try:
-            # Normalisation du template
-            print("Normalisation du template...")
-            template_normalized = _normalize_spectrum_with_rassine(
-                wavegrid_masked, template_masked, default_rassine_config
-            )
-
-            # Normalisation de chaque spectre du dataset par batches
-            print(
-                f"Normalisation de {n_spectra_tot} spectres par batches de {batch_size}..."
-            )
-            spectra_normalized = np.zeros_like(spectra_tot)
-
-            for i in range(0, n_spectra_tot, batch_size):
-                end_idx = min(i + batch_size, n_spectra_tot)
-                print(f"  Batch {i // batch_size + 1}: spectres {i + 1}-{end_idx}")
-
-                # Traiter chaque spectre du batch
-                for j in range(i, end_idx):
-                    spectra_normalized[j] = _normalize_spectrum_with_rassine(
-                        wavegrid_masked, spectra_tot[j], default_rassine_config
-                    )
-
-                # Nettoyer le cache mémoire périodiquement
-                if i % (batch_size * 5) == 0 and i > 0:
-                    import gc
-
-                    gc.collect()
-
-            print("✅ Normalisation Rassine terminée")
-
-        except ImportError as e:
-            print(f"❌ Erreur d'import Rassine: {e}")
-            print("Continuera sans normalisation...")
-            template_normalized = template_masked
-            spectra_normalized = spectra_tot
-        except Exception as e:
-            print(f"❌ Erreur lors de la normalisation Rassine: {e}")
-            print("Continuera sans normalisation...")
-            template_normalized = template_masked
-            spectra_normalized = spectra_tot
-    else:
-        print("Pas de normalisation demandée")
-        template_normalized = template_masked / np.max(
-            template_masked
-        )  # template non normalisé mais dataset déjà normalisé
-        spectra_normalized = spectra_tot
 
     # 5) Calcul du nombre de bins complets pour le downscaling
     Npix = wavegrid_masked.size
@@ -782,11 +614,11 @@ def create_soap_gpu_paper_dataset(
         f"\n📐 Downscaling: {Npix} pixels → {n_bins} bins (facteur {downscaling_factor})"
     )
 
-    # 6) Trim et reshape + moyenne
+    # 5) Trim et reshape + moyenne
     wavegrid_trim = wavegrid_masked[:trim].reshape(n_bins, downscaling_factor)
-    template_trim = template_normalized[:trim].reshape(n_bins, downscaling_factor)
-    spectra_trim = spectra_normalized[:, :trim].reshape(
-        n_spectra_tot, n_bins, downscaling_factor
+    template_trim = template_masked[:trim].reshape(n_bins, downscaling_factor)
+    spectra_trim = spectra_tot[:, :trim].reshape(
+        n_spectra_sel, n_bins, downscaling_factor
     )
 
     wavegrid_ds = wavegrid_trim.mean(axis=1)
@@ -804,7 +636,7 @@ def create_soap_gpu_paper_dataset(
         )
 
         # Lissage des spectres
-        for i in range(n_spectra_tot):
+        for i in range(n_spectra_sel):
             spectra_ds[i] = uniform_filter1d(
                 spectra_ds[i], size=smooth_kernel_size, mode="reflect"
             )
@@ -822,29 +654,22 @@ def create_soap_gpu_paper_dataset(
             np.random.seed(noise_seed)
             print(f"   Graine aléatoire: {noise_seed}")
 
-        # Ajouter du bruit au template
-        template_ds = _add_photon_noise(template_ds, snr_target)
-
         # Ajouter du bruit à chaque spectre du dataset
-        print(f"   Ajout de bruit à {n_spectra_tot} spectres...")
-        for i in range(n_spectra_tot):
+        print(f"   Ajout de bruit à {n_spectra_sel} spectres...")
+        for i in range(n_spectra_sel):
             if i % 500 == 0 and i > 0:
-                print(f"     Spectre {i}/{n_spectra_tot}")
+                print(f"     Spectre {i}/{n_spectra_sel}")
             spectra_ds[i] = _add_photon_noise(spectra_ds[i], snr_target)
 
         print("✅ Bruit photonique ajouté")
 
     # 10) Création du dataset sans activité avec gestion mémoire améliorée
     spectra_ds_no_activity = None
-    if (
-        planets_amplitudes is not None
-        and planets_periods is not None
-        and planets_phases is not None
-    ):
+    if inject:
         print("\n🌌 Injection du signal planétaire dans le dataset")
-        spectra_ds = inject_dataset(
-            spectra=torch.tensor(spectra_ds, device="cuda"),
-            wavegrid=torch.tensor(wavegrid_ds, device="cuda"),
+        spectra_ds, v_true_tot = inject_dataset(
+            spectra=torch.tensor(spectra_ds, device=device, dtype=torch.float64),
+            wavegrid=torch.tensor(wavegrid_ds, device=device, dtype=torch.float64),
             time_values=time_values_tot,
             planets_amplitudes=planets_amplitudes,
             planets_periods=planets_periods,
@@ -857,11 +682,11 @@ def create_soap_gpu_paper_dataset(
         print("\n🌌 Création du dataset sans activité...")
 
         # Utiliser la même logique de batch que pour l'injection
-        spectra_ds_no_activity = inject_dataset(
-            spectra=torch.tensor(template_ds, device="cuda")
+        spectra_ds_no_activity, _ = inject_dataset(
+            spectra=torch.tensor(template_ds, device=device, dtype=torch.float64)
             .unsqueeze(0)
-            .repeat(n_spectra_tot, 1),
-            wavegrid=torch.tensor(wavegrid_ds, device="cuda"),
+            .repeat(n_spectra_sel, 1),
+            wavegrid=torch.tensor(wavegrid_ds, device=device, dtype=torch.float64),
             time_values=time_values_tot,
             planets_amplitudes=planets_amplitudes,
             planets_periods=planets_periods,
@@ -871,12 +696,18 @@ def create_soap_gpu_paper_dataset(
 
         spectra_ds_no_activity = spectra_ds_no_activity.detach().cpu().numpy()
         print("✅ Dataset sans activité créé")
+    else:
+        v_true_tot = np.zeros_like(time_values_tot)
+
+    v_true_train = v_true_tot[:n_spectra_train]
+    v_true_val = v_true_tot[n_spectra_train : n_spectra_train + n_spectra_val]
 
     # 11) Sauvegarde avec nettoyage mémoire
     print("\n💾 Sauvegarde des données...")
     # Métadonnées standardisées
     metadata = {
-        "n_spectra": int(n_spectra_tot),
+        "n_spectra": int(n_spectra_sel),
+        "n_spectra_file": int(n_spectra_tot),
         "n_spectra_train": int(n_spectra_train),
         "n_spectra_val": int(n_spectra_val),
         "n_pixels": int(len(wavegrid_ds)),
@@ -887,7 +718,6 @@ def create_soap_gpu_paper_dataset(
         "planets_amplitudes": planets_amplitudes,
         "planets_phases": planets_phases,
         "downscaling_factor": downscaling_factor,
-        "use_rassine": use_rassine,
         "add_photon_noise": add_photon_noise,
         "snr_target": snr_target,
         "noise_seed": noise_seed,
@@ -912,6 +742,8 @@ def create_soap_gpu_paper_dataset(
         "activity_val": activity_ds_val,
         "time_values_train": time_values_train,
         "time_values_val": time_values_val,
+        "v_true_train": v_true_train,
+        "v_true_val": v_true_val,
         "metadata": metadata,
     }
 
@@ -928,7 +760,12 @@ def create_soap_gpu_paper_dataset(
     np.savez_compressed(output_filepath, **save_data)
 
     # Nettoyage final de la mémoire
-    del spectra_tot, spectra_normalized, spectra_ds, template_normalized
+    del spectra_tot, spectra_ds
+    if "spectra_train" in locals():
+        del spectra_train
+    if "spectra_val" in locals():
+        del spectra_val
+
     if spectra_ds_no_activity is not None:
         del spectra_ds_no_activity
 
@@ -941,119 +778,46 @@ def create_soap_gpu_paper_dataset(
 
     print(f"💾 Fichier de sortie créé: {output_filepath}")
     print(
-        f"   - {n_spectra_tot} spectres - {n_spectra_train} train / {n_spectra_val} val"
+        f"   - {n_spectra_sel} spectres - {n_spectra_train} train / {n_spectra_val} val"
     )
     print(f"   - {n_bins} pixels spectraux")
     print(f"   - Gamme: {wavegrid_ds.min():.1f} - {wavegrid_ds.max():.1f} Å")
     print("🧹 Nettoyage mémoire terminé")
 
 
-def create_rvdatachallenge_dataset(
-    star_name="STAR1136",
-    output_filepath="data/npz_datasets/test_rv_datachallenge.npz",
-    n_spectra=None,
-    wavemin=None,
-    wavemax=None,
-    data_dtype=torch.float32,
-):
+def _add_photon_noise(spectrum, snr_target=None, default_snr=100.0):
     """
-    Crée un dataset (fichier npz) standardisé pour le RV Data Challenge: data/npz_datasets/*.npz
-
-    Le fichier contiendra: spectra, wavegrid, time_values, metadata (+ template).
+    Ajoute du bruit de Poisson en conservant l'échelle du spectre.
+    - Si snr_target est donné: SNR(médiane) ~= snr_target
+    - Sinon: SNR(médiane) ~= default_snr
     """
-    if star_name == "STAR1136":
-        dataset_dirpath = (
-            "data/rv_datachallenge/Sun_B57001_E61001_planet-FallChallenge1"
-        )
-    elif star_name == "STAR1138":
-        dataset_dirpath = (
-            "data/rv_datachallenge/Sun_B57002_E61002_planet-FallChallenge2"
-        )
-    elif star_name == "STAR1134":
-        dataset_dirpath = (
-            "data/rv_datachallenge/Sun_B57000_E61000_planet-FallChallenge3"
-        )
-    else:
-        raise ValueError(
-            f"Nom d'étoile inconnu: {star_name}. Utilisez 'STAR1136', 'STAR1138' ou 'STAR1134'."
-        )
+    spec = np.asarray(spectrum, dtype=float)
+    # éviter lambda=0 et valeurs négatives
+    spec = np.maximum(spec, 1e-12)
 
-    dataset_filepath = f"{dataset_dirpath}/HARPN/{star_name}_HPN_flux_YVA.npy"
-
-    analyse_material = np.load(
-        f"data/rv_datachallenge/Sun_B57001_E61001_planet-FallChallenge1/HARPN/{star_name}_HPN_Analyse_material.p",
-        allow_pickle=True,
+    # flux de référence pour fixer le SNR (médiane plus robuste que la moyenne)
+    mu = (
+        float(np.median(spec)) if np.isfinite(np.median(spec)) else float(np.mean(spec))
     )
 
-    wavegrid = analyse_material["wave"].to_numpy()
-    template = analyse_material["stellar_template"].to_numpy()
+    if mu <= 0:
+        # fallback: pas de bruit si flux pathologique
+        return spec.copy()
 
-    if wavemin is None:
-        wavemin = wavegrid.min()
-    if wavemax is None:
-        wavemax = wavegrid.max()
+    S = float(snr_target) if (snr_target is not None) else float(default_snr)
+    S = max(S, 1.0)  # borne basse raisonnable
 
-    wave_mask = (wavegrid >= wavemin) & (wavegrid <= wavemax)
-    wavegrid = wavegrid[wave_mask]
-    template = template[wave_mask]
+    # facteur de mise à l'échelle vers des "comptes"
+    k = (S * S) / mu  # => SNR(médiane) ≈ S
 
-    analyse_summary = pd.read_csv(
-        f"data/rv_datachallenge/Sun_B57001_E61001_planet-FallChallenge1/HARPN/{star_name}_HPN_Analyse_summary.csv"
-    )
+    lam = k * spec
+    # prudence: éviter les lambdas énormes qui peuvent ralentir/overflow
+    # (optionnel) lam = np.clip(lam, 0, 1e8)
 
-    if n_spectra is None:
-        n_spectra = analyse_summary.shape[0]
-    data = np.load(dataset_filepath)
-    data = data[:n_spectra, :]
-    data = data[:, wave_mask]
+    counts = np.random.poisson(lam)
+    noisy = counts / k  # revenir à l'échelle originale
 
-    # Types numpy standardisés
-    if data_dtype == torch.float16:
-        np_dtype = np.float16
-    elif data_dtype == torch.float64:
-        np_dtype = np.float64
-    else:
-        np_dtype = np.float32
-
-    spectra_np = data.astype(np_dtype, copy=False)
-    wavegrid_np = wavegrid.astype(np_dtype, copy=False)
-    template_np = template.astype(np_dtype, copy=False)
-    time_values_np = analyse_summary["jdb"][:n_spectra].to_numpy().astype(np_dtype)
-
-    n_pixels = wavegrid_np.shape[0]
-
-    # Planets info indisponible ici
-    planets_periods = None
-    planets_amplitudes = None
-    planets_phases = None
-
-    metadata = {
-        "n_spectra": int(n_spectra),
-        "n_pixels": int(n_pixels),
-        "wavemin": float(wavemin),
-        "wavemax": float(wavemax),
-        "data_dtype": str(np_dtype),
-        "planets_periods": planets_periods,
-        "planets_amplitudes": planets_amplitudes,
-        "planets_phases": planets_phases,
-        "source": "rv_datachallenge",
-        "star_name": star_name,
-    }
-
-    save_data = {
-        "spectra": spectra_np,
-        "wavegrid": wavegrid_np,
-        "template": template_np,
-        "time_values": time_values_np,
-        "metadata": metadata,
-    }
-
-    os.makedirs(os.path.dirname(output_filepath), exist_ok=True)
-    np.savez_compressed(output_filepath, **save_data)
-
-    print(f"💾 Fichier de sortie créé: {output_filepath}")
-    print(f"   - {n_spectra} spectres | {n_pixels} pixels")
-    print(f"   - Gamme: {wavegrid_np.min():.1f} - {wavegrid_np.max():.1f} Å")
+    return noisy
 
 
 def _normalize_spectrum_with_rassine(wave, flux, config):
@@ -1223,86 +987,22 @@ def _normalize_spectrum_with_rassine(wave, flux, config):
         return flux / np.median(flux)
 
 
-def _add_photon_noise(spectrum, snr_target=None, default_snr=100.0):
-    """
-    Ajoute du bruit de Poisson en conservant l'échelle du spectre.
-    - Si snr_target est donné: SNR(médiane) ~= snr_target
-    - Sinon: SNR(médiane) ~= default_snr
-    """
-    spec = np.asarray(spectrum, dtype=float)
-    # éviter lambda=0 et valeurs négatives
-    spec = np.maximum(spec, 1e-12)
-
-    # flux de référence pour fixer le SNR (médiane plus robuste que la moyenne)
-    mu = (
-        float(np.median(spec)) if np.isfinite(np.median(spec)) else float(np.mean(spec))
-    )
-
-    if mu <= 0:
-        # fallback: pas de bruit si flux pathologique
-        return spec.copy()
-
-    S = float(snr_target) if (snr_target is not None) else float(default_snr)
-    S = max(S, 1.0)  # borne basse raisonnable
-
-    # facteur de mise à l'échelle vers des "comptes"
-    k = (S * S) / mu  # => SNR(médiane) ≈ S
-
-    lam = k * spec
-    # prudence: éviter les lambdas énormes qui peuvent ralentir/overflow
-    # (optionnel) lam = np.clip(lam, 0, 1e8)
-
-    counts = np.random.poisson(lam)
-    noisy = counts / k  # revenir à l'échelle originale
-
-    return noisy
-
-
 if __name__ == "__main__":
-    # dataset = SpectrumDataset()
-
-    # dataset_metadata = dataset.to_dict()
-    # print("Metadata du dataset:", dataset_metadata)
-    # new_dataset = SpectrumDataset(
-    #     **dataset_metadata,  # Recharger le dataset avec les mêmes paramètres
-    # )
-
-    # Exemple d'appel optimisé pour éviter les crashes - Version SÉCURISÉE recommandée
     print("🚀 Démarrage de la création du dataset avec optimisation automatique...")
 
     create_soap_gpu_paper_dataset(
         spectra_filepath="data/soap_gpu_paper/spec_cube_tot.h5",
-        spec_filepath="data/soap_gpu_paper/spec_master.npz",
+        tmp_filepath="data/soap_gpu_paper/spec_master.npz",
         output_dir="data/npz_datasets/",
-        idx_spectra_start=100,
-        idx_spectra_end=220,
+        idx_train_start=100,
+        idx_train_end=220,
         wavemin=5000,
         wavemax=5010,
         downscaling_factor=4,
         smooth_after_downscaling=True,
-        use_rassine=True,
         rassine_config=None,
         add_photon_noise=True,
         planets_amplitudes=[0.1],
         planets_periods=[53],
         planets_phases=[0.0],
     )
-
-    # Alternative avec paramètres manuels (utiliser seulement si vous connaissez votre système)
-    # create_soap_gpu_paper_dataset(
-    #     spectra_filepath="data/soap_gpu_paper/spec_cube_tot.h5",
-    #     spec_filepath="data/soap_gpu_paper/spec_master.npz",
-    #     output_filepath="data/soap_gpu_paper/dataset_1000specs_5000_6000_Kp10_P100_manual.npz",
-    #     n_spectra=1000,
-    #     wavemin=5000,
-    #     wavemax=6000,
-    #     downscaling_factor=2,
-    #     use_rassine=True,
-    #     rassine_config=None,
-    #     add_photon_noise=False,
-    #     planets_amplitudes=[10],
-    #     planets_periods=[100],
-    #     batch_size=50,  # Ajustez selon votre système
-    #     max_gpu_memory_gb=4,  # Ajustez selon votre GPU
-    #     force_cpu=False,  # True pour forcer CPU
-    # )
