@@ -16,7 +16,7 @@ import torch
 from scipy.ndimage import uniform_filter1d
 
 from src.interpolate import shift_spectra_linear
-from src.rassine import normalize_with_rassine
+from src.rassine import normalize_batch_with_rassine, normalize_with_rassine
 
 # ============================================================
 # ---------------------- Config types ------------------------
@@ -116,11 +116,6 @@ def auto_filename(
 # ============================================================
 # ---------------------- I/O & slicing -----------------------
 # ============================================================
-
-
-def load_template_npz(tmp_filepath: str) -> Tuple[np.ndarray, np.ndarray]:
-    spec_data = np.load(tmp_filepath)
-    return spec_data["spec"], spec_data["wavelength"]
 
 
 def build_mask(wavegrid: np.ndarray, wavemin: float, wavemax: float) -> np.ndarray:
@@ -535,6 +530,7 @@ def save_npz(path: str, payload: Dict[str, Any]):
 def create_soap_gpu_paper_dataset(
     spectra_filepath: str,
     tmp_filepath: str,
+    wavegrid_filepath: str,
     output_dir: str,
     output_filename: Optional[str] = None,
     idx_train_start: int = 0,
@@ -558,7 +554,12 @@ def create_soap_gpu_paper_dataset(
     print("🔄 Création du dataset SOAP GPU Paper...")
 
     # ---- Load template & build mask
-    template, wavegrid = load_template_npz(tmp_filepath)
+    template = np.load(tmp_filepath)
+    wavegrid = np.load(wavegrid_filepath)
+    if wavemin is None:
+        wavemin = wavegrid.min()
+    if wavemax is None:
+        wavemax = wavegrid.max()
     mask = build_mask(wavegrid, wavemin, wavemax)
     template_masked = template[mask]
     wavegrid_masked = wavegrid[mask]
@@ -585,8 +586,11 @@ def create_soap_gpu_paper_dataset(
     if use_rassine:
         # ---- Normalisation avec Rassine ----*
         print("🐍 Normalisation des spectres avec Rassine...")
-        for i, spec in enumerate(spectra_sel):
-            spectra_sel[i] = normalize_with_rassine(wavegrid_masked, spec)
+        for i in range(0, n_sel, batch_size):
+            print(f"  Traitement du lot {i // batch_size + 1}...")
+            spectra_sel[i:i + batch_size] = normalize_batch_with_rassine(
+                wavegrid_masked, spectra_sel[i:i + batch_size]
+            )
         template_masked = normalize_with_rassine(wavegrid_masked, template_masked)
 
     # ---- Downscaling
@@ -698,6 +702,8 @@ def create_soap_gpu_paper_dataset(
         planets=planets_obj,
     )
 
+    print(metadata)
+
     payload = {
         "wavegrid": wavegrid_ds,
         "template": template_ds,
@@ -737,16 +743,16 @@ def create_soap_gpu_paper_dataset(
 
 if __name__ == "__main__":
     create_soap_gpu_paper_dataset(
-        spectra_filepath="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/soap_gpu_paper/spec_cube_tot_filtered.h5",
-        tmp_filepath="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/soap_gpu_paper/spec_master.npz",
+        spectra_filepath="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/soap_gpu_paper/spec_cube_tot_filtered_normalized.h5",
+        tmp_filepath="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/soap_gpu_paper/template.npy",
+        wavegrid_filepath="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/soap_gpu_paper/wavegrid.npy",
         output_dir="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/npz_datasets",
-        output_filename="test",
         idx_train_start=100,
         idx_train_end=220,
         idx_val_start=1000,
         idx_val_end=1120,
-        wavemin=5000.0,
-        wavemax=5050.0,
+        wavemin=5000,
+        wavemax=5050,
         downscaling_factor=2,
         smooth_after_downscaling=True,
         smooth_kernel_size=3,
@@ -757,5 +763,5 @@ if __name__ == "__main__":
         planets_periods=[60.0],
         planets_phases=[0.0],
         batch_size=100,
-        use_rassine=True
+        use_rassine=False
     )

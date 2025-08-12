@@ -1,6 +1,6 @@
 import h5py
 import numpy as np
-from src.dataset import _normalize_spectrum_with_rassine
+from src.rassine import normalize_batch_with_rassine
 import json
 import os
 
@@ -11,38 +11,6 @@ indices_to_remove = [246, 249, 1196, 1453, 2176]
 wave = np.load("data/soap_gpu_paper/spec_master.npz")["wavelength"]
 indices_to_remove = np.asarray(indices_to_remove, dtype=int)
 chunk_size = 100
-rassine_config = {
-    "axes_stretching": "auto_0.3",
-    "vicinity_local_max": 5,
-    "smoothing_box": 3,
-    "smoothing_kernel": "gaussian",
-    "fwhm_ccf": "auto",
-    "CCF_mask": "master",
-    "RV_sys": 0,
-    "mask_telluric": [[6275, 6330], [6470, 6577], [6866, 8000]],
-    "mask_broadline": [[3960, 3980], [6560, 6562], [10034, 10064]],
-    "min_radius": "auto",
-    "max_radius": "auto",
-    "model_penality_radius": "poly_0.5",
-    "denoising_dist": 3,
-    "number_of_cut": 2,
-    "number_of_cut_outliers": 1,
-    "interpol": "linear",
-    "feedback": False,
-    "only_print_end": True,
-    "plot_end": False,
-    "save_last_plot": False,
-    "outputs_interpolation_save": "linear",
-    "outputs_denoising_save": "undenoised",
-    "light_file": True,
-    "speedup": 0.5,
-    "float_precision": "float64",
-    "column_wave": "wave",
-    "column_flux": "flux",
-    "synthetic_spectrum": False,
-    "anchor_file": "",
-}
-
 
 # -------------------- HELPERS --------------------
 def _safe_normalize(wave, flux, cfg):
@@ -132,11 +100,12 @@ with h5py.File(input_path, "r") as f_in:
                     )
 
         # Reprise: trouver la première ligne encore en NaN
-        resume_at = _first_nan_row(dset_out)
-        if resume_at >= n_keep:
-            print(f"✅ Déjà terminé : {output_path}")
-        else:
-            print(f"↻ Reprise au rang {resume_at}/{n_keep}")
+        # resume_at = _first_nan_row(dset_out)
+        # if resume_at >= n_keep:
+        #     print(f"✅ Déjà terminé : {output_path}")
+        # else:
+        #     print(f"↻ Reprise au rang {resume_at}/{n_keep}")
+        resume_at = 0
 
         # Boucle de traitement à partir de resume_at
         for start_out in range(resume_at, n_keep, chunk_size):
@@ -146,12 +115,9 @@ with h5py.File(input_path, "r") as f_in:
             # Lecture en bloc des flux
             block_flux = dset_in[block_idx_in, :]  # (B, n_pixels)
 
-            # Normalisation spectre par spectre (robuste + fallback)
-            for j in range(block_flux.shape[0]):
-                y = _safe_normalize(wave, block_flux[j, :], rassine_config)
-                dset_out[start_out + j, :] = (
-                    y  # écriture ligne par ligne (sécurise reprise fine)
-                )
+
+            Y = normalize_batch_with_rassine(wave, block_flux)
+            dset_out[start_out:end_out, :] = Y
 
             f_out.flush()  # flush à chaque bloc pour limiter la perte en cas de crash
 
