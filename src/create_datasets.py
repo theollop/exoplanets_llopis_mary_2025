@@ -757,7 +757,7 @@ if __name__ == "__main__":
         add_photon_noise=False,
         snr_target=None,
         noise_seed=None,
-        planets_amplitudes=[0.1],
+        planets_amplitudes=[1],
         planets_periods=[60.0],
         planets_phases=[0.0],
         batch_size=100,

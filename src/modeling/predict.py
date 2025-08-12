@@ -1182,37 +1182,49 @@ def main(
 
 if __name__ == "__main__":
     dset = SpectrumDataset(
-        dataset_filepath="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/npz_datasets/soapgpu_nst120_nsv120_5000-5050_dx2_sm3_p60_k0p1_phi0.npz",
+        dataset_filepath="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/npz_datasets/soapgpu_nst120_nsv120_5000-5050_dx2_sm3_p60_k1_phi0.npz",
         split="val",
         cuda=True,
     )
-    v_ref, depth, span, fwhm = get_vref(
-        dataset=dset,
-        CCF_params = {
-            "v_grid": np.arange(-20000, 20000, 250),
-            "window_size_velocity": 820,
-            "mask_type": "G2",
-            "verbose": False,
-            "batch_size": 100,
-            "normalize": True,
-        }
-    )
-
-    plt.figure(figsize=(10, 5))
-    plt.plot(dset.time_values.cpu().numpy(), v_ref, label="v_ref")
-    plt.xlabel("Time (days)")
-    plt.ylabel("Radial Velocity (m/s)")
-    plt.title("Reference Radial Velocity")
-    plt.legend()
-    plt.show()
-    # main(
-    #     experiment_dir="experiments/soapgpu_nst120_nsv120_5000-5050_dx2_sm3_p60_k0p1_phi0",
-    #     # fap_threshold=0.01,
-    #     # exclude_width_frac=0.05,
-    #     min_period=2.0,
-    #     max_period=120,
-    #     # n_periods=5000,
-    #     # zoom_frac=0.15,
-    #     # batch_size=64,
-    #     perturbation_value=0.1,
+    # v_ref, depth, span, fwhm = get_vref(
+    #     dataset=dset,
+    #     CCF_params = {
+    #         "v_grid": np.arange(-20000, 20000, 250),
+    #         "window_size_velocity": 820,
+    #         "mask_type": "G2",
+    #         "verbose": False,
+    #         "batch_size": 100,
+    #         "normalize": True,
+    #     }
     # )
+
+    # v_apparent, depth_apparent, span_apparent, fwhm_apparent = get_vapparent(
+    #     dataset=dset,
+    #     CCF_params = {
+    #         "v_grid": np.arange(-20000, 20000, 250),
+    #         "window_size_velocity": 820,
+    #         "mask_type": "G2",
+    #         "verbose": False,
+    #         "batch_size": 100,
+    #         "normalize": True,
+    #     }
+    # )
+
+    # plt.figure(figsize=(10, 5))
+    # plt.plot(dset.time_values.cpu().numpy(), v_apparent, label="v_ref")
+    # plt.xlabel("Time (days)")
+    # plt.ylabel("Radial Velocity (m/s)")
+    # plt.title("Reference Radial Velocity")
+    # plt.legend()
+    # plt.show()
+    main(
+        experiment_dir="experiments/soapgpu_nst120_nsv120_5000-5050_dx2_sm3_p60_k1_phi0",
+        # fap_threshold=0.01,
+        # exclude_width_frac=0.05,
+        min_period=2.0,
+        max_period=120,
+        # n_periods=5000,
+        # zoom_frac=0.15,
+        # batch_size=64,
+        perturbation_value=0.1,
+    )
