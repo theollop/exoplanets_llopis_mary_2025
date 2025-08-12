@@ -499,8 +499,10 @@ def create_soap_gpu_paper_dataset(
     spec_filepath,
     output_dir,
     output_filename=None,
-    idx_spectra_start=0,
-    idx_spectra_end=100,
+    idx_train_start=0,
+    idx_train_end=100,
+    idx_val_start=100,
+    idx_val_end=200,
     wavemin=5000,
     wavemax=5050,
     downscaling_factor=2,
@@ -509,7 +511,6 @@ def create_soap_gpu_paper_dataset(
     add_photon_noise=False,
     snr_target=None,
     noise_seed=None,
-    specs_to_remove=[246, 249, 1196, 1453, 2176],
     planets_amplitudes=None,
     planets_periods=None,
     planets_phases=None,
@@ -569,10 +570,34 @@ def create_soap_gpu_paper_dataset(
     wavegrid_masked = wavegrid[mask]
 
     # 3) Récupérer le nombre de spectres sélectionnés
-    n_spectra = idx_spectra_end - idx_spectra_start
+    n_spectra_train = idx_train_end - idx_train_start
+    if (
+        idx_val_start is None or idx_val_end is None
+    ):  # Il faut que les deux soient définis (si l'on veut sélectionner un extrême on prend 0 ou -1)
+        n_spectra_val = 0
+    else:
+        n_spectra_val = idx_val_end - idx_val_start
     with h5py.File(spectra_filepath, "r") as f:
         n_spectra_tot = f["spec_cube"].shape[0]
     time_values = np.arange(n_spectra_tot)
+
+    if (
+        "filtered" in spec_filepath
+    ):  # si filtered dans le path alors le cube est déjà filtré donc les indices suivant sont déjà enlevés pour ne pas perdre la cohérence avec le cube, on l'enlève du time values
+        specs_removed = [246, 249, 1196, 1453, 2176]
+        time_values = np.delete(time_values, specs_removed)
+
+    time_values_train = time_values[idx_train_start:idx_train_end]
+    time_values_val = (
+        time_values[idx_val_start:idx_val_end]
+        if idx_val_start is not None and idx_val_end is not None
+        else None
+    )
+    time_values_tot = (
+        np.concatenate([time_values_train, time_values_val], axis=0)
+        if time_values_val is not None
+        else time_values_train
+    )
 
     # ---------- NEW: auto-nom si output_filename manquant ----------
     def _slugify(text: str, max_len: int = 80) -> str:
@@ -604,7 +629,8 @@ def create_soap_gpu_paper_dataset(
             default_out_dir = os.path.join("data", "npz_datasets")
 
         bits = [
-            f"ns{n_spectra}",
+            f"nst{n_spectra_train}",
+            f"nsv{n_spectra_val}",
             f"{int(wavemin)}-{int(wavemax)}",
         ]
         if downscaling_factor and downscaling_factor > 1:
@@ -627,6 +653,8 @@ def create_soap_gpu_paper_dataset(
         os.makedirs(default_out_dir, exist_ok=True)
         output_filepath = os.path.join(default_out_dir, filename)
         print(f"🧾 Nom auto du dataset: {output_filepath}")
+    else:
+        output_filepath = os.path.join(output_dir, output_filename)
     # ---------- /NEW ------------------------------------------------
 
     # 3) Chargement des spectres par chunks pour éviter les problèmes de mémoire
@@ -634,25 +662,20 @@ def create_soap_gpu_paper_dataset(
 
     # Estimer la taille de données à charger
     with h5py.File(spectra_filepath, "r") as f:
-        spectra_masked = f["spec_cube"][idx_spectra_start:idx_spectra_end, mask]
+        spectra_train = f["spec_cube"][idx_train_start:idx_train_end, mask]
 
-        if specs_to_remove:
-            print(f"⚠️ Suppression des spectres {specs_to_remove} du template")
-            specs_to_remove = np.array(specs_to_remove)
-            specs_to_remove_filtered = []
-            for spec_idx in specs_to_remove:
-                if idx_spectra_start <= spec_idx < idx_spectra_end:
-                    specs_to_remove_filtered.append(spec_idx - idx_spectra_start)
-            if specs_to_remove_filtered:
-                spectra_masked = np.delete(
-                    spectra_masked, specs_to_remove_filtered, axis=0
-                )
-                time_values = np.delete(time_values, specs_to_remove_filtered)
-                time_values = time_values[idx_spectra_start:idx_spectra_end]
-                # Update n_spectra to reflect the actual number of spectra after removal
-                n_spectra = spectra_masked.shape[0]
+        if n_spectra_val > 0:
+            spectra_val = f["spec_cube"][idx_val_start:idx_val_end, mask]
 
-    print(f"Données chargées: {n_spectra} spectres, {wavegrid_masked.size} pixels")
+        spectra_tot = (
+            np.concatenate([spectra_train, spectra_val], axis=0)
+            if n_spectra_val > 0
+            else spectra_train
+        )
+
+    print(
+        f"Données chargées: {n_spectra_tot} spectres \n{n_spectra_train} Train | {n_spectra_val} Val\n{wavegrid_masked.size} pixels"
+    )
     print(f"Gamme spectrale: {wavemin:.1f} - {wavemax:.1f} Å")
 
     # 4) Normalisation avec Rassine (optionnel)
@@ -711,18 +734,18 @@ def create_soap_gpu_paper_dataset(
 
             # Normalisation de chaque spectre du dataset par batches
             print(
-                f"Normalisation de {n_spectra} spectres par batches de {batch_size}..."
+                f"Normalisation de {n_spectra_tot} spectres par batches de {batch_size}..."
             )
-            spectra_normalized = np.zeros_like(spectra_masked)
+            spectra_normalized = np.zeros_like(spectra_tot)
 
-            for i in range(0, n_spectra, batch_size):
-                end_idx = min(i + batch_size, n_spectra)
+            for i in range(0, n_spectra_tot, batch_size):
+                end_idx = min(i + batch_size, n_spectra_tot)
                 print(f"  Batch {i // batch_size + 1}: spectres {i + 1}-{end_idx}")
 
                 # Traiter chaque spectre du batch
                 for j in range(i, end_idx):
                     spectra_normalized[j] = _normalize_spectrum_with_rassine(
-                        wavegrid_masked, spectra_masked[j], default_rassine_config
+                        wavegrid_masked, spectra_tot[j], default_rassine_config
                     )
 
                 # Nettoyer le cache mémoire périodiquement
@@ -737,16 +760,18 @@ def create_soap_gpu_paper_dataset(
             print(f"❌ Erreur d'import Rassine: {e}")
             print("Continuera sans normalisation...")
             template_normalized = template_masked
-            spectra_normalized = spectra_masked
+            spectra_normalized = spectra_tot
         except Exception as e:
             print(f"❌ Erreur lors de la normalisation Rassine: {e}")
             print("Continuera sans normalisation...")
             template_normalized = template_masked
-            spectra_normalized = spectra_masked
+            spectra_normalized = spectra_tot
     else:
         print("Pas de normalisation demandée")
-        template_normalized = template_masked / np.max(template_masked)
-        spectra_normalized = spectra_masked
+        template_normalized = template_masked / np.max(
+            template_masked
+        )  # template non normalisé mais dataset déjà normalisé
+        spectra_normalized = spectra_tot
 
     # 5) Calcul du nombre de bins complets pour le downscaling
     Npix = wavegrid_masked.size
@@ -761,7 +786,7 @@ def create_soap_gpu_paper_dataset(
     wavegrid_trim = wavegrid_masked[:trim].reshape(n_bins, downscaling_factor)
     template_trim = template_normalized[:trim].reshape(n_bins, downscaling_factor)
     spectra_trim = spectra_normalized[:, :trim].reshape(
-        n_spectra, n_bins, downscaling_factor
+        n_spectra_tot, n_bins, downscaling_factor
     )
 
     wavegrid_ds = wavegrid_trim.mean(axis=1)
@@ -779,7 +804,7 @@ def create_soap_gpu_paper_dataset(
         )
 
         # Lissage des spectres
-        for i in range(n_spectra):
+        for i in range(n_spectra_tot):
             spectra_ds[i] = uniform_filter1d(
                 spectra_ds[i], size=smooth_kernel_size, mode="reflect"
             )
@@ -801,10 +826,10 @@ def create_soap_gpu_paper_dataset(
         template_ds = _add_photon_noise(template_ds, snr_target)
 
         # Ajouter du bruit à chaque spectre du dataset
-        print(f"   Ajout de bruit à {n_spectra} spectres...")
-        for i in range(n_spectra):
+        print(f"   Ajout de bruit à {n_spectra_tot} spectres...")
+        for i in range(n_spectra_tot):
             if i % 500 == 0 and i > 0:
-                print(f"     Spectre {i}/{n_spectra}")
+                print(f"     Spectre {i}/{n_spectra_tot}")
             spectra_ds[i] = _add_photon_noise(spectra_ds[i], snr_target)
 
         print("✅ Bruit photonique ajouté")
@@ -820,7 +845,7 @@ def create_soap_gpu_paper_dataset(
         spectra_ds = inject_dataset(
             spectra=torch.tensor(spectra_ds, device="cuda"),
             wavegrid=torch.tensor(wavegrid_ds, device="cuda"),
-            time_values=time_values,
+            time_values=time_values_tot,
             planets_amplitudes=planets_amplitudes,
             planets_periods=planets_periods,
             planets_phases=planets_phases,
@@ -835,9 +860,9 @@ def create_soap_gpu_paper_dataset(
         spectra_ds_no_activity = inject_dataset(
             spectra=torch.tensor(template_ds, device="cuda")
             .unsqueeze(0)
-            .repeat(n_spectra, 1),
+            .repeat(n_spectra_tot, 1),
             wavegrid=torch.tensor(wavegrid_ds, device="cuda"),
-            time_values=time_values,
+            time_values=time_values_tot,
             planets_amplitudes=planets_amplitudes,
             planets_periods=planets_periods,
             planets_phases=planets_phases,
@@ -851,7 +876,9 @@ def create_soap_gpu_paper_dataset(
     print("\n💾 Sauvegarde des données...")
     # Métadonnées standardisées
     metadata = {
-        "n_spectra": int(n_spectra),
+        "n_spectra": int(n_spectra_tot),
+        "n_spectra_train": int(n_spectra_train),
+        "n_spectra_val": int(n_spectra_val),
         "n_pixels": int(len(wavegrid_ds)),
         "wavemin": float(wavemin),
         "wavemax": float(wavemax),
@@ -871,23 +898,37 @@ def create_soap_gpu_paper_dataset(
         "batch_size": int(batch_size),
     }
 
+    spectra_ds_train = spectra_ds[:n_spectra_train]
+    spectra_ds_val = spectra_ds[n_spectra_train : n_spectra_train + n_spectra_val]
+    activity_ds_train = activity_ds[:n_spectra_train]
+    activity_ds_val = activity_ds[n_spectra_train : n_spectra_train + n_spectra_val]
+
     save_data = {
         "wavegrid": wavegrid_ds,
         "template": template_ds,
-        "spectra": spectra_ds,
-        "activity": activity_ds,
-        "time_values": time_values[:n_spectra],
+        "spectra_train": spectra_ds_train,
+        "spectra_val": spectra_ds_val,
+        "activity_train": activity_ds_train,
+        "activity_val": activity_ds_val,
+        "time_values_train": time_values_train,
+        "time_values_val": time_values_val,
         "metadata": metadata,
     }
 
     # Ajouter les spectres sans activité seulement s'ils existent
     if spectra_ds_no_activity is not None:
-        save_data["spectra_no_activity"] = spectra_ds_no_activity
+        spectra_ds_no_activity_train = spectra_ds_no_activity[:n_spectra_train]
+        spectra_ds_no_activity_val = spectra_ds_no_activity[
+            n_spectra_train : n_spectra_train + n_spectra_val
+        ]
+        save_data["spectra_no_activity_train"] = spectra_ds_no_activity_train
+        if spectra_ds_no_activity_val is not None:
+            save_data["spectra_no_activity_val"] = spectra_ds_no_activity_val
 
     np.savez_compressed(output_filepath, **save_data)
 
     # Nettoyage final de la mémoire
-    del spectra_masked, spectra_normalized, spectra_ds, template_normalized
+    del spectra_tot, spectra_normalized, spectra_ds, template_normalized
     if spectra_ds_no_activity is not None:
         del spectra_ds_no_activity
 
@@ -899,7 +940,9 @@ def create_soap_gpu_paper_dataset(
         torch.cuda.empty_cache()
 
     print(f"💾 Fichier de sortie créé: {output_filepath}")
-    print(f"   - {n_spectra} spectres")
+    print(
+        f"   - {n_spectra_tot} spectres - {n_spectra_train} train / {n_spectra_val} val"
+    )
     print(f"   - {n_bins} pixels spectraux")
     print(f"   - Gamme: {wavegrid_ds.min():.1f} - {wavegrid_ds.max():.1f} Å")
     print("🧹 Nettoyage mémoire terminé")
