@@ -702,7 +702,7 @@ if __name__ == "__main__":
         idx_start=0,
         idx_end=1000,
         wavemin=5000,
-        wavemax=5050,
+        wavemax=5500,
         downscaling_factor=2,
         smooth_after_downscaling=True,
         smooth_kernel_size=3,

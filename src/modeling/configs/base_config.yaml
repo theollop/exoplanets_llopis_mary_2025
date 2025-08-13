@@ -8,9 +8,9 @@
 # --------------------------------------------------------------------------
 # Données
 # --------------------------------------------------------------------------
-experiment_name: "aug_6_no_scheduler"                 # Nom de l'expérience (créera un sous-dossier)
+experiment_name: "aug_6_no_scheduler_5500"                 # Nom de l'expérience (créera un sous-dossier)
 
-dataset_filepath: "data/npz_datasets/soapgpu_ns1000_5000-5050_dx2_sm3_p60_k1_phi0.npz"  # Chemin complet du NPZ standardisé
+dataset_filepath: "data/npz_datasets/soapgpu_ns1000_5000-5500_dx2_sm3_p60_k0p1_phi0.npz"  # Chemin complet du NPZ standardisé
 output_root_dir: "experiments"                                # Répertoire racine pour tous les outputs (local)
 
 data_dtype: float32       # Type numpy/torch du tableau des spectres (float16/float32/float64)
@@ -20,7 +20,7 @@ checkpoint_every: 100       # Fréquence de sauvegarde des checkpoints (en epoch
 # --------------------------------------------------------------------------
 # DataLoader
 # --------------------------------------------------------------------------
-batch_size: 32            # Nombre d'échantillons par batch
+batch_size: 16            # Nombre d'échantillons par batch
 shuffle: false            # True pour mélanger à chaque epoch
 
 # --------------------------------------------------------------------------

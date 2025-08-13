@@ -371,7 +371,7 @@ def _get_planet_window_mask(periods, P_inj, exclude_width_frac=0.05):
 
 
 def _analyze_planet_detection(
-    periods, power, mask_planet_window, P_inj, ls, ls_method="baluev"
+    periods, power, mask_planet_window, P_inj, ls, ls_method="bootstrap"
 ):
     """Analyze planet detection metrics within the planet window."""
     if P_inj is None or P_inj <= 0:
@@ -387,7 +387,11 @@ def _analyze_planet_detection(
     P_planet_power = power[i_best]
 
     # Calculate FAP and power ratio
-    fap_at_Pinj = float(ls.false_alarm_probability(P_planet_power, method=ls_method))
+    fap_at_Pinj = float(
+        ls.false_alarm_probability(
+            P_planet_power, method="bootstrap", method_kwds={"n_bootstraps": 1000}
+        )
+    )
 
     power_ratio = None
     if np.any(~mask_planet_window):
@@ -407,7 +411,7 @@ def _count_significant_peaks_outside(
     ls,
     fap_threshold=0.01,
     peak_prominence=None,
-    ls_method="baluev",
+    ls_method="bootstrap",
 ):
     """Count significant peaks outside the planet window."""
     if peak_prominence is None:
@@ -419,7 +423,9 @@ def _count_significant_peaks_outside(
     if peaks_out.size == 0:
         return 0
 
-    faps_out = ls.false_alarm_probability(power_out[peaks_out], method=ls_method)
+    faps_out = ls.false_alarm_probability(
+        power_out[peaks_out], method="bootstrap", method_kwds={"n_bootstraps": 1000}
+    )
     return int(np.sum(faps_out < fap_threshold))
 
 
@@ -433,7 +439,7 @@ def compute_periodogram_metrics(
     fap_threshold=0.01,
     exclude_width_frac=0.05,
     peak_prominence=None,
-    ls_method="baluev",
+    ls_method="bootstrap",
     fit_mean=True,
     center_data=True,
 ):
