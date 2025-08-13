@@ -8,9 +8,9 @@
 # --------------------------------------------------------------------------
 # Données
 # --------------------------------------------------------------------------
-# experiment_name: "exp1"                 # Nom de l'expérience (créera un sous-dossier)
+experiment_name: "aug_6_no_scheduler"                 # Nom de l'expérience (créera un sous-dossier)
 
-dataset_filepath: "data/npz_datasets/soapgpu_nst120_nsv120_5000-5050_dx2_sm3_p60_k1_phi0.npz"  # Chemin complet du NPZ standardisé
+dataset_filepath: "data/npz_datasets/soapgpu_ns1000_5000-5050_dx2_sm3_p60_k1_phi0.npz"  # Chemin complet du NPZ standardisé
 output_root_dir: "experiments"                                # Répertoire racine pour tous les outputs (local)
 
 data_dtype: float32       # Type numpy/torch du tableau des spectres (float16/float32/float64)
@@ -27,8 +27,8 @@ shuffle: false            # True pour mélanger à chaque epoch
 # Augmentation
 # --------------------------------------------------------------------------
 M_aug: 1                  # Combien de versions augmentées par spectre
-vmin: -3                  # Vitesse min (m/s) pour décalage Doppler
-vmax: +3                  # Vitesse max (m/s)
+vmin: -6                  # Vitesse min (m/s) pour décalage Doppler
+vmax: +6                  # Vitesse max (m/s)
 interpolate: "linear"     # Méthode d'interpolation
 extrapolate: "linear"     # Méthode d'extrapolation hors bornes
 out_dtype: float32        # Type de sortie des spectres augmentés (float16 économise ~50% mémoire GPU)
@@ -80,7 +80,7 @@ phases:
     # early_stopping:
     #   patience: 20
     #   min_delta: 1e-6
-    #   metric: "total"
+    #   metric: "total" 
     #   mode: "min"
     #   restore_best_weights: true
     
@@ -90,10 +90,10 @@ phases:
     optimizer_kwargs:
       lr: 0.0001
       weight_decay: 0.0
-    scheduler: "torch.optim.lr_scheduler.StepLR"
-    scheduler_kwargs:
-      step_size: 50
-      gamma: 0.7
+    # scheduler: "torch.optim.lr_scheduler.StepLR"
+    # scheduler_kwargs:
+    #   step_size: 50
+    #   gamma: 0.7
     b_obs_trainable: false
     b_rest_trainable: true
     plot_activity_every: 20

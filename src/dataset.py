@@ -1,20 +1,8 @@
 import os
-import pickle
-import re  # <-- NEW: local import pour le slug
-import sys
-import tempfile
-import unicodedata
-from dataclasses import dataclass
-from typing import Any, Dict, Optional, Sequence, Tuple
-
-import h5py
 import numpy as np
-import pandas as pd
 import torch
 from torch.utils.data import Dataset
-
-from src.interpolate import augment_spectra_uniform, shift_spectra_linear
-from src.utils import get_free_memory
+from src.interpolate import augment_spectra_uniform
 
 ##############################################################################
 ##############################################################################
@@ -85,25 +73,31 @@ def check_system_resources():
 
 # * -- Classe principale standardisée: charge UNIQUEMENT un NPZ depuis data/npz_datasets --
 def _to_tensor(x, dtype):
-    return torch.tensor(x).to(dtype=dtype).contiguous() if x is not None else None
+    if x is None:
+        return None
+    if isinstance(x, np.ndarray):
+        t = torch.from_numpy(x)
+        return t.to(dtype=dtype, copy=False).contiguous()
+    return torch.tensor(x, dtype=dtype).contiguous()
+
 
 class SpectrumDataset(Dataset):
     """
-    Dataset pour charger des spectres depuis un .npz 'nouveau format'.
+    Dataset pour charger des spectres depuis un .npz (format harmonisé, un seul split).
 
-    Clés attendues:
-      - wavegrid (P,), template (P,)
-      - spectra_train (Ntr,P), spectra_val (Nv,P)
-      - time_values_train (Ntr,), time_values_val (Nv,)
-      - Optionnel: activity_train/val, spectra_no_activity_train/val, v_true_train/val
-      - metadata (dict) incluant: n_spectra_train, n_spectra_val, n_pixels, wavemin, wavemax,
-        planets_periods, planets_amplitudes, planets_phases (pour fallback v_true)
+        Clés attendues:
+            - wavegrid (P,), template (P,)
+            - spectra (N,P)
+            - time_values (N,)
+            - Optionnel: activity, spectra_no_activity, v_true
+            - metadata (dict) incluant: n_spectra, n_pixels, wavemin, wavemax,
+                planets_periods, planets_amplitudes, planets_phases (pour fallback v_true)
     """
 
     def __init__(
         self,
         dataset_filepath: str,
-        split: str = "train",          # "train" | "val" | "all"
+        split: str = "all",  # ignoré, conservé pour compatibilité API
         data_dtype: torch.dtype = torch.float32,
         cuda: bool = True,
     ):
@@ -113,7 +107,7 @@ class SpectrumDataset(Dataset):
             raise FileNotFoundError(f"NPZ dataset not found: {dataset_filepath}")
 
         self.dataset_filepath = dataset_filepath
-        self.split = split
+        self.split = split  # ignoré, conservé pour compatibilité
         self.data_dtype = data_dtype
 
         self._init_from_npz(dataset_filepath, data_dtype)
@@ -137,35 +131,18 @@ class SpectrumDataset(Dataset):
         template_np = ds["template"]
 
         # --- Sélection split ---
+
         def pick(name):
-            # name sans suffixe, ex: "spectra", "time_values", "activity", "spectra_no_activity", "v_true"
-            if self.split == "train":
-                key = f"{name}_train"
-                return ds[key] if key in ds.files else None
-            elif self.split == "val":
-                key = f"{name}_val"
-                return ds[key] if key in ds.files else None
-            elif self.split == "all":
-                ktr, kval = f"{name}_train", f"{name}_val"
-                a = ds[ktr] if ktr in ds.files else None
-                b = ds[kval] if kval in ds.files else None
-                if a is None and b is None:
-                    return None
-                if a is None:  return b
-                if b is None:  return a
-                # Concat sur l'axe 0 si 2D, sinon 1D
-                axis = 0 if a.ndim > 1 else 0
-                return np.concatenate([a, b], axis=axis)
-            else:
-                raise ValueError("split doit être 'train', 'val' ou 'all'.")
+            # Accès direct à la clé (plus de split)
+            return ds[name] if name in ds.files else None
 
         spectra_np = pick("spectra")
         if spectra_np is None:
-            raise KeyError(f"Clés '{'spectra_train/val'}' manquantes pour split={self.split}.")
+            raise KeyError("Clé 'spectra' manquante dans le npz.")
 
         time_values_np = pick("time_values")
         if time_values_np is None:
-            raise KeyError(f"Clés '{'time_values_train/val'}' manquantes pour split={self.split}.")
+            raise KeyError("Clé 'time_values' manquante dans le npz.")
 
         activity_np = pick("activity")
         spectra_no_activity_np = pick("spectra_no_activity")
@@ -201,16 +178,26 @@ class SpectrumDataset(Dataset):
         # Tailles / bornes
         self.n_spectra = self.spectra.shape[0]
         self.n_pixels = self.spectra.shape[1]
-        self.wavemin = float(self.metadata.get("wavemin", float(self.wavegrid.min().item())))
-        self.wavemax = float(self.metadata.get("wavemax", float(self.wavegrid.max().item())))
+        self.wavemin = float(
+            self.metadata.get("wavemin", float(self.wavegrid.min().item()))
+        )
+        self.wavemax = float(
+            self.metadata.get("wavemax", float(self.wavegrid.max().item()))
+        )
 
         # Sanity checks rapides
-        assert self.time_values.shape[0] == self.n_spectra, "time_values et spectra désalignés"
+        assert self.time_values.shape[0] == self.n_spectra, (
+            "time_values et spectra désalignés"
+        )
         assert self.v_true.shape[0] == self.n_spectra, "v_true et spectra désalignés"
         if self.activity is not None:
-            assert self.activity.shape == self.spectra.shape, "activity et spectra doivent avoir la même forme"
+            assert self.activity.shape == self.spectra.shape, (
+                "activity et spectra doivent avoir la même forme"
+            )
         if self.spectra_no_activity is not None:
-            assert self.spectra_no_activity.shape == self.spectra.shape, "spectra_no_activity et spectra doivent avoir la même forme"
+            assert self.spectra_no_activity.shape == self.spectra.shape, (
+                "spectra_no_activity et spectra doivent avoir la même forme"
+            )
 
     # --------- API Dataset ----------
     def __len__(self):
@@ -225,11 +212,25 @@ class SpectrumDataset(Dataset):
     def _estimate_memory_usage(self):
         def mb(t):
             return 0 if t is None else t.numel() * t.element_size() / (1024 * 1024)
-        return mb(self.spectra) + mb(self.wavegrid) + mb(self.template) + mb(self.time_values)
+
+        return (
+            mb(self.spectra)
+            + mb(self.wavegrid)
+            + mb(self.template)
+            + mb(self.time_values)
+        )
 
     def move_to_cuda(self):
         if torch.cuda.is_available():
-            for name in ["spectra","wavegrid","template","time_values","activity","spectra_no_activity","v_true"]:
+            for name in [
+                "spectra",
+                "wavegrid",
+                "template",
+                "time_values",
+                "activity",
+                "spectra_no_activity",
+                "v_true",
+            ]:
                 t = getattr(self, name, None)
                 if t is not None:
                     setattr(self, name, t.cuda())
@@ -239,17 +240,29 @@ class SpectrumDataset(Dataset):
             t = getattr(self, name, None)
             if t is not None:
                 setattr(self, name, t.to(dtype=new_dtype))
+
         old = self._estimate_memory_usage()
-        for k in ["spectra","wavegrid","template","time_values","activity","spectra_no_activity","v_true"]:
+        for k in [
+            "spectra",
+            "wavegrid",
+            "template",
+            "time_values",
+            "activity",
+            "spectra_no_activity",
+            "v_true",
+        ]:
             cast(k)
         self.data_dtype = new_dtype
         new = self._estimate_memory_usage()
-        print(f"Conversion dtype: {old:.2f} -> {new:.2f} MB (-{(old-new)/old*100:.1f}%)")
+        print(
+            f"Conversion dtype: {old:.2f} -> {new:.2f} MB (-{(old - new) / old * 100:.1f}%)"
+        )
         return self
 
     def __repr__(self):
         def shape_dtype(t):
             return f"{tuple(t.shape)} | {t.dtype}" if t is not None else "None"
+
         return (
             f"\n======== SpectrumDataset ({self.split}) ========\n"
             f"n_spectra={self.n_spectra}, n_pixels={self.n_pixels}\n"
@@ -272,6 +285,7 @@ class SpectrumDataset(Dataset):
             "data_dtype": self.data_dtype,
             "cuda": self.spectra.is_cuda,
         }
+
 
 # * -- Fonction de collate pour le DataLoader (simplifie la vie) --
 def generate_collate_fn(

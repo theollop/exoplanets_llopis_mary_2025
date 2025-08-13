@@ -896,6 +896,23 @@ def main(
             else []
         )
 
+        # Calcul du seuil FAP empirique (bootstrap)
+        try:
+            fap_level_bootstrap = ls.false_alarm_level(
+                fap_threshold,
+                method="bootstrap",
+                minimum_frequency=1.0 / periods.max(),
+                maximum_frequency=1.0 / periods.min(),
+                samples_per_peak=10,
+                method_kwds={"n_bootstraps": 1000},
+            )
+            print(
+                f"Niveau de puissance pour FAP={fap_threshold} (bootstrap): {fap_level_bootstrap}"
+            )
+        except Exception as e:
+            fap_level_bootstrap = None
+            print(f"Erreur calcul FAP bootstrap: {e}")
+
         plot_periodogram(
             periods=periods,
             power=power,
@@ -906,6 +923,7 @@ def main(
             title=f"LS Periodogram - {name}",
             save_path=os.path.join(fig_periodo_rv, f"{name}.png"),
             show_plot=False,
+            fap_level_bootstrap=fap_level_bootstrap,
         )
 
         if dataset.planet_periods:
@@ -963,6 +981,23 @@ def main(
             else []
         )
 
+        # Calcul du seuil FAP empirique (bootstrap)
+        try:
+            fap_level_bootstrap = ls.false_alarm_level(
+                fap_threshold,
+                method="bootstrap",
+                minimum_frequency=1.0 / periods.max(),
+                maximum_frequency=1.0 / periods.min(),
+                samples_per_peak=10,
+                method_kwds={"n_bootstraps": 1000},
+            )
+            print(
+                f"Niveau de puissance pour FAP={fap_threshold} (bootstrap): {fap_level_bootstrap}"
+            )
+        except Exception as e:
+            fap_level_bootstrap = None
+            print(f"Erreur calcul FAP bootstrap: {e}")
+
         plot_periodogram(
             periods=periods,
             power=power,
@@ -973,6 +1008,7 @@ def main(
             title=f"LS Periodogram - {name}",
             save_path=os.path.join(fig_periodo_latent, f"{name}.png"),
             show_plot=False,
+            fap_level_bootstrap=fap_level_bootstrap,
         )
 
         if dataset.planet_periods:
@@ -1181,11 +1217,11 @@ def main(
 
 
 if __name__ == "__main__":
-    dset = SpectrumDataset(
-        dataset_filepath="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/npz_datasets/soapgpu_nst120_nsv120_5000-5050_dx2_sm3_p60_k1_phi0.npz",
-        split="val",
-        cuda=True,
-    )
+    # dset = SpectrumDataset(
+    #     dataset_filepath="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/npz_datasets/soapgpu_nst120_nsv120_5000-5050_dx2_sm3_p60_k1_phi0.npz",
+    #     split="val",
+    #     cuda=True,
+    # )
     # v_ref, depth, span, fwhm = get_vref(
     #     dataset=dset,
     #     CCF_params = {
@@ -1218,7 +1254,7 @@ if __name__ == "__main__":
     # plt.legend()
     # plt.show()
     main(
-        experiment_dir="experiments/soapgpu_nst120_nsv120_5000-5050_dx2_sm3_p60_k1_phi0",
+        experiment_dir="experiments/aug_6",
         # fap_threshold=0.01,
         # exclude_width_frac=0.05,
         min_period=2.0,

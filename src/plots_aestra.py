@@ -81,7 +81,9 @@ def plot_losses(losses_history, phase_name, epoch, plot_dir, console):
     # Plot 1: RV Loss
     axes[0, 0].plot(epochs, losses_history["rv"], "b-", linewidth=2, label="RV Loss")
     if "rv_val" in losses_history:
-        axes[0, 0].plot(epochs, losses_history["rv_val"], "b--", linewidth=2, label="RV Val Loss")
+        axes[0, 0].plot(
+            epochs, losses_history["rv_val"], "b--", linewidth=2, label="RV Val Loss"
+        )
     axes[0, 0].set_xlabel("Epoch")
     axes[0, 0].set_ylabel("RV Loss")
     axes[0, 0].set_title("Radial Velocity Loss")
@@ -95,7 +97,11 @@ def plot_losses(losses_history, phase_name, epoch, plot_dir, console):
     )
     if "fid_val" in losses_history:
         axes[0, 1].plot(
-            epochs, losses_history["fid_val"], "r--", linewidth=2, label="Fidelity Val Loss"
+            epochs,
+            losses_history["fid_val"],
+            "r--",
+            linewidth=2,
+            label="Fidelity Val Loss",
         )
     axes[0, 1].set_xlabel("Epoch")
     axes[0, 1].set_ylabel("Fidelity Loss")
@@ -110,7 +116,11 @@ def plot_losses(losses_history, phase_name, epoch, plot_dir, console):
     )
     if "reg_val" in losses_history:
         axes[0, 2].plot(
-            epochs, losses_history["reg_val"], "m--", linewidth=2, label="Regularization Val Loss"
+            epochs,
+            losses_history["reg_val"],
+            "m--",
+            linewidth=2,
+            label="Regularization Val Loss",
         )
     axes[0, 2].set_xlabel("Epoch")
     axes[0, 2].set_ylabel("Regularization Loss")
@@ -125,7 +135,11 @@ def plot_losses(losses_history, phase_name, epoch, plot_dir, console):
     )
     if "c_val" in losses_history:
         axes[1, 0].plot(
-            epochs, losses_history["c_val"], "g--", linewidth=2, label="Consistency Val Loss"
+            epochs,
+            losses_history["c_val"],
+            "g--",
+            linewidth=2,
+            label="Consistency Val Loss",
         )
     axes[1, 0].set_xlabel("Epoch")
     axes[1, 0].set_ylabel("Consistency Loss")
@@ -1577,6 +1591,7 @@ def plot_periodogram(
     save_path=None,
     show_plot=False,
     xlim=None,
+    fap_level_bootstrap=None,
 ):
     """
     Plot periodogram with detection metrics and annotations.
@@ -1602,7 +1617,7 @@ def plot_periodogram(
     if max_power <= 0:
         max_power = 1.0
 
-    # FAP horizontal level
+    # FAP horizontal level (analytique)
     fap_level = max_power * fap_threshold
     if np.isfinite(fap_level) and fap_level > 0:
         ax.axhline(
@@ -1610,7 +1625,17 @@ def plot_periodogram(
             ls="--",
             lw=1.2,
             color="red",
-            label=f"Seuil FAP = {int(fap_threshold * 100)}%",
+            label=f"Seuil FAP = {int(fap_threshold * 100)}% (analytique)",
+        )
+
+    # FAP bootstrap (empirique)
+    if fap_level_bootstrap is not None and np.isfinite(fap_level_bootstrap):
+        ax.axhline(
+            fap_level_bootstrap,
+            ls=":",
+            lw=1.5,
+            color="green",
+            label=f"Seuil FAP bootstrap ({int(fap_threshold * 100)}%)",
         )
 
     # Handle multiple injected periods and draw bands + markers

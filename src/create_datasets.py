@@ -25,10 +25,8 @@ from src.rassine import normalize_batch_with_rassine, normalize_with_rassine
 
 @dataclass
 class IndexSplit:
-    train_start: int
-    train_end: int
-    val_start: Optional[int] = None
-    val_end: Optional[int] = None
+    start: int
+    end: int
 
 
 @dataclass
@@ -80,15 +78,14 @@ def _fmt_list(lst: Sequence[float]) -> str:
 
 def auto_filename(
     output_dir: str,
-    n_train: int,
-    n_val: int,
+    n_spectra: int,
     wavemin: float,
     wavemax: float,
     prep: PreprocessParams,
     noise: NoiseParams,
     planets: Optional[PlanetParams],
 ) -> str:
-    bits = [f"nst{n_train}", f"nsv{n_val}", f"{int(wavemin)}-{int(wavemax)}"]
+    bits = [f"ns{n_spectra}", f"{int(wavemin)}-{int(wavemax)}"]
     if prep.downscaling_factor and prep.downscaling_factor > 1:
         bits.append(f"dx{prep.downscaling_factor}")
     if prep.smooth_after_downscaling:
@@ -130,15 +127,11 @@ def load_spectra_selection(
     spectra_filepath: str,
     mask: np.ndarray,
     split: IndexSplit,
-) -> Tuple[np.ndarray, Optional[np.ndarray], np.ndarray, int]:
-    """Retourne spectra_train, spectra_val (ou None), time_values_sel_concat, n_file_total."""
+) -> Tuple[np.ndarray, np.ndarray, int]:
+    """Retourne spectra, time_values, n_file_total."""
     with h5py.File(spectra_filepath, "r") as f:
         n_file_total = f["spec_cube"].shape[0]
-        spectra_train = f["spec_cube"][split.train_start : split.train_end, :][:, mask]
-        if split.val_start is not None and split.val_end is not None:
-            spectra_val = f["spec_cube"][split.val_start : split.val_end, :][:, mask]
-        else:
-            spectra_val = None
+        spectra = f["spec_cube"][split.start : split.end, :][:, mask]
 
     n_tot_indices = np.arange(n_file_total)
     if "filtered" in spectra_filepath:
@@ -146,20 +139,9 @@ def load_spectra_selection(
         removed = np.array([246, 249, 1196, 1453, 2176], dtype=int)
         n_tot_indices = np.delete(n_tot_indices, removed)
 
-    t_train = n_tot_indices[split.train_start : split.train_end]
-    t_val = (
-        n_tot_indices[split.val_start : split.val_end]
-        if split.val_start is not None and split.val_end is not None
-        else np.array([], dtype=t_train.dtype)
-    )
-    t_all = np.concatenate([t_train, t_val])
-    spectra_sel = (
-        spectra_train
-        if spectra_val is None
-        else np.concatenate([spectra_train, spectra_val], axis=0)
-    )
-    assert t_all.shape[0] == spectra_sel.shape[0], "Mismatch time vs spectra selection"
-    return spectra_sel, spectra_val, t_all, n_file_total
+    t_indices = n_tot_indices[split.start : split.end]
+    assert t_indices.shape[0] == spectra.shape[0], "Mismatch time vs spectra selection"
+    return spectra, t_indices, n_file_total
 
 
 # ============================================================
@@ -479,9 +461,7 @@ def inject_with_velocities(
 
 def build_metadata(
     n_file_total: int,
-    n_sel: int,
-    n_train: int,
-    n_val: int,
+    n_spectra: int,
     wavemin: float,
     wavemax: float,
     wavegrid_ds: np.ndarray,
@@ -494,9 +474,7 @@ def build_metadata(
 ) -> Dict[str, Any]:
     return {
         "n_spectra_file": int(n_file_total),
-        "n_spectra": int(n_sel),
-        "n_spectra_train": int(n_train),
-        "n_spectra_val": int(n_val),
+        "n_spectra": int(n_spectra),
         "n_pixels": int(len(wavegrid_ds)),
         "wavemin": float(wavemin),
         "wavemax": float(wavemax),
@@ -533,10 +511,8 @@ def create_soap_gpu_paper_dataset(
     wavegrid_filepath: str,
     output_dir: str,
     output_filename: Optional[str] = None,
-    idx_train_start: int = 0,
-    idx_train_end: int = 100,
-    idx_val_start: Optional[int] = 100,
-    idx_val_end: Optional[int] = 200,
+    idx_start: int = 0,
+    idx_end: int = 100,
     wavemin: float = 5000,
     wavemax: float = 5050,
     downscaling_factor: int = 2,
@@ -565,31 +541,23 @@ def create_soap_gpu_paper_dataset(
     wavegrid_masked = wavegrid[mask]
 
     # ---- Split config
-    split = IndexSplit(idx_train_start, idx_train_end, idx_val_start, idx_val_end)
+    split = IndexSplit(idx_start, idx_end)
 
     # ---- Load spectra selection (+ time)
-    spectra_sel, spectra_val, time_values_tot, n_file_total = load_spectra_selection(
+    spectra, time_values, n_file_total = load_spectra_selection(
         spectra_filepath, mask, split
     )
-    n_train = split.train_end - split.train_start
-    n_val = (
-        0
-        if (split.val_start is None or split.val_end is None)
-        else (split.val_end - split.val_start)
-    )
-    n_sel = spectra_sel.shape[0]
-    print(
-        f"Données chargées: fichier={n_file_total} | sélection={n_sel} ({n_train} train / {n_val} val)"
-    )
+    n_spectra = split.end - split.start
+    print(f"Données chargées: fichier={n_file_total} | sélection={n_spectra} spectra")
     print(f"Gamme spectrale: {wavemin:.1f} - {wavemax:.1f} Å")
 
     if use_rassine:
         # ---- Normalisation avec Rassine ----*
         print("🐍 Normalisation des spectres avec Rassine...")
-        for i in range(0, n_sel, batch_size):
+        for i in range(0, n_spectra, batch_size):
             print(f"  Traitement du lot {i // batch_size + 1}...")
-            spectra_sel[i:i + batch_size] = normalize_batch_with_rassine(
-                wavegrid_masked, spectra_sel[i:i + batch_size]
+            spectra[i : i + batch_size] = normalize_batch_with_rassine(
+                wavegrid_masked, spectra[i : i + batch_size]
             )
         template_masked = normalize_with_rassine(wavegrid_masked, template_masked)
 
@@ -597,7 +565,7 @@ def create_soap_gpu_paper_dataset(
     Npix = wavegrid_masked.size
     wavegrid_ds = downscale_mean_1d(wavegrid_masked, downscaling_factor)
     template_ds = downscale_mean_1d(template_masked, downscaling_factor)
-    spectra_ds, n_bins = downscale_mean_2d(spectra_sel, downscaling_factor)
+    spectra_ds, n_bins = downscale_mean_2d(spectra, downscaling_factor)
     print(f"📐 Downscaling: {Npix} → {n_bins} (factor {downscaling_factor})")
 
     # ---- Optional smoothing
@@ -607,7 +575,6 @@ def create_soap_gpu_paper_dataset(
             template_ds, size=smooth_kernel_size, mode="reflect"
         )
         maybe_smooth_inplace(spectra_ds, size=smooth_kernel_size)
-
 
     # ---- Activity (pre-noise, pre-planets)
     activity_ds = compute_activity_pre_noise(spectra_ds, template_ds)
@@ -620,7 +587,7 @@ def create_soap_gpu_paper_dataset(
 
     # ---- Planets injection (optional)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    v_true_tot = np.zeros_like(time_values_tot)
+    v_true_tot = np.zeros_like(time_values)
     spectra_ds_no_activity = None
 
     if (
@@ -633,7 +600,7 @@ def create_soap_gpu_paper_dataset(
     ):
         print("🌌 Injection du signal planétaire...")
         planets = PlanetParams(planets_amplitudes, planets_periods, planets_phases)
-        v_np = compute_velocities(time_values_tot, planets)
+        v_np = compute_velocities(time_values, planets)
         v_true_tot = v_np
 
         # tensors
@@ -657,12 +624,9 @@ def create_soap_gpu_paper_dataset(
         spectra_ds_no_activity = spectra_noact_inj.detach().cpu().numpy()
 
     # ---- Train/val splits for save
-    spectra_train = spectra_ds[:n_train]
-    spectra_val = spectra_ds[n_train : n_train + n_val]
-    activity_train = activity_ds[:n_train]
-    activity_val = activity_ds[n_train : n_train + n_val]
-    v_true_train = v_true_tot[:n_train]
-    v_true_val = v_true_tot[n_train : n_train + n_val]
+    spectra_out = spectra_ds[:n_spectra]
+    activity_out = activity_ds[:n_spectra]
+    v_true_out = v_true_tot[:n_spectra]
 
     # ---- Output filename
     prep = PreprocessParams(
@@ -679,7 +643,7 @@ def create_soap_gpu_paper_dataset(
     )
     if not output_filename:
         output_filepath = auto_filename(
-            output_dir, n_train, n_val, wavemin, wavemax, prep, noise, planets_obj
+            output_dir, n_spectra, wavemin, wavemax, prep, noise, planets_obj
         )
     else:
         os.makedirs(output_dir, exist_ok=True)
@@ -688,9 +652,7 @@ def create_soap_gpu_paper_dataset(
     # ---- Save
     metadata = build_metadata(
         n_file_total,
-        n_sel,
-        n_train,
-        n_val,
+        n_spectra,
         wavemin,
         wavemax,
         wavegrid_ds,
@@ -705,27 +667,19 @@ def create_soap_gpu_paper_dataset(
     payload = {
         "wavegrid": wavegrid_ds,
         "template": template_ds,
-        "spectra_train": spectra_train,
-        "spectra_val": spectra_val,
-        "activity_train": activity_train,  # pré-bruit/pré-planètes
-        "activity_val": activity_val,
-        "time_values_train": time_values_tot[:n_train],
-        "time_values_val": time_values_tot[n_train : n_train + n_val],
-        "v_true_train": v_true_train,
-        "v_true_val": v_true_val,
+        "spectra": spectra_out,
+        "activity": activity_out,  # pré-bruit/pré-planètes
+        "time_values": time_values[:n_spectra],
+        "v_true": v_true_out,
         "metadata": metadata,
     }
     if spectra_ds_no_activity is not None:
-        payload["spectra_no_activity_train"] = spectra_ds_no_activity[:n_train]
-        if n_val > 0:
-            payload["spectra_no_activity_val"] = spectra_ds_no_activity[
-                n_train : n_train + n_val
-            ]
+        payload["spectra_no_activity"] = spectra_ds_no_activity[:n_spectra]
 
     save_npz(output_filepath, payload)
 
     # ---- Cleanup
-    del spectra_sel, spectra_ds, spectra_train, spectra_val, activity_ds
+    del spectra, spectra_ds, spectra_out, activity_ds
     if spectra_ds_no_activity is not None:
         del spectra_ds_no_activity
     gc.collect()
@@ -733,7 +687,7 @@ def create_soap_gpu_paper_dataset(
         torch.cuda.empty_cache()
 
     print(f"💾 Fichier de sortie créé: {output_filepath}")
-    print(f"   - {n_sel} spectres - {n_train} train / {n_val} val")
+    print(f"   - {n_spectra} spectres")
     print(f"   - {n_bins} pixels spectraux")
     print(f"   - Gamme: {wavegrid_ds.min():.1f} - {wavegrid_ds.max():.1f} Å")
     print("🧹 Nettoyage mémoire terminé")
@@ -745,10 +699,8 @@ if __name__ == "__main__":
         tmp_filepath="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/soap_gpu_paper/template.npy",
         wavegrid_filepath="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/soap_gpu_paper/wavegrid.npy",
         output_dir="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/npz_datasets",
-        idx_train_start=100,
-        idx_train_end=220,
-        idx_val_start=1000,
-        idx_val_end=1120,
+        idx_start=0,
+        idx_end=1000,
         wavemin=5000,
         wavemax=5050,
         downscaling_factor=2,
@@ -757,9 +709,9 @@ if __name__ == "__main__":
         add_photon_noise=False,
         snr_target=None,
         noise_seed=None,
-        planets_amplitudes=[1],
+        planets_amplitudes=[50.1],
         planets_periods=[60.0],
         planets_phases=[0.0],
         batch_size=100,
-        use_rassine=False
+        use_rassine=False,
     )
