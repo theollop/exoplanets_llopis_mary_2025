@@ -87,6 +87,12 @@ def get_class(path: str):
     return getattr(module, class_name)
 
 
+def get_mask_path(mask_name="G2_mask.txt"):
+    base_dir = os.path.abspath(os.path.dirname(__file__))
+    mask_path = os.path.join(base_dir, "..", "data", "masks", mask_name)
+    return os.path.normpath(mask_path)
+
+
 def get_mask(mask_type: str = "G2") -> np.ndarray:
     """
     Charge un masque de lignes d'absorption à partir d'un fichier CSV.
@@ -97,7 +103,5 @@ def get_mask(mask_type: str = "G2") -> np.ndarray:
     Returns:
         np.ndarray: Tableau numpy contenant les positions et poids des lignes.
     """
-    # Chemin absolu basé sur la racine du projet
-    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    mask_path = os.path.join(project_root, "data", "masks", f"{mask_type}_mask.txt")
+    mask_path = get_mask_path(f"{mask_type}_mask.txt")
     return np.loadtxt(mask_path)
