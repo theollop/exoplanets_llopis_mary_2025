@@ -248,11 +248,20 @@ class RVEstimator(nn.Module):
             dropout=0,
         )
 
-        self.n_features_out = 64 * (n_pixels_in // 5) // 10
-
         self.softmax = nn.Softmax(dim=-1)
+        self.flatten = nn.Flatten()
 
-        self.flatten = nn.Flatten()  # Entrée de la taille [B, C, L] avec B = taille du batch, C = nb de canaux et L = segments wavelength
+        # Calcul dynamique de la taille d'entrée du MLP
+        with torch.no_grad():
+            dummy = torch.zeros(1, n_pixels_in)
+            x = dummy.unsqueeze(1)
+            x = self.convblock1(x)
+            x = self.convblock2(x)
+            x = self.softmax(x)
+            x = self.flatten(x)
+            n_features_out = x.shape[1]
+        self.n_features_out = n_features_out
+
         self.mlp = MLP(
             n_in=self.n_features_out,
             n_out=1,

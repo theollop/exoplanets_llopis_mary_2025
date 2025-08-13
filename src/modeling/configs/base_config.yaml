@@ -8,20 +8,28 @@
 # --------------------------------------------------------------------------
 # Données
 # --------------------------------------------------------------------------
-experiment_name: "aug_6_no_scheduler_5500"                 # Nom de l'expérience (créera un sous-dossier)
+experiment_name: "fullrange_100_specs"                 # Nom de l'expérience (créera un sous-dossier)
 
-dataset_filepath: "data/npz_datasets/soapgpu_ns1000_5000-5500_dx2_sm3_p60_k0p1_phi0.npz"  # Chemin complet du NPZ standardisé
+dataset_filepath: "data/npz_datasets/soapgpu_ns10_4000-6000_dx2_sm3_p60_k0p1_phi0.npz"  # Chemin complet du NPZ standardisé
 output_root_dir: "experiments"                                # Répertoire racine pour tous les outputs (local)
 
 data_dtype: float32       # Type numpy/torch du tableau des spectres (float16/float32/float64)
 
 checkpoint_every: 100       # Fréquence de sauvegarde des checkpoints (en epochs)
 
+
 # --------------------------------------------------------------------------
-# DataLoader
+# DataLoader avancé (contrôle CPU/GPU, workers, transferts)
 # --------------------------------------------------------------------------
-batch_size: 16            # Nombre d'échantillons par batch
-shuffle: false            # True pour mélanger à chaque epoch
+batch_size: 2            # Nombre d'échantillons par batch
+shuffle: false           # True pour mélanger à chaque epoch
+num_workers: 4           # Nombre de workers pour le DataLoader (0 = main process)
+pin_memory: true         # Active le pinning mémoire (recommandé si GPU)
+prefetch_factor: 2       # Nombre de batches préchargés par worker (si num_workers>0)
+persistent_workers: true # Garde les workers vivants entre les epochs (si num_workers>0)
+dataset_cuda: false      # Si true, charge tout le dataset sur le GPU (déconseillé pour gros jeux de données)
+move_batches_to_device: true  # Transfert chaque batch sur le device du modèle (recommandé)
+non_blocking_transfer: true   # Utilise le transfert non bloquant CPU→GPU
 
 # --------------------------------------------------------------------------
 # Augmentation

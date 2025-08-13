@@ -30,7 +30,7 @@ import torch
 import csv
 from datetime import datetime
 from torch.utils.data import DataLoader
-from torch.cuda.amp import GradScaler, autocast
+from torch.cuda.amp import GradScaler as DeprecatedGradScaler  # compat
 from rich.console import Console
 from rich.progress import (
     Progress,
@@ -366,13 +366,24 @@ def create_grad_scaler(config):
         console.log("⚠️  Mixed precision désactivée : CUDA non disponible")
         return None
 
-    scaler = GradScaler(
-        init_scale=config.get("grad_scaler_init_scale", 65536.0),
-        growth_factor=config.get("grad_scaler_growth_factor", 2.0),
-        backoff_factor=config.get("grad_scaler_backoff_factor", 0.5),
-        growth_interval=config.get("grad_scaler_growth_interval", 2000),
-        enabled=True,
-    )
+    # Utiliser l'API moderne torch.amp si dispo, sinon fallback
+    try:
+        scaler = torch.amp.GradScaler(
+            "cuda",
+            init_scale=config.get("grad_scaler_init_scale", 65536.0),
+            growth_factor=config.get("grad_scaler_growth_factor", 2.0),
+            backoff_factor=config.get("grad_scaler_backoff_factor", 0.5),
+            growth_interval=config.get("grad_scaler_growth_interval", 2000),
+            enabled=True,
+        )
+    except Exception:
+        scaler = DeprecatedGradScaler(
+            init_scale=config.get("grad_scaler_init_scale", 65536.0),
+            growth_factor=config.get("grad_scaler_growth_factor", 2.0),
+            backoff_factor=config.get("grad_scaler_backoff_factor", 0.5),
+            growth_interval=config.get("grad_scaler_growth_interval", 2000),
+            enabled=True,
+        )
 
     console.log("🚀 Mixed precision activée avec GradScaler")
     return scaler
@@ -580,6 +591,11 @@ def train_phase(
     model.set_phase(phase_name)
     model.train()
 
+    # Préparation device & transferts CPU->GPU par batch
+    model_device = next(model.parameters()).device
+    move_batches_to_device = bool(config.get("move_batches_to_device", True))
+    non_blocking_transfer = bool(config.get("non_blocking_transfer", True))
+
     with Progress(
         TextColumn("[progress.description]{task.description}"),
         BarColumn(),
@@ -594,6 +610,18 @@ def train_phase(
             epoch_losses = {"rv": 0.0, "fid": 0.0, "c": 0.0, "reg": 0.0}
 
             for it, batch in enumerate(dataloader):
+                # Transfert CPU->GPU des batches si demandé
+                if move_batches_to_device and (model_device.type == "cuda"):
+                    try:
+                        batch = tuple(
+                            t.to(model_device, non_blocking=non_blocking_transfer)
+                            if isinstance(t, torch.Tensor)
+                            else t
+                            for t in batch
+                        )
+                    except Exception as e:
+                        console.log(f"⚠️  Batch to({model_device}) failed: {e}")
+
                 B = batch[0].shape[0]
 
                 # ⚠️ CRITIQUE: Reset gradients à chaque batch
@@ -601,7 +629,15 @@ def train_phase(
 
                 # Forward pass avec ou sans autocast selon la configuration
                 if autocast_enabled:
-                    with autocast():
+                    # Utilise l'API moderne si dispo
+                    try:
+                        amp_ctx = torch.amp.autocast("cuda")
+                    except Exception:
+                        from torch.cuda.amp import autocast as legacy_autocast
+
+                        amp_ctx = legacy_autocast()
+
+                    with amp_ctx:
                         losses = model.get_losses(
                             batch=batch,
                             extrapolate="linear",
@@ -869,6 +905,10 @@ def main(
         device: Device à utiliser ("cuda" ou "cpu")
     """
 
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.ipc_collect()
+
     # Déterminer le mode d'opération
     if exp_path and not checkpoint_path:
         # Cas 4: Reprendre depuis le dernier checkpoint d'une expérience
@@ -936,15 +976,19 @@ def main(
 
     # Création du dataset (NPZ standardisé uniquement)
     try:
+        # Contrôle CPU/GPU pour le dataset via la config
+        dataset_cuda = bool(config.get("dataset_cuda", False))
         dataset = SpectrumDataset(
             dataset_filepath=config.get(
                 "dataset_filepath",
                 "data/npz_datasets/dataset_1000specs_5000_5050_Kp1e-1_P100.npz",
             ),
             data_dtype=getattr(torch, config.get("data_dtype", "float32")),
-            cuda=True,
+            cuda=dataset_cuda,
         )
-        console.log("✅ Dataset créé avec succès")
+        console.log(
+            f"✅ Dataset créé avec succès (device={'GPU' if dataset_cuda and torch.cuda.is_available() else 'CPU'})"
+        )
     except Exception as e:
         console.log(f"❌ Erreur lors de la création du dataset: {e}")
         raise
@@ -1019,11 +1063,26 @@ def main(
         out_dtype=getattr(torch, config["out_dtype"]),
     )
 
-    dataloader = DataLoader(
-        dataset,
+    # Paramètres DataLoader contrôlés par la config
+    num_workers = int(config.get("num_workers", 0))
+    pin_memory = bool(config.get("pin_memory", torch.cuda.is_available()))
+    prefetch_factor = int(config.get("prefetch_factor", 2)) if num_workers > 0 else None
+    persistent_workers = bool(config.get("persistent_workers", num_workers > 0))
+
+    dataloader_kwargs = dict(
         batch_size=config["batch_size"],
         shuffle=config["shuffle"],
         collate_fn=collate_fn,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+        persistent_workers=persistent_workers if num_workers > 0 else False,
+    )
+    if prefetch_factor is not None:
+        dataloader_kwargs["prefetch_factor"] = prefetch_factor
+
+    dataloader = DataLoader(dataset, **dataloader_kwargs)
+    console.log(
+        f"📦 DataLoader: batch_size={config['batch_size']}, workers={num_workers}, pin_memory={pin_memory}, prefetch_factor={prefetch_factor}"
     )
 
     console.log(f"📊 Dataset: {len(dataset)} spectres, {dataset.n_pixels} pixels")
