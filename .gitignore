@@ -93,7 +93,10 @@ target/
 /models/
 
 # exclude data from source control by default
-/data/
+/data/*
+!/data/masks/
+/data/masks/*
+!data/masks/*.txt
 /reports/
 /venv/
 /experiments/

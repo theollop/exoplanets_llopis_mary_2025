@@ -16,5 +16,8 @@ setup(
         "ipykernel",
         "python-dotenv",
         "astropy",
+        "emcee",
+        "corner",
+        "tqdm",
     ],
 )
