@@ -264,42 +264,34 @@ def plot_rv_predictions_dataset(
         t = None
 
     import matplotlib.pyplot as plt
+    from matplotlib.ticker import MaxNLocator
 
+    fig, axes = plt.subplots(
+        1, 2, figsize=(14, 6), gridspec_kw={"width_ratios": [2, 1]}
+    )
+
+    # Plot à gauche : RV en fonction du temps (ou index si pas de temps)
     if t is not None and t.shape[0] == N:
-        fig, axes = plt.subplots(1, 3, figsize=(16, 4))
-        axes[0].plot(idx, v_pred, "b.-", alpha=0.85)
-        axes[0].set_title("RV predictions vs index")
-        axes[0].set_xlabel("Index")
-        axes[0].set_ylabel("v_pred (m/s)")
-        axes[0].grid(True, alpha=0.3)
-
-        axes[1].plot(t, v_pred, "g.-", alpha=0.85)
-        axes[1].set_title("RV predictions vs time")
-        axes[1].set_xlabel("Time")
-        axes[1].set_ylabel("v_pred (m/s)")
-        axes[1].grid(True, alpha=0.3)
-
-        axes[2].hist(v_pred, bins=40, color="tab:blue", alpha=0.8)
-        axes[2].set_title("Distribution of RV predictions")
-        axes[2].set_xlabel("v_pred (m/s)")
-        axes[2].set_ylabel("Count")
-        axes[2].grid(True, alpha=0.3)
+        axes[0].plot(t, v_pred, "b.-", alpha=0.85, markersize=4)
+        axes[0].set_xlabel("Temps", fontsize=14)
     else:
-        fig, axes = plt.subplots(1, 2, figsize=(12, 4))
-        axes[0].plot(idx, v_pred, "b.-", alpha=0.85)
-        axes[0].set_title("RV predictions on full dataset")
-        axes[0].set_xlabel("Index")
-        axes[0].set_ylabel("v_pred (m/s)")
-        axes[0].grid(True, alpha=0.3)
+        axes[0].plot(idx, v_pred, "b.-", alpha=0.85, markersize=4)
+        axes[0].set_xlabel("Index", fontsize=14)
+    axes[0].set_ylabel("RV prédite (m/s)", fontsize=14)
+    axes[0].set_title("RV en fonction du temps", fontsize=16)
+    axes[0].grid(True, alpha=0.3)
+    axes[0].tick_params(axis="both", labelsize=12)
+    axes[0].xaxis.set_major_locator(MaxNLocator(integer=True, nbins=8))
 
-        axes[1].hist(v_pred, bins=40, color="tab:blue", alpha=0.8)
-        axes[1].set_title("Distribution of RV predictions")
-        axes[1].set_xlabel("v_pred (m/s)")
-        axes[1].set_ylabel("Count")
-        axes[1].grid(True, alpha=0.3)
+    # Plot à droite : histogramme des RVs
+    axes[1].hist(v_pred, bins=40, color="tab:blue", alpha=0.8, edgecolor="black")
+    axes[1].set_title("Histogramme des RVs", fontsize=16)
+    axes[1].set_xlabel("RV prédite (m/s)", fontsize=14)
+    axes[1].set_ylabel("Nombre", fontsize=14)
+    axes[1].grid(True, alpha=0.3)
+    axes[1].tick_params(axis="both", labelsize=12)
 
     plt.tight_layout()
-    # Nom de fichier simplifié
     filename = f"rv_predictions_epoch_{epoch}.png"
     filepath = os.path.join(typed_plot_dir, filename)
     plt.savefig(filepath, dpi=200, bbox_inches="tight")
@@ -345,7 +337,7 @@ def plot_aestra_analysis(
     typed_plot_dir = create_typed_plot_dir(plot_dir, phase_name, "analysis")
 
     # Extraction des données du batch
-    batch_yobs, batch_yaug, batch_voffset, batch_wavegrid = batch
+    batch_yobs, batch_yaug, batch_voffset, batch_wavegrid, batch_weights_fid = batch
     batch_size = batch_yobs.shape[0]
 
     g2mask = np.loadtxt(f"{data_root_dir}/rv_datachallenge/masks/G2_mask.txt")
@@ -1016,7 +1008,7 @@ def plot_activity(
     typed_plot_dir = create_typed_plot_dir(plot_dir, phase_name, "activity")
 
     # Extraction des données du batch
-    batch_yobs, batch_yaug, batch_voffset, batch_wavegrid = batch
+    batch_yobs, batch_yaug, batch_voffset, batch_wavegrid, batch_weights_fid = batch
     batch_size = batch_yobs.shape[0]
 
     # Chargement du masque G2 pour les raies importantes

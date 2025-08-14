@@ -641,7 +641,6 @@ def train_phase(
                         losses = model.get_losses(
                             batch=batch,
                             extrapolate="linear",
-                            batch_weights=None,
                             iteration_count=it,
                         )
                         # Calculer la loss totale pour ce batch
@@ -650,7 +649,6 @@ def train_phase(
                     losses = model.get_losses(
                         batch=batch,
                         extrapolate="linear",
-                        batch_weights=None,
                         iteration_count=it,
                     )
                     # Calculer la loss totale pour ce batch

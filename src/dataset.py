@@ -147,6 +147,7 @@ class SpectrumDataset(Dataset):
         activity_np = pick("activity")
         spectra_no_activity_np = pick("spectra_no_activity")
         v_true_np = pick("v_true")
+        weights_fid_np = pick("weights_fid")
 
         # Fallback v_true si absent -> sinus de metadata
         if v_true_np is None:
@@ -174,6 +175,7 @@ class SpectrumDataset(Dataset):
         self.activity = _to_tensor(activity_np, data_dtype)
         self.spectra_no_activity = _to_tensor(spectra_no_activity_np, data_dtype)
         self.v_true = _to_tensor(v_true_np, data_dtype)
+        self.weights_fid = _to_tensor(weights_fid_np, data_dtype)
 
         # Tailles / bornes
         self.n_spectra = self.spectra.shape[0]
@@ -338,7 +340,20 @@ def generate_collate_fn(
             out_dtype=out_dtype,
         )
 
-        return (batch_yobs, batch_yaug, batch_voffset, batch_wavegrid)
+        batch_weights_fid = None
+        if getattr(dataset, "weights_fid", None) is not None:
+            batch_weights_fid = dataset.weights_fid[
+                batch_yobs.device.index if batch_yobs.is_cuda else ...
+            ]
+            batch_weights_fid = batch_weights_fid[: batch_yobs.shape[0]]
+
+        return (
+            batch_yobs,
+            batch_yaug,
+            batch_voffset,
+            batch_wavegrid,
+            batch_weights_fid,
+        )
 
     return collate_fn
 

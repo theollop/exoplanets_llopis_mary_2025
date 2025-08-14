@@ -174,39 +174,32 @@ def compute_activity_pre_noise(
     return spectra_ds - template_ds
 
 
-def _add_photon_noise(spectrum, snr_target=None, default_snr=100.0):
-    """
-    Ajoute du bruit de Poisson en conservant l'échelle du spectre.
-    - Si snr_target est donné: SNR(médiane) ~= snr_target
-    - Sinon: SNR(médiane) ~= default_snr
-    """
+def _add_photon_noise(
+    spectrum, snr_target=None, default_snr=300.0, min_flux=1e-12, max_w=1e12
+):
     spec = np.asarray(spectrum, dtype=float)
-    # éviter lambda=0 et valeurs négatives
-    spec = np.maximum(spec, 1e-12)
+    spec = np.clip(spec, min_flux, None)
 
-    # flux de référence pour fixer le SNR (médiane plus robuste que la moyenne)
     mu = (
         float(np.median(spec)) if np.isfinite(np.median(spec)) else float(np.mean(spec))
     )
-
     if mu <= 0:
-        # fallback: pas de bruit si flux pathologique
-        return spec.copy()
+        return spec.copy(), np.zeros_like(spec)
 
     S = float(snr_target) if (snr_target is not None) else float(default_snr)
-    S = max(S, 1.0)  # borne basse raisonnable
+    S = max(S, 1.0)
+    k = (S * S) / mu
 
-    # facteur de mise à l'échelle vers des "comptes"
-    k = (S * S) / mu  # => SNR(médiane) ≈ S
-
+    # Bruit Poisson
     lam = k * spec
-    # prudence: éviter les lambdas énormes qui peuvent ralentir/overflow
-    # (optionnel) lam = np.clip(lam, 0, 1e8)
-
     counts = np.random.poisson(lam)
-    noisy = counts / k  # revenir à l'échelle originale
+    noisy = counts / k
 
-    return noisy
+    # Poids pour L_fid = 1/variance = k / flux (flux sans bruit)
+    w_pix = k / spec
+    w_pix = np.clip(w_pix, 0.0, max_w)
+
+    return noisy, w_pix
 
 
 def add_photon_noise_batch(
@@ -214,8 +207,12 @@ def add_photon_noise_batch(
 ):
     if seed is not None:
         np.random.seed(int(seed))
-    for i in range(X.shape[0]):
-        X[i] = _add_photon_noise(X[i], snr_target)
+    N, P = X.shape
+    noisy_X = np.empty_like(X, dtype=float)
+    weights_X = np.empty_like(X, dtype=float)
+    for i in range(N):
+        noisy_X[i], weights_X[i] = _add_photon_noise(X[i], snr_target)
+    return noisy_X, weights_X
 
 
 def _normalize_spectrum_with_rassine(wave, flux, config=None):
@@ -583,9 +580,12 @@ def create_soap_gpu_paper_dataset(
 
     # ---- Noise ----
     noise = NoiseParams(add_photon_noise, snr_target, noise_seed)
+    weights_fid = None
     if noise.add_photon_noise:
         print("🔊 Bruit photonique...")
-        add_photon_noise_batch(spectra_ds, noise.snr_target, noise.seed)
+        spectra_ds, weights_fid = add_photon_noise_batch(
+            spectra_ds, noise.snr_target, noise.seed
+        )
 
     # ---- Planets injection (optional)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -679,7 +679,10 @@ def create_soap_gpu_paper_dataset(
         payload["spectra_no_activity"] = spectra_ds_no_activity[:n_spectra].astype(
             storage_dtype, copy=False
         )
-
+    if weights_fid is not None:
+        payload["weights_fid"] = weights_fid[:n_spectra].astype(
+            storage_dtype, copy=False
+        )
     save_npz(output_filepath, payload)
 
     # ---- Cleanup
@@ -701,7 +704,7 @@ if __name__ == "__main__":
     clear_gpu_memory()
 
     create_soap_gpu_paper_dataset(
-        spectra_filepath="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/soap_gpu_paper/spec_cube_tot_filtered_normalized_float64.h5",
+        spectra_filepath="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/soap_gpu_paper/spec_cube_tot_filtered_normalized_float32.h5",
         template_filepath="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/soap_gpu_paper/template.npy",
         wavegrid_filepath="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/soap_gpu_paper/wavegrid.npy",
         output_dir="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/npz_datasets",
@@ -712,19 +715,13 @@ if __name__ == "__main__":
         downscaling_factor=2,
         smooth_after_downscaling=True,
         smooth_kernel_size=3,
-        add_photon_noise=False,
-        snr_target=None,
-        noise_seed=None,
+        add_photon_noise=True,
+        snr_target=300.0,
+        noise_seed=42,
         planets_amplitudes=[0.1],
         planets_periods=[100],
         planets_phases=[0.0],
-        batch_size=5,
+        batch_size=100,
         use_rassine=False,
         storage_dtype=np.float32,
     )
-
-    colab_path = (
-        "/content/drive/MyDrive/PFE/data/spec_cube_tot_filtered_normalized_float64.h5"
-    )
-    colab_template_path = "/content/drive/MyDrive/PFE/data/template.npy"
-    colab_wavegrid_path = "/content/drive/MyDrive/PFE/data/wavegrid.npy"

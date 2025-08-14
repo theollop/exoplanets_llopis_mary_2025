@@ -8,9 +8,9 @@
 # --------------------------------------------------------------------------
 # Données
 # --------------------------------------------------------------------------
-experiment_name: "fullrange_100_specs"                 # Nom de l'expérience (créera un sous-dossier)
+experiment_name: "noised_snr_300"                 # Nom de l'expérience (créera un sous-dossier)
 
-dataset_filepath: "data/npz_datasets/soapgpu_ns10_4000-6000_dx2_sm3_p60_k0p1_phi0.npz"  # Chemin complet du NPZ standardisé
+dataset_filepath: "data/npz_datasets/soapgpu_ns3287_5000-5050_dx2_sm3_snr300_p100_k0p1_phi0.npz"  # Chemin complet du NPZ standardisé
 output_root_dir: "experiments"                                # Répertoire racine pour tous les outputs (local)
 
 data_dtype: float32       # Type numpy/torch du tableau des spectres (float16/float32/float64)
@@ -21,7 +21,7 @@ checkpoint_every: 100       # Fréquence de sauvegarde des checkpoints (en epoch
 # --------------------------------------------------------------------------
 # DataLoader avancé (contrôle CPU/GPU, workers, transferts)
 # --------------------------------------------------------------------------
-batch_size: 2            # Nombre d'échantillons par batch
+batch_size: 32            # Nombre d'échantillons par batch
 shuffle: false           # True pour mélanger à chaque epoch
 num_workers: 4           # Nombre de workers pour le DataLoader (0 = main process)
 pin_memory: true         # Active le pinning mémoire (recommandé si GPU)
@@ -46,9 +46,9 @@ out_dtype: float32        # Type de sortie des spectres augmentés (float16 éco
 # --------------------------------------------------------------------------
 latent_dim: 3             # Dimension de l'espace latent (anciennement "S")
 sigma_v: 0.3              # Écart-type pour le bruit Doppler
-sigma_c: 0.0001              # Écart-type pour le bruit spectral
-sigma_y: 1              # Écart-type pour le bruit de flux
-k_reg_init: 0.               # Coefficient de régularisation pour la perte
+sigma_c: 0.002              # Écart-type pour le bruit spectral
+sigma_y: 0.1              # Écart-type pour le bruit de flux
+k_reg_init: 0.1              # Coefficient de régularisation pour la perte
 cycle_length: 1000        # Nombre d'itérations pour le cycle de régularisation
 model_dtype: float32      # Type de données pour les poids du modèle (float16/float32/float64)
 
@@ -78,7 +78,7 @@ plot_rv_every: 50         # Plot des prédictions RV tous les X epochs (0 = dés
 # --------------------------------------------------------------------------
 phases:
   - name: rvonly
-    n_epochs: 200
+    n_epochs: 100
     optimizer: "torch.optim.Adam"
     optimizer_kwargs:
       lr: 0.0001

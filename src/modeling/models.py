@@ -395,7 +395,6 @@ class AESTRA(nn.Module):
         self,
         batch,
         extrapolate="linear",
-        batch_weights=None,
         iteration_count=None,
     ):
         """
@@ -406,7 +405,13 @@ class AESTRA(nn.Module):
             extrapolate: méthode d'extrapolation pour le shift Doppler
             batch_weights: poids pour la perte FID (facultatif)
         """
-        batch_yobs, batch_yaug, batch_voffset_true, batch_wavegrid = batch
+        (
+            batch_yobs,
+            batch_yaug,
+            batch_voffset_true,
+            batch_wavegrid,
+            batch_weights_fid,
+        ) = batch
         losses = {
             "fid": torch.tensor(0),
             "c": torch.tensor(0),
@@ -439,7 +444,7 @@ class AESTRA(nn.Module):
             losses["fid"] = loss_fid(
                 batch_yobs_prime=batch_yobs_prime,
                 batch_yobs=batch_yobs,
-                batch_weights=batch_weights,
+                batch_weights=batch_weights_fid,
             )
             losses["c"] = loss_c(s, s_aug, sigma_c=self.sigma_c)
             losses["reg"] = loss_reg(

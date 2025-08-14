@@ -548,7 +548,13 @@ def predict(model, dataset, batch_size=64, perturbation_value=1.0):
     model.eval()
     with torch.no_grad():
         for batch in dataloader:
-            batch_yobs, batch_yaug, batch_voffset_true, batch_wavegrid = batch
+            (
+                batch_yobs,
+                batch_yaug,
+                batch_voffset_true,
+                batch_wavegrid,
+                batch_weights_fid,
+            ) = batch
 
             batch_vobs_pred, batch_vaug_pred = model.get_rvestimator_pred(
                 batch_yobs=batch_yobs, batch_yaug=batch_yaug
@@ -796,6 +802,7 @@ def main(
     exp = load_experiment_checkpoint(ckpt_path)
     model = exp["model"]
     dataset = exp["dataset"]
+    dataset.move_to_cuda()
 
     # Predictions
     prediction_results = predict(
@@ -1260,11 +1267,9 @@ if __name__ == "__main__":
     # plt.legend()
     # plt.show()
     main(
-        experiment_dir="experiments/aug_6",
+        experiment_dir="experiments/fullrange_100_specs",
         # fap_threshold=0.01,
         # exclude_width_frac=0.05,
-        min_period=2.0,
-        max_period=120,
         # n_periods=5000,
         # zoom_frac=0.15,
         # batch_size=64,
