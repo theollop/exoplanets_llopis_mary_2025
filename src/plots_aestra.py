@@ -18,6 +18,7 @@ from typing import Optional
 from src.interpolate import shift_spectra_linear
 from src.dataset import SpectrumDataset
 from scipy.signal import find_peaks
+from src.utils import get_mask
 
 
 def create_phase_plot_dir(plot_dir: str, phase_name: str) -> str:
@@ -347,7 +348,7 @@ def plot_aestra_analysis(
     ) = batch
     batch_size = batch_yobs.shape[0]
 
-    g2mask = np.loadtxt(f"{data_root_dir}/rv_datachallenge/masks/G2_mask.txt")
+    g2mask = get_mask("G2")
     line_positions, line_weights = g2mask[:, 0], g2mask[:, 1]
     wavegrid = batch_wavegrid[0].detach().cpu().numpy()
     line_weights = line_weights[
@@ -1026,7 +1027,7 @@ def plot_activity(
     batch_size = batch_yobs.shape[0]
 
     # Chargement du masque G2 pour les raies importantes
-    g2mask = np.loadtxt(f"{data_root_dir}/rv_datachallenge/masks/G2_mask.txt")
+    g2mask = get_mask("G2")
     line_positions, line_weights = g2mask[:, 0], g2mask[:, 1]
     wavegrid = batch_wavegrid[0].detach().cpu().numpy()
 
