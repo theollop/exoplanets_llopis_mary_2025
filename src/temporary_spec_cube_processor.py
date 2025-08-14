@@ -6,42 +6,44 @@ import os
 
 # ----------------------- PARAMS -----------------------
 input_path = "data/soap_gpu_paper/spec_cube_tot.h5"
-output_path = "data/soap_gpu_paper/spec_cube_tot_filtered_normalized.h5"
+output_path = "data/soap_gpu_paper/spec_cube_tot_filtered_normalized_float64.h5"
 indices_to_remove = [246, 249, 1196, 1453, 2176]
 wave = np.load("data/soap_gpu_paper/spec_master.npz")["wavelength"]
 indices_to_remove = np.asarray(indices_to_remove, dtype=int)
 chunk_size = 100
 
-# -------------------- HELPERS --------------------
-def _safe_normalize(wave, flux, cfg):
-    """RASSINE -> fallback médiane si erreur/NaN."""
-    try:
-        y = _normalize_spectrum_with_rassine(wave, flux, cfg)
-        if not np.all(np.isfinite(y)):
-            raise ValueError("NaN/inf après RASSINE")
-        return y.astype(np.float32, copy=False)
-    except Exception as e:
-        # Fallback très simple et robuste
-        med = np.nanmedian(flux)
-        if not np.isfinite(med) or med == 0:
-            med = 1.0
-        y = flux / med
-        return y.astype(np.float32, copy=False)
 
-
-def _first_nan_row(dset):
-    """Renvoie l'index de la première ligne contenant des NaN, sinon len(dset)."""
-    # On scanne par blocs pour éviter de tout charger
-    n_rows, n_cols = dset.shape
-    step = max(1, min(8192 // max(1, n_cols), 1024))  # bloc raisonnable en RAM
-    for i in range(0, n_rows, step):
-        j = min(i + step, n_rows)
-        blk = dset[i:j, :]
-        bad = ~np.all(np.isfinite(blk), axis=1)
-        if np.any(bad):
-            return i + int(np.argmax(bad))
-    return n_rows
-
+rassine_config = {
+    "axes_stretching": "auto_0.3",
+    "vicinity_local_max": 5,
+    "smoothing_box": 3,
+    "smoothing_kernel": "gaussian",
+    "fwhm_ccf": "auto",
+    "CCF_mask": "master",
+    "RV_sys": 0,
+    "mask_telluric": [[6275, 6330], [6470, 6577], [6866, 8000]],
+    "mask_broadline": [[3960, 3980], [6560, 6562], [10034, 10064]],
+    "min_radius": "auto",
+    "max_radius": "auto",
+    "model_penality_radius": "poly_0.5",
+    "denoising_dist": 3,
+    "number_of_cut": 2,
+    "number_of_cut_outliers": 1,
+    "interpol": "linear",
+    "feedback": False,
+    "only_print_end": True,
+    "plot_end": False,
+    "save_last_plot": False,
+    "outputs_interpolation_save": "linear",
+    "outputs_denoising_save": "undenoised",
+    "light_file": True,
+    "speedup": 0.5,
+    "float_precision": "float64",
+    "column_wave": "wave",
+    "column_flux": "flux",
+    "synthetic_spectrum": False,
+    "anchor_file": "",
+}
 
 # -------------------- MAIN --------------------
 with h5py.File(input_path, "r") as f_in:
@@ -71,7 +73,7 @@ with h5py.File(input_path, "r") as f_in:
             dset_out = f_out.create_dataset(
                 "spec_cube",
                 shape=(n_keep, n_pixels),
-                dtype=np.float32,
+                dtype=np.float64,
                 chunks=(min(chunk_size, n_keep), n_pixels),
                 compression="gzip",
                 shuffle=True,
@@ -115,8 +117,7 @@ with h5py.File(input_path, "r") as f_in:
             # Lecture en bloc des flux
             block_flux = dset_in[block_idx_in, :]  # (B, n_pixels)
 
-
-            Y = normalize_batch_with_rassine(wave, block_flux)
+            Y = normalize_batch_with_rassine(wave, block_flux, config=rassine_config)
             dset_out[start_out:end_out, :] = Y
 
             f_out.flush()  # flush à chaque bloc pour limiter la perte en cas de crash
