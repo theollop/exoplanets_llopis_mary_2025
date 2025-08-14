@@ -8,7 +8,7 @@
 # --------------------------------------------------------------------------
 # Données
 # --------------------------------------------------------------------------
-experiment_name: "noised_snr_300"                 # Nom de l'expérience (créera un sous-dossier)
+experiment_name: "noised_snr_300_50A"                 # Nom de l'expérience (créera un sous-dossier)
 
 dataset_filepath: "data/npz_datasets/soapgpu_ns3287_5000-5050_dx2_sm3_snr300_p100_k0p1_phi0.npz"  # Chemin complet du NPZ standardisé
 output_root_dir: "experiments"                                # Répertoire racine pour tous les outputs (local)
@@ -85,6 +85,7 @@ phases:
       weight_decay: 0.0
     b_obs_trainable: false
     b_rest_trainable: false
+    plot_activity_every: 20
     # early_stopping:
     #   patience: 20
     #   min_delta: 1e-6

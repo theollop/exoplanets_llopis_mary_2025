@@ -208,7 +208,7 @@ class SpectrumDataset(Dataset):
     def __getitem__(self, idx):
         # On conserve ton comportement minimal (retourne le spectre).
         # Si tu veux plus d’info, tu peux changer ici pour retourner un dict.
-        return self.spectra[idx]
+        return self.spectra[idx], idx
 
     # --------- utilitaires ----------
     def _estimate_memory_usage(self):
@@ -316,7 +316,9 @@ def generate_collate_fn(
 
     def collate_fn(batch):
         # batch : liste de y_obs (Tensor [n_pixel]) de taille B
-        batch_yobs = torch.stack(batch, dim=0)  # Tensor [B, n_pixel]
+        spectra_list, indices_list = zip(*batch)  # sépare les deux
+        batch_indices = torch.tensor(indices_list, dtype=torch.long)  # [B]
+        batch_yobs = torch.stack(spectra_list, dim=0)  # Tensor [B, n_pixel]
 
         batch_yobs = (
             batch_yobs.unsqueeze(1).repeat(1, M, 1).view(-1, dataset.n_pixels)
@@ -353,6 +355,7 @@ def generate_collate_fn(
             batch_voffset,
             batch_wavegrid,
             batch_weights_fid,
+            batch_indices,
         )
 
     return collate_fn

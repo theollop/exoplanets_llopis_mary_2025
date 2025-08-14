@@ -401,7 +401,7 @@ class AESTRA(nn.Module):
         Calcule les pertes en fonction de la phase du modèle.
 
         Args:
-            batch: tuple contenant (batch_yobs, batch_yaug, batch_voffset_true, batch_wavegrid)
+            batch: tuple contenant (batch_yobs, batch_yaug, batch_voffset_true, batch_wavegrid, batch_weights_fid, batch_indices)
             extrapolate: méthode d'extrapolation pour le shift Doppler
             batch_weights: poids pour la perte FID (facultatif)
         """
@@ -411,6 +411,7 @@ class AESTRA(nn.Module):
             batch_voffset_true,
             batch_wavegrid,
             batch_weights_fid,
+            batch_indices,
         ) = batch
         losses = {
             "fid": torch.tensor(0),

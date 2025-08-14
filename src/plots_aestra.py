@@ -337,7 +337,14 @@ def plot_aestra_analysis(
     typed_plot_dir = create_typed_plot_dir(plot_dir, phase_name, "analysis")
 
     # Extraction des données du batch
-    batch_yobs, batch_yaug, batch_voffset, batch_wavegrid, batch_weights_fid = batch
+    (
+        batch_yobs,
+        batch_yaug,
+        batch_voffset,
+        batch_wavegrid,
+        batch_weights_fid,
+        batch_indices,
+    ) = batch
     batch_size = batch_yobs.shape[0]
 
     g2mask = np.loadtxt(f"{data_root_dir}/rv_datachallenge/masks/G2_mask.txt")
@@ -1008,7 +1015,14 @@ def plot_activity(
     typed_plot_dir = create_typed_plot_dir(plot_dir, phase_name, "activity")
 
     # Extraction des données du batch
-    batch_yobs, batch_yaug, batch_voffset, batch_wavegrid, batch_weights_fid = batch
+    (
+        batch_yobs,
+        batch_yaug,
+        batch_voffset,
+        batch_wavegrid,
+        batch_weights_fid,
+        batch_indices,
+    ) = batch
     batch_size = batch_yobs.shape[0]
 
     # Chargement du masque G2 pour les raies importantes
@@ -1032,6 +1046,7 @@ def plot_activity(
     if sample_idx is None:
         sample_idx = np.random.randint(0, batch_size)
 
+    global_idx = int(batch_indices[sample_idx])
     # Vérifier que le dataset a bien l'activité vraie
     if not hasattr(dataset, "activity"):
         print(
@@ -1051,13 +1066,13 @@ def plot_activity(
     # Données pour l'échantillon sélectionné
     wavegrid = batch_wavegrid[sample_idx].detach().cpu().numpy()
     y_act_pred = batch_yact[sample_idx].detach().cpu().numpy()  # Activité prédite
-    y_act_true = dataset.activity[sample_idx].detach().cpu().numpy()  # Activité vraie
+    y_act_true = dataset.activity[global_idx].detach().cpu().numpy()  # Activité vraie
 
     # Création du plot avec 4 subplots (1 en haut + 3 en bas)
     fig, axes = plt.subplots(2, 3, figsize=(18, 10))
     fig.suptitle(
         f"Activity Comparison - {exp_name} - {phase_name} - Epoch {epoch}\n"
-        f"Sample {sample_idx} | True vs Predicted Activity",
+        f"Sample {global_idx} | True vs Predicted Activity",
         fontsize=14,
         fontweight="bold",
     )
