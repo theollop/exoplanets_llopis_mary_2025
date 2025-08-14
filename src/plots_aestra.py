@@ -350,6 +350,7 @@ def plot_aestra_analysis(
 
     g2mask = get_mask("G2")
     line_positions, line_weights = g2mask[:, 0], g2mask[:, 1]
+
     wavegrid = batch_wavegrid[0].detach().cpu().numpy()
     line_weights = line_weights[
         (line_positions >= wavegrid.min()) & (line_positions <= wavegrid.max())
@@ -1047,6 +1048,8 @@ def plot_activity(
     if sample_idx is None:
         sample_idx = np.random.randint(0, batch_size)
 
+    print(f"[DEBUG] batch_size={batch_yobs.shape[0]}, sample_idx={sample_idx}")
+    assert 0 <= sample_idx < batch_yobs.shape[0]
     global_idx = int(batch_indices[sample_idx])
     # Vérifier que le dataset a bien l'activité vraie
     if not hasattr(dataset, "activity"):
