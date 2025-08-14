@@ -345,10 +345,10 @@ class AESTRA(nn.Module):
 
     def set_trainable(
         self,
-        b_obs_trainable=False,
-        b_rest_trainable=True,
-        rvestimator_trainable=True,
-        spender_trainable=True,
+        b_obs=False,
+        b_rest=True,
+        rvestimator=True,
+        spender=True,
     ):
         """
         Définit si les spectres b_obs et b_rest sont entraînables.(par défaut b_obs non entraînable et b_rest entraînable dans l'article)
@@ -356,17 +356,17 @@ class AESTRA(nn.Module):
             b_obs_trainable (bool): Si True, b_obs est entraînable.
             b_rest_trainable (bool): Si True, b_rest est entraînable.
         """
-        self.b_obs.requires_grad = b_obs_trainable
-        self.b_rest.requires_grad = b_rest_trainable
+        self.b_obs.requires_grad = b_obs
+        self.b_rest.requires_grad = b_rest
 
         for p in self.rvestimator.parameters():
-            p.requires_grad = rvestimator_trainable
+            p.requires_grad = rvestimator
         for p in self.spender.parameters():
-            p.requires_grad = spender_trainable
+            p.requires_grad = spender
 
         print(
-            f"b_obs trainable: {b_obs_trainable}, b_rest trainable: {b_rest_trainable}, "
-            f"rvestimator trainable: {rvestimator_trainable}, spender trainable: {spender_trainable}"
+            f"b_obs trainable: {b_obs}, b_rest trainable: {b_rest}, "
+            f"rvestimator trainable: {rvestimator}, spender trainable: {spender}"
         )
 
     def convert_dtype(self, new_dtype):
