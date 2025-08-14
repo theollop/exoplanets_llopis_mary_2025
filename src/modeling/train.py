@@ -206,7 +206,7 @@ def load_experiment_checkpoint(path, device="cuda"):
         n_pixels=dataset.n_pixels,
         S=config["latent_dim"],
         sigma_v=config["sigma_v"],
-        sigma_c=config["sigma_c"],
+        sigma_s=config["sigma_s"],
         sigma_y=config["sigma_y"],
         k_reg_init=config["k_reg_init"],
         cycle_length=config["cycle_length"],
@@ -553,10 +553,7 @@ def train_phase(
     console.rule(f"[bold green]Phase: {phase_name}[/]")
 
     # Configuration de la trainabilité des paramètres
-    model.set_b_spectra_trainable(
-        phase_config.get("b_obs_trainable", True),
-        phase_config.get("b_rest_trainable", True),
-    )
+    model.set_trainable(**phase_config["trainable_params"])
 
     # Création optimiseur et scheduler
     optimizer, scheduler = create_optimizer_and_scheduler(model, phase_config)
@@ -642,6 +639,7 @@ def train_phase(
                             batch=batch,
                             extrapolate="linear",
                             iteration_count=it,
+                            get_aug_data=config.get("get_aug_data", True),
                         )
                         # Calculer la loss totale pour ce batch
                         total_batch_loss = sum(losses.values())
@@ -650,6 +648,7 @@ def train_phase(
                         batch=batch,
                         extrapolate="linear",
                         iteration_count=it,
+                        get_aug_data=config.get("get_aug_data", True),
                     )
                     # Calculer la loss totale pour ce batch
                     total_batch_loss = sum(losses.values())
@@ -999,7 +998,7 @@ def main(
             n_pixels=dataset.n_pixels,
             S=config["latent_dim"],
             sigma_v=config["sigma_v"],
-            sigma_c=config["sigma_c"],
+            sigma_s=config["sigma_s"],
             sigma_y=config["sigma_y"],
             k_reg_init=config["k_reg_init"],
             cycle_length=config["cycle_length"],

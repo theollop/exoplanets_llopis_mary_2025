@@ -8,25 +8,33 @@
 # --------------------------------------------------------------------------
 # Données
 # --------------------------------------------------------------------------
-experiment_name: "exp1"                 # Nom de l'expérience (créera un sous-dossier)
+# experiment_name: ""                 # Nom de l'expérience (créera un sous-dossier)
 
-dataset_filepath: "/content/drive/MyDrive/aestra_training/data/dataset_1000specs_5000_5500_Kp1e-1_P100_Phi0.npz"  # Chemin complet du NPZ standardisé
+dataset_filepath: "/content/drive/MyDrive/aestra_training/data/npz_datasets/soapgpu_ns3292_5000-5050_dx2_sm3_nonoise__baseline.npz"  # Chemin complet du NPZ standardisé
 output_root_dir: "/content/drive/MyDrive/aestra_training/experiments"                                # Répertoire racine pour tous les outputs (local)
 
 data_dtype: float32       # Type numpy/torch du tableau des spectres (float16/float32/float64)
 
 checkpoint_every: 100       # Fréquence de sauvegarde des checkpoints (en epochs)
 
+
 # --------------------------------------------------------------------------
-# DataLoader
+# DataLoader avancé (contrôle CPU/GPU, workers, transferts)
 # --------------------------------------------------------------------------
 batch_size: 32            # Nombre d'échantillons par batch
-shuffle: false            # True pour mélanger à chaque epoch
+shuffle: true           # True pour mélanger à chaque epoch
+num_workers: 4           # Nombre de workers pour le DataLoader (0 = main process)
+pin_memory: true         # Active le pinning mémoire (recommandé si GPU)
+prefetch_factor: 2       # Nombre de batches préchargés par worker (si num_workers>0)
+persistent_workers: true # Garde les workers vivants entre les epochs (si num_workers>0)
+dataset_cuda: false      # Si true, charge tout le dataset sur le GPU (déconseillé pour gros jeux de données)
+move_batches_to_device: true  # Transfert chaque batch sur le device du modèle (recommandé)
+non_blocking_transfer: true   # Utilise le transfert non bloquant CPU→GPU
 
 # --------------------------------------------------------------------------
 # Augmentation
 # --------------------------------------------------------------------------
-M_aug: 1                  # Combien de versions augmentées par spectre
+M_aug: 3                  # Combien de versions augmentées par spectre
 vmin: -3                  # Vitesse min (m/s) pour décalage Doppler
 vmax: +3                  # Vitesse max (m/s)
 interpolate: "linear"     # Méthode d'interpolation
@@ -37,11 +45,19 @@ out_dtype: float32        # Type de sortie des spectres augmentés (float16 éco
 # Modèle
 # --------------------------------------------------------------------------
 latent_dim: 3             # Dimension de l'espace latent (anciennement "S")
-sigma_v: 0.3              # Écart-type pour le bruit Doppler
-sigma_c: 0.0001              # Écart-type pour le bruit spectral
-sigma_y: 1              # Écart-type pour le bruit de flux
-k_reg_init: 0.               # Coefficient de régularisation pour la perte
-cycle_length: 1000        # Nombre d'itérations pour le cycle de régularisation
+
+# Loss RV
+sigma_v: 0.1              # Écart-type pour le bruit Doppler
+
+# Loss reg
+sigma_y: 0.15              # Écart-type pour le bruit de flux
+k_reg_init: 0.05              # Coefficient de régularisation pour la perte
+cycle_length: 200        # Nombre d'itérations pour le cycle de régularisation
+
+# Loss consistency
+get_aug_data: False         # Si True, calcule les données augmentées dans le forward pass et permet de calculer la loss de consistency
+sigma_s: 1              # Poids dans la loss de consistency
+
 model_dtype: float32      # Type de données pour les poids du modèle (float16/float32/float64)
 
 # --------------------------------------------------------------------------
@@ -70,24 +86,66 @@ plot_rv_every: 50         # Plot des prédictions RV tous les X epochs (0 = dés
 # --------------------------------------------------------------------------
 phases:
   - name: rvonly
-    n_epochs: 200
+    n_epochs: 100
+
+    trainable_params:
+      b_obs: false
+      b_rest: false
+      rvestimator: true
+      spender: false
+
     optimizer: "torch.optim.Adam"
     optimizer_kwargs:
       lr: 0.0001
       weight_decay: 0.0
-    b_obs_trainable: false
-    b_rest_trainable: false
+
+    plot_activity_every: 1
+    # early_stopping:
+    #   patience: 20
+    #   min_delta: 1e-6
+    #   metric: "total" 
+    #   mode: "min"
+    #   restore_best_weights: true
+
+  - name: joint1
+    n_epochs: 20
     
-  - name: joint
-    n_epochs: 200
+    trainable_params:
+      b_obs: false
+      b_rest: false
+      rvestimator: true
+      spender: true
+
     optimizer: "torch.optim.Adam"
     optimizer_kwargs:
       lr: 0.0001
       weight_decay: 0.0
+    
+    plot_activity_every: 2
+    
+  - name: joint2
+    n_epochs: 200
+    
+    trainable_params:
+      b_obs: false
+      b_rest: true
+      rvestimator: true
+      spender: true
+    
+    optimizer: "torch.optim.Adam"
+    optimizer_kwargs:
+      lr: 0.0001
+      weight_decay: 0.0
+    
     scheduler: "torch.optim.lr_scheduler.StepLR"
     scheduler_kwargs:
       step_size: 50
       gamma: 0.7
-    b_obs_trainable: false
-    b_rest_trainable: true
+    
     plot_activity_every: 20
+    # early_stopping:
+    #   patience: 15
+    #   min_delta: 1e-7
+    #   metric: "rv"
+    #   mode: "min"
+    #   restore_best_weights: true

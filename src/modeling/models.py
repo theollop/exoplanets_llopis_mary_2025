@@ -295,7 +295,7 @@ class AESTRA(nn.Module):
         b_rest,
         S=3,
         sigma_v=1.0,
-        sigma_c=1.0,
+        sigma_s=1.0,
         sigma_y=1.0,
         k_reg_init=1.0,
         cycle_length=1000,  # Nombre d'itérations pour le cycle de régularisation
@@ -335,29 +335,21 @@ class AESTRA(nn.Module):
         # phase par défaut
         self.phase = "joint"
         self.sigma_v = sigma_v
-        self.sigma_c = sigma_c
+        self.sigma_s = sigma_s
         self.sigma_y = sigma_y
         self.k_reg_init = k_reg_init
         self.cycle_length = cycle_length
 
     def set_phase(self, phase: str):
-        assert phase in ("rvonly", "joint")
         self.phase = phase
-        print(f"Phase set to: {self.phase}")
 
-        # on gèle l’autre module
-        if phase == "rvonly":
-            for p in self.spender.parameters():
-                p.requires_grad = False
-            for p in self.rvestimator.parameters():
-                p.requires_grad = True
-        else:  # joint
-            for p in self.spender.parameters():
-                p.requires_grad = True
-            for p in self.rvestimator.parameters():
-                p.requires_grad = True
-
-    def set_b_spectra_trainable(self, b_obs_trainable=False, b_rest_trainable=True):
+    def set_trainable(
+        self,
+        b_obs_trainable=False,
+        b_rest_trainable=True,
+        rvestimator_trainable=True,
+        spender_trainable=True,
+    ):
         """
         Définit si les spectres b_obs et b_rest sont entraînables.(par défaut b_obs non entraînable et b_rest entraînable dans l'article)
         Args:
@@ -366,8 +358,15 @@ class AESTRA(nn.Module):
         """
         self.b_obs.requires_grad = b_obs_trainable
         self.b_rest.requires_grad = b_rest_trainable
+
+        for p in self.rvestimator.parameters():
+            p.requires_grad = rvestimator_trainable
+        for p in self.spender.parameters():
+            p.requires_grad = spender_trainable
+
         print(
-            f"b_obs trainable: {b_obs_trainable}, b_rest trainable: {b_rest_trainable}"
+            f"b_obs trainable: {b_obs_trainable}, b_rest trainable: {b_rest_trainable}, "
+            f"rvestimator trainable: {rvestimator_trainable}, spender trainable: {spender_trainable}"
         )
 
     def convert_dtype(self, new_dtype):
@@ -392,10 +391,7 @@ class AESTRA(nn.Module):
         return self
 
     def get_losses(
-        self,
-        batch,
-        extrapolate="linear",
-        iteration_count=None,
+        self, batch, extrapolate="linear", iteration_count=None, get_aug_data=True
     ):
         """
         Calcule les pertes en fonction de la phase du modèle.
@@ -440,6 +436,7 @@ class AESTRA(nn.Module):
                 batch_wavegrid=batch_wavegrid,
                 batch_vobs_pred=batch_vobs_pred,
                 extrapolate=extrapolate,
+                get_aug_data=get_aug_data,
             )
 
             losses["fid"] = loss_fid(
@@ -447,7 +444,12 @@ class AESTRA(nn.Module):
                 batch_yobs=batch_yobs,
                 batch_weights=batch_weights_fid,
             )
-            losses["c"] = loss_c(s, s_aug, sigma_c=self.sigma_c)
+
+            if get_aug_data:
+                losses["c"] = loss_c(s, s_aug, sigma_s=self.sigma_s)
+            else:
+                losses["c"] = torch.tensor(0)
+
             losses["reg"] = loss_reg(
                 batch_yact,
                 k_reg_init=self.k_reg_init,
@@ -474,12 +476,11 @@ class AESTRA(nn.Module):
         batch_wavegrid,
         batch_vobs_pred,
         extrapolate="linear",
+        get_aug_data=True,
     ):
         batch_robs = batch_yobs - self.b_obs.unsqueeze(0)
-        batch_raug = batch_yaug - self.b_obs.unsqueeze(0)
 
         batch_yact, s = self.spender(batch_robs)
-        batch_yact_aug, s_aug = self.spender(batch_raug)
 
         batch_yrest = self.b_rest.unsqueeze(0) + batch_yact
 
@@ -489,6 +490,12 @@ class AESTRA(nn.Module):
             velocities=batch_vobs_pred,
             extrapolate=extrapolate,
         )
+
+        if get_aug_data:
+            batch_raug = batch_yaug - self.b_obs.unsqueeze(0)
+            batch_yact_aug, s_aug = self.spender(batch_raug)
+        else:
+            batch_yact_aug, s_aug = None, None
 
         return batch_yobs_prime, batch_yact, batch_yact_aug, s, s_aug
 
@@ -504,10 +511,10 @@ def loss_fid(batch_yobs_prime, batch_yobs, batch_weights=None):
     return torch.mean(batch_weights * (batch_yobs - batch_yobs_prime) ** 2)
 
 
-def loss_c(s, s_aug, sigma_c=1.0):
+def loss_c(s, s_aug, sigma_s=1.0):
     S = s.shape[1]
 
-    return torch.mean(torch.sigmoid((s - s_aug) ** 2 / (S * sigma_c**2)) - 0.5)
+    return torch.mean(torch.sigmoid((s - s_aug) ** 2 / (S * sigma_s**2)) - 0.5)
 
 
 def get_k_reg(k_reg_init: float, iteration_count: int = None, cycle_length: int = 1000):
