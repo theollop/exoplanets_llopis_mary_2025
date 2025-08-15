@@ -202,6 +202,8 @@ def load_experiment_checkpoint(path, device="cuda"):
 
     # Reconstruction du modèle
     config = ckpt["config"]
+    b_obs_init = config["b_obs_init"]
+    b_rest_init = config["b_rest_init"]
     model = AESTRA(
         n_pixels=dataset.n_pixels,
         S=config["latent_dim"],
@@ -210,8 +212,8 @@ def load_experiment_checkpoint(path, device="cuda"):
         sigma_y=config["sigma_y"],
         k_reg_init=config["k_reg_init"],
         cycle_length=config["cycle_length"],
-        b_obs=dataset.template,
-        b_rest=dataset.spectra.mean(dim=0),
+        b_obs=b_obs_init,
+        b_rest=b_rest_init,
         device=device,
         dtype=getattr(torch, config.get("model_dtype", "float32")),
     )
@@ -534,6 +536,56 @@ def create_early_stopping(phase_config):
     )
 
     return early_stopping
+
+
+def get_bobs_brest_init(b_obs: str, b_rest: str, dataset: SpectrumDataset):
+    """
+    Récupère et initialise b_obs et b_rest depuis la configuration.
+
+    Args:
+        b_obs: "mean" / "random" / "true_template"
+        b_rest: "mean" / "random" / "true_template"
+
+        mean : Moyenne du dataset
+        random : Échantillonnage aléatoire
+        true_template : Template réel du dataset
+
+    Returns:
+        tuple: (b_obs, b_rest) comme tensors
+    """
+    if b_obs == "mean":
+        b_obs_tensor = dataset.spectra.mean(axis=0)
+    elif b_obs == "random":
+        b_obs_tensor = torch.randn_like(
+            dataset.spectra[0], device=dataset.device, dtype=dataset.dtype
+        )
+    elif b_obs == "true_template":
+        b_obs_tensor = dataset.template
+        if dataset.template is None:
+            print("Template is not available in the dataset - Fallback to mean")
+            b_obs_tensor = dataset.spectra.mean(
+                axis=0
+            )  # Fallback to mean if no template
+    else:
+        raise ValueError(f"Unknown b_obs type: {b_obs}")
+
+    if b_rest == "mean":
+        b_rest_tensor = dataset.spectra.mean(axis=0)
+    elif b_rest == "random":
+        b_rest_tensor = torch.randn_like(
+            dataset.spectra[0], device=dataset.device, dtype=dataset.dtype
+        )
+    elif b_rest == "true_template":
+        b_rest_tensor = dataset.template
+        if dataset.template is None:
+            print("Template is not available in the dataset - Fallback to mean")
+            b_rest_tensor = dataset.spectra.mean(
+                axis=0
+            )  # Fallback to mean if no template
+    else:
+        raise ValueError(f"Unknown b_rest type: {b_rest}")
+
+    return b_obs_tensor, b_rest_tensor
 
 
 def train_phase(
@@ -994,6 +1046,14 @@ def main(
 
     # Création du modèle
     try:
+        b_obs_init, b_rest_init = get_bobs_brest_init(
+            b_obs=config.get("b_obs_init", "true_template"),
+            b_rest=config.get("b_rest_init", "mean"),
+            dataset=dataset,
+        )
+        console.log(
+            f"✅ Initialisation b_obs : {config.get('b_obs_init', 'true_template')} b_rest : {config.get('b_rest_init', 'mean')}"
+        )
         model = AESTRA(
             n_pixels=dataset.n_pixels,
             S=config["latent_dim"],
@@ -1002,8 +1062,8 @@ def main(
             sigma_y=config["sigma_y"],
             k_reg_init=config["k_reg_init"],
             cycle_length=config["cycle_length"],
-            b_obs=dataset.template,
-            b_rest=dataset.spectra.mean(dim=0),
+            b_obs=b_obs_init,
+            b_rest=b_rest_init,
             device=device,
             dtype=getattr(torch, config.get("model_dtype", "float32")),
         )

@@ -368,6 +368,8 @@ class AESTRA(nn.Module):
             f"b_obs trainable: {b_obs}, b_rest trainable: {b_rest}, "
             f"rvestimator trainable: {rvestimator}, spender trainable: {spender}"
         )
+        self.rvestimator_trainable = rvestimator
+        self.spender_trainable = spender
 
     def convert_dtype(self, new_dtype):
         """
@@ -415,21 +417,21 @@ class AESTRA(nn.Module):
             "reg": torch.tensor(0),
             "rv": torch.tensor(0),
         }
+        if self.rvestimator_trainable:
+            batch_vobs_pred, batch_vaug_pred = self.get_rvestimator_pred(
+                batch_yobs=batch_yobs,
+                batch_yaug=batch_yaug,
+            )
 
-        batch_vobs_pred, batch_vaug_pred = self.get_rvestimator_pred(
-            batch_yobs=batch_yobs,
-            batch_yaug=batch_yaug,
-        )
+            batch_voffset_pred = batch_vaug_pred - batch_vobs_pred
 
-        batch_voffset_pred = batch_vaug_pred - batch_vobs_pred
+            losses["rv"] = loss_rv(
+                batch_voffset_true=batch_voffset_true,
+                batch_voffset_pred=batch_voffset_pred,
+                sigma_v=self.sigma_v,
+            )
 
-        losses["rv"] = loss_rv(
-            batch_voffset_true=batch_voffset_true,
-            batch_voffset_pred=batch_voffset_pred,
-            sigma_v=self.sigma_v,
-        )
-
-        if self.phase == "joint":
+        if self.spender_trainable:
             batch_yobs_prime, batch_yact, _, s, s_aug = self.get_spender_pred(
                 batch_yobs=batch_yobs,
                 batch_yaug=batch_yaug,

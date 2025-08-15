@@ -48,21 +48,18 @@ out_dtype: float32        # Type de sortie des spectres augmentés (float16 éco
 latent_dim: 3             # Dimension de l'espace latent (anciennement "S")
 
 # Loss RV
-sigma_v: 0.1              # Écart-type pour le bruit Doppler
+sigma_v: 0.3              # Écart-type pour le bruit Doppler
 
 # Loss reg
-sigma_y: 0.15              # Écart-type pour le bruit de flux
-k_reg_init: 0.05              # Coefficient de régularisation pour la perte
-cycle_length: 200        # Nombre d'itérations pour le cycle de régularisation
+sigma_y: 0.1              # Écart-type pour le bruit de flux
+k_reg_init: 0.0              # Coefficient de régularisation pour la perte
+cycle_length: 1000        # Nombre d'itérations pour le cycle de régularisation
 
 # Loss consistency
-get_aug_data: False         # Si True, calcule les données augmentées dans le forward pass et permet de calculer la loss de consistency
+get_aug_data: True         # Si True, calcule les données augmentées dans le forward pass et permet de calculer la loss de consistency
 sigma_s: 1              # Poids dans la loss de consistency
 
 model_dtype: float32      # Type de données pour les poids du modèle (float16/float32/float64)
-
-b_obs_init: "true_template"  # Initialisation des biais d'observation (template/mean)
-b_rest_init: "mean"  # Initialisation des biais de rest (template/mean)
 
 # --------------------------------------------------------------------------
 # Mixed Precision Settings
@@ -110,25 +107,9 @@ phases:
     #   mode: "min"
     #   restore_best_weights: true
 
-  - name: joint1
-    n_epochs: 20
-    
-    trainable_params:
-      b_obs: false
-      b_rest: false
-      rvestimator: true
-      spender: true
-
-    optimizer: "torch.optim.Adam"
-    optimizer_kwargs:
-      lr: 0.0001
-      weight_decay: 0.0
-    
-    plot_activity_every: 2
-    
-  - name: joint2
+  - name: joint
     n_epochs: 200
-    
+
     trainable_params:
       b_obs: false
       b_rest: true
