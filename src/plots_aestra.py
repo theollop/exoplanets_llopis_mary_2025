@@ -1016,77 +1016,93 @@ def plot_activity(
     # Créer le sous-dossier organisé par type pour la phase
     typed_plot_dir = create_typed_plot_dir(plot_dir, phase_name, "activity")
 
-    # Extraction des données du batch
     (
-        batch_yobs,
-        batch_yaug,
-        batch_voffset,
-        batch_wavegrid,
-        batch_weights_fid,
-        batch_indices,
+        batch_yobs,  # [M*B, P] si M>1 || [B, P] si M=1
+        batch_yaug,  # [M*B, P] idem
+        batch_voffset,  # [M*B]     idem
+        batch_wavegrid,  # [M*B, P]  idem
+        batch_weights_fid,  # [M*B, P]  (ou None)
+        batch_indices,  # [B]       indices globaux dataset
     ) = batch
-    batch_size = batch_yobs.shape[0]
 
-    # Chargement du masque G2 pour les raies importantes
-    g2mask = get_mask("G2")
-    line_positions, line_weights = g2mask[:, 0], g2mask[:, 1]
-    wavegrid = batch_wavegrid[0].detach().cpu().numpy()
+    # ------------- ALIGNEMENT & METADONNÉES B/M -------------
+    # Ref batch = indices -> B_base
+    B_base = int(batch_indices.shape[0])
 
-    # Filtrer les raies dans la plage spectrale
-    mask_in_range = (line_positions >= wavegrid.min()) & (
-        line_positions <= wavegrid.max()
-    )
-    line_weights = line_weights[mask_in_range]
-    line_positions = line_positions[mask_in_range]
+    # Tailles observées côté "flatten"
+    B_y = int(batch_yobs.shape[0])
+    # Déduire M si possible
+    M = B_y // B_base if B_base > 0 else 1
+    if B_base * M != B_y:
+        # Incohérence (pas multiple) -> on force M=1 et on tronque les autres au B_base
+        M = 1
 
-    # Sélectionner les 3 raies les plus importantes
-    top_indices = np.argsort(line_weights)[-3:]  # Les 3 plus fortes
-    selected_lines = line_positions[top_indices]
-    halfwin = 0.18  # Fenêtre de zoom de 0.18 Å comme dans plot_aestra_analysis
+    # Taille batch "logique" = B_base
+    batch_size = B_base
 
-    # Sélection d'un échantillon
+    # ------------- SÉLECTION D’UN ÉCHANTILLON (BASE) -------------
     if sample_idx is None:
         sample_idx = np.random.randint(0, batch_size)
+    else:
+        # clamp pour rester dans [0, batch_size)
+        if sample_idx < 0:
+            sample_idx = 0
+        elif sample_idx >= batch_size:
+            sample_idx = sample_idx % batch_size
 
-    print(f"[DEBUG] batch_size={batch_yobs.shape[0]}, sample_idx={sample_idx}")
-    assert 0 <= sample_idx < batch_yobs.shape[0]
-    global_idx = int(batch_indices[sample_idx])
-    # Vérifier que le dataset a bien l'activité vraie
-    if not hasattr(dataset, "activity"):
-        print(
-            "⚠️ Warning: Dataset doesn't have 'activity' attribute. Cannot plot activity comparison."
-        )
-        return
+    # Index global dataset pour cet échantillon
+    if torch.is_tensor(batch_indices):
+        global_idx = int(batch_indices[sample_idx].detach().cpu().item())
+    else:
+        global_idx = int(batch_indices[sample_idx])
 
-    # Forward pass du modèle pour obtenir l'activité prédite
+    # ------------- MAPPINGS D’INDEX -------------
+    # On utilise systématiquement la première augmentation m=0 pour tracer
+    flat_idx = sample_idx * M  # -> index dans [M*B] pour yobs/yaug/wavegrid/voffset
+
+    # ------------- PRÉPA MASQUE DES RAIES -------------
+    g2mask = get_mask("G2")
+    line_positions, line_weights = g2mask[:, 0], g2mask[:, 1]
+
+    # on prend la grille correspondant à l'échantillon (m=0)
+    wavegrid = batch_wavegrid[flat_idx].detach().cpu().numpy()
+
+    in_range = (line_positions >= wavegrid.min()) & (line_positions <= wavegrid.max())
+    line_positions = line_positions[in_range]
+    line_weights = line_weights[in_range]
+
+    if line_positions.size == 0:
+        selected_lines = np.array([])
+        selected_weights = np.array([])
+    else:
+        n_lines = min(3, line_positions.size)
+        top_idx = np.argsort(line_weights)[-n_lines:]
+        # trier pour que la plus lourde soit en premier (optionnel)
+        order = np.argsort(line_weights[top_idx])[::-1]
+        top_idx = top_idx[order]
+        selected_lines = line_positions[top_idx]
+        selected_weights = line_weights[top_idx]
+
+    # ------------- FORWARD MODÈLE -------------
     model.eval()
     with torch.no_grad():
-        # Spectres résiduels (après soustraction des templates)
-        batch_robs = batch_yobs - model.b_obs.unsqueeze(0)
+        batch_robs = batch_yobs - model.b_obs.unsqueeze(0)  # [M*B, P]
+        batch_yact, batch_s = model.spender(batch_robs)  # [M*B, P], [...]
 
-        # Encodage + Décodage pour obtenir le spectre d'activité prédit
-        batch_yact, batch_s = model.spender(batch_robs)
+    # ------------- EXTRACTIONS SÛRES -------------
+    wavegrid = batch_wavegrid[flat_idx].detach().cpu().numpy()
+    y_act_pred = batch_yact[flat_idx].detach().cpu().numpy()
 
-    # Données pour l'échantillon sélectionné
-    wavegrid = batch_wavegrid[sample_idx].detach().cpu().numpy()
-    y_act_pred = batch_yact[sample_idx].detach().cpu().numpy()  # Activité prédite
-    y_act_true = dataset.activity[global_idx].detach().cpu().numpy()  # Activité vraie
+    # activité vraie côté dataset (index global)
+    if not hasattr(dataset, "activity") or dataset.activity is None:
+        print("⚠️ Dataset n'a pas 'activity' -> skip.")
+        return
+    y_act_true = dataset.activity[global_idx].detach().cpu().numpy()
 
-    # Création du plot avec 4 subplots (1 en haut + 3 en bas)
+    # ------------- PLOTS -------------
     fig, axes = plt.subplots(2, 3, figsize=(18, 10))
-    fig.suptitle(
-        f"Activity Comparison - {exp_name} - {phase_name} - Epoch {epoch}\n"
-        f"Sample {global_idx} | True vs Predicted Activity",
-        fontsize=14,
-        fontweight="bold",
-    )
-
-    # Plot 1 : Spectre d'activité complet (occupe les 3 colonnes de la première ligne)
-    # Fusionner les 3 subplots de la première ligne
     gs = fig.add_gridspec(2, 3)
-    ax_full = fig.add_subplot(gs[0, :])  # Première ligne complète
-
-    # Supprimer les axes individuels de la première ligne
+    ax_full = fig.add_subplot(gs[0, :])
     for i in range(3):
         axes[0, i].remove()
 
@@ -1104,26 +1120,27 @@ def plot_activity(
     ax_full.axhline(y=0, color="gray", linestyle="--", alpha=0.5)
     ax_full.set_xlabel("Wavelength (Å)")
     ax_full.set_ylabel("Activity Flux")
-    ax_full.set_title("Full Spectrum Activity Comparison")
+    ax_full.set_title(f"Full Spectrum Activity Comparison")
     ax_full.legend()
     ax_full.grid(True, alpha=0.3)
 
-    # Plots 2-4 : Zoom sur les 3 raies les plus importantes
-    for i, line_pos in enumerate(selected_lines):
+    halfwin = 0.18
+    # tracer seulement le nombre de lignes disponibles (0..3)
+    for i in range(min(3, len(selected_lines))):
         ax = axes[1, i]
-
-        # Créer le masque de zoom
+        line_pos = selected_lines[i]
         zoom_mask = (wavegrid >= line_pos - halfwin) & (wavegrid <= line_pos + halfwin)
-        wave_zoom = wavegrid[zoom_mask]
-        true_zoom = y_act_true[zoom_mask]
-        pred_zoom = y_act_pred[zoom_mask]
-
         ax.plot(
-            wave_zoom, true_zoom, "k-", linewidth=2, alpha=0.8, label="True Activity"
+            wavegrid[zoom_mask],
+            y_act_true[zoom_mask],
+            "k-",
+            linewidth=2,
+            alpha=0.8,
+            label="True Activity",
         )
         ax.plot(
-            wave_zoom,
-            pred_zoom,
+            wavegrid[zoom_mask],
+            y_act_pred[zoom_mask],
             "orange",
             linewidth=2,
             alpha=0.8,
@@ -1137,35 +1154,42 @@ def plot_activity(
             alpha=0.7,
             label=f"Line @ {line_pos:.2f}Å",
         )
-
         ax.set_xlabel("Wavelength (Å)")
         ax.set_ylabel("Activity Flux")
-        ax.set_title(
-            f"Line {i + 1}: {line_pos:.2f}Å (Weight: {line_weights[top_indices[i]]:.3f})"
-        )
+        w = selected_weights[i]
+        ax.set_title(f"Line {i + 1}: {line_pos:.2f}Å (Weight: {w:.3f})")
         ax.set_xlim(line_pos - halfwin, line_pos + halfwin)
         ax.legend(fontsize=8)
         ax.grid(True, alpha=0.3)
 
-    plt.tight_layout()
+    # masquer les axes restants s’il y a <3 raies
+    for j in range(len(selected_lines), 3):
+        axes[1, j].axis("off")
 
-    # Nom de fichier simplifié
-    filename = f"activity_epoch_{epoch}.png"
-    filepath = os.path.join(typed_plot_dir, filename)
+    plt.tight_layout()
+    filepath = os.path.join(
+        create_typed_plot_dir(plot_dir, phase_name, "activity"),
+        f"activity_epoch_{epoch}.png",
+    )
     plt.savefig(filepath, dpi=300, bbox_inches="tight")
     plt.close()
 
-    # Nettoyage mémoire
-    del batch_yobs, batch_yaug, batch_voffset, batch_wavegrid
-    del batch_robs, batch_yact, batch_s
+    # cleanup (facultatif)
+    del (
+        batch_yobs,
+        batch_yaug,
+        batch_voffset,
+        batch_wavegrid,
+        batch_robs,
+        batch_yact,
+        batch_s,
+    )
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
 
 # ==== Plots de predict.py ====
-
-
 def plot_latent_distance_distribution(
     delta_s_rand, delta_s_aug, save_path=None, show_plot=False
 ):

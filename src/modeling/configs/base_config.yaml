@@ -10,7 +10,7 @@
 # --------------------------------------------------------------------------
 # experiment_name: ""                 # Nom de l'expérience (créera un sous-dossier)
 
-dataset_filepath: "data/npz_datasets/soapgpu_ns3287_5000-5050_dx2_sm3_snr300_p100_k0p1_phi0.npz"  # Chemin complet du NPZ standardisé
+dataset_filepath: "data/npz_datasets/exps_rapport/soapgpu_ns3292_5000-5050_dx2_sm3_nonoise__baseline.npz"  # Chemin complet du NPZ standardisé
 output_root_dir: "experiments"                                # Répertoire racine pour tous les outputs (local)
 
 data_dtype: float32       # Type numpy/torch du tableau des spectres (float16/float32/float64)
@@ -34,7 +34,7 @@ non_blocking_transfer: true   # Utilise le transfert non bloquant CPU→GPU
 # --------------------------------------------------------------------------
 # Augmentation
 # --------------------------------------------------------------------------
-M_aug: 3                  # Combien de versions augmentées par spectre
+M_aug: 1                  # Combien de versions augmentées par spectre
 vmin: -3                  # Vitesse min (m/s) pour décalage Doppler
 vmax: +3                  # Vitesse max (m/s)
 interpolate: "linear"     # Méthode d'interpolation
@@ -99,7 +99,6 @@ phases:
       lr: 0.0001
       weight_decay: 0.0
 
-    plot_activity_every: 20
     # early_stopping:
     #   patience: 20
     #   min_delta: 1e-6

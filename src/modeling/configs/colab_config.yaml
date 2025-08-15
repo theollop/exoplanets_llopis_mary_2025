@@ -9,6 +9,7 @@
 # Données
 # --------------------------------------------------------------------------
 # experiment_name: ""                 # Nom de l'expérience (créera un sous-dossier)
+# /content/drive/MyDrive/aestra_training/data/npz_datasets/
 
 dataset_filepath: "/content/drive/MyDrive/aestra_training/data/npz_datasets/soapgpu_ns3292_5000-5050_dx2_sm3_nonoise__baseline.npz"  # Chemin complet du NPZ standardisé
 output_root_dir: "/content/drive/MyDrive/aestra_training/experiments"                                # Répertoire racine pour tous les outputs (local)
@@ -23,7 +24,7 @@ checkpoint_every: 100       # Fréquence de sauvegarde des checkpoints (en epoch
 # --------------------------------------------------------------------------
 batch_size: 32            # Nombre d'échantillons par batch
 shuffle: true           # True pour mélanger à chaque epoch
-num_workers: 2           # Nombre de workers pour le DataLoader (0 = main process)
+num_workers: 4           # Nombre de workers pour le DataLoader (0 = main process)
 pin_memory: true         # Active le pinning mémoire (recommandé si GPU)
 prefetch_factor: 2       # Nombre de batches préchargés par worker (si num_workers>0)
 persistent_workers: true # Garde les workers vivants entre les epochs (si num_workers>0)
@@ -34,7 +35,7 @@ non_blocking_transfer: true   # Utilise le transfert non bloquant CPU→GPU
 # --------------------------------------------------------------------------
 # Augmentation
 # --------------------------------------------------------------------------
-M_aug: 3                  # Combien de versions augmentées par spectre
+M_aug: 1                  # Combien de versions augmentées par spectre
 vmin: -3                  # Vitesse min (m/s) pour décalage Doppler
 vmax: +3                  # Vitesse max (m/s)
 interpolate: "linear"     # Méthode d'interpolation
@@ -99,7 +100,6 @@ phases:
       lr: 0.0001
       weight_decay: 0.0
 
-    plot_activity_every: 1
     # early_stopping:
     #   patience: 20
     #   min_delta: 1e-6
