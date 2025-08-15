@@ -8,11 +8,6 @@
 # --------------------------------------------------------------------------
 # Données
 # --------------------------------------------------------------------------
-experiment_name: "soapgpu_ns1000_5000-5050_dx2_sm3_p100_k0p1_phi0_truebrest"                 # Nom de l'expérience (créera un sous-dossier)
-
-dataset_filepath: "data/npz_datasets/soapgpu_ns1000_5000-5050_dx2_sm3_p100_k0p1_phi0.npz"  # Chemin complet du NPZ standardisé
-output_root_dir: "experiments"                                # Répertoire racine pour tous les outputs (local)
-
 data_dtype: float32       # Type numpy/torch du tableau des spectres (float16/float32/float64)
 
 checkpoint_every: 100       # Fréquence de sauvegarde des checkpoints (en epochs)

@@ -793,9 +793,17 @@ def main(
     fig_periodo_latent = os.path.join(fig_dir, "periodograms", "latent")
     fig_latent = os.path.join(fig_dir, "latent")
     fig_corr = os.path.join(fig_dir, "correlations")
+    fig_ccf_compare = os.path.join(fig_dir, "ccf_comparison")
     data_dir = os.path.join(out_root, "data")
 
-    for d in [fig_periodo_rv, fig_periodo_latent, fig_latent, fig_corr, data_dir]:
+    for d in [
+        fig_periodo_rv,
+        fig_periodo_latent,
+        fig_latent,
+        fig_corr,
+        fig_ccf_compare,
+        data_dir,
+    ]:
         os.makedirs(d, exist_ok=True)
 
     # Load experiment
@@ -833,6 +841,84 @@ def main(
     v_ref, depth_ref, span_ref, fwhm_ref = get_vref(dataset, CCF_params)
     print("Calcul des vitesses corrigées par méthode traditionnelle...")
     v_traditionnal = get_vtraditionnal(v_apparent, depth, span, fwhm)
+
+    # --- CCF comparison: try to obtain RVs on dataset without injected signal
+    v_no_signal = None
+    try:
+        # Prefer computing from dataset if spectra_no_activity exists
+        v_no_signal, depth_ns, span_ns, fwhm_ns = get_vref(dataset, CCF_params)
+        print("RVs sans signal obtenues via get_vref(dataset)")
+    except Exception as e:
+        print(
+            f"get_vref(dataset) a échoué: {e}, tentative de chargement du NPZ de fallback..."
+        )
+
+    # Fallback: load precomputed CCF results NPZ if shapes don't match or v_no_signal is None
+    if v_no_signal is None or len(v_no_signal) != len(times_values):
+        fallback_npz = "/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/ccf_results/ccf_analysis_results.npz"
+        if os.path.exists(fallback_npz):
+            try:
+                npz = np.load(fallback_npz)
+                # Heuristique: pick the first array with matching length to times_values
+                chosen = None
+                for k in npz.files:
+                    arr = npz[k]
+                    try:
+                        if hasattr(arr, "shape") and arr.shape[0] == len(times_values):
+                            chosen = arr
+                            print(
+                                f"Chargé '{k}' depuis NPZ comme série RV sans signal (shape match)"
+                            )
+                            break
+                    except Exception:
+                        continue
+                if chosen is not None:
+                    v_no_signal = chosen
+                else:
+                    print(
+                        f"Aucun tableau dans {fallback_npz} ne correspond à la longueur attendue ({len(times_values)})"
+                    )
+            except Exception as e:
+                print(f"Erreur en chargeant {fallback_npz}: {e}")
+        else:
+            print(f"Fallback NPZ introuvable: {fallback_npz}")
+
+    # If we still don't have a v_no_signal array, create a NaN array to avoid crashes
+    if v_no_signal is None:
+        v_no_signal = np.full_like(times_values, np.nan, dtype=float)
+
+    # Plot comparison: CCF RVs (with signal) vs CCF RVs (no injected signal)
+    try:
+        ccf_compare_path = os.path.join(
+            fig_ccf_compare, "ccf_rv_with_vs_without_signal.png"
+        )
+        plt.figure(figsize=(10, 5))
+        plt.plot(
+            times_values,
+            v_apparent,
+            marker="o",
+            linestyle="-",
+            alpha=0.8,
+            label="v_apparent (CCF on spectra)",
+        )
+        plt.plot(
+            times_values,
+            v_no_signal,
+            marker="x",
+            linestyle="--",
+            alpha=0.8,
+            label="v_no_signal (CCF on no-inj dataset)",
+        )
+        plt.xlabel("Time (days)")
+        plt.ylabel("Radial Velocity (m/s)")
+        plt.title("CCF RVs: with injected signal vs activity-only (no injected signal)")
+        plt.legend()
+        plt.grid(alpha=0.2)
+        plt.savefig(ccf_compare_path, dpi=200, bbox_inches="tight")
+        plt.close()
+        print(f"Saved CCF comparison plot: {ccf_compare_path}")
+    except Exception as e:
+        print(f"Erreur lors du plot CCF comparaison: {e}")
 
     # Prepare series
     v_series = {

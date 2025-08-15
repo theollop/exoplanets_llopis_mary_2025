@@ -942,6 +942,9 @@ def main(
     checkpoint_path: str = None,
     exp_path: str = None,
     device: str = "cuda",
+    dataset_filepath: str = None,
+    output_root_dir: str = None,
+    experiment_name: str = None,
 ):
     """
     Fonction principale d'entraînement AESTRA.
@@ -1008,6 +1011,14 @@ def main(
         exp_name = None  # Sera déterminé par setup_experiment_directories
 
     console.log(f"✅ Configuration loaded: {config_source}")
+
+    # Apply overrides from function parameters: prefer explicit function args over config file
+    if dataset_filepath is not None:
+        config["dataset_filepath"] = dataset_filepath
+    if output_root_dir is not None:
+        config["output_root_dir"] = output_root_dir
+    if experiment_name is not None:
+        config["experiment_name"] = experiment_name
 
     # Configuration de la structure de dossiers pour l'expérience
     exp_dirs, determined_exp_name = setup_experiment_directories(config, config_path)
@@ -1234,4 +1245,6 @@ def main(
 if __name__ == "__main__":
     main(
         config_path="src/modeling/configs/base_config.yaml",
+        dataset_filepath="data/npz_datasets/soapgpu_ns1000_5000-5050_dx2_sm3_p100_k0p1_phi0.npz",
+        output_root_dir="experiments",
     )

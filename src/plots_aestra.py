@@ -1216,8 +1216,8 @@ def plot_activity(
         f"activity_epoch_{epoch}.png",
     )
     plt.savefig(filepath, dpi=300, bbox_inches="tight")
-    # plt.show()
-    plt.close()
+    plt.show()
+    # plt.close()
 
     # cleanup (facultatif)
     del (
