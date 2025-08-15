@@ -1099,6 +1099,34 @@ def plot_activity(
         return
     y_act_true = dataset.activity[global_idx].detach().cpu().numpy()
 
+    # NOTE: The model's y_act is defined relative to b_rest (trainable),
+    # whereas the dataset 'activity' is defined relative to the template.
+    # To compare apples-to-apples, also compute the model-implied activity
+    # in the template frame: (b_rest + y_act_pred) - template.
+    b_rest_np = (
+        model.b_rest.detach().cpu().numpy()
+        if hasattr(model, "b_rest")
+        else np.zeros_like(y_act_pred)
+    )
+    template_np = (
+        dataset.template.detach().cpu().numpy()
+        if hasattr(dataset, "template") and dataset.template is not None
+        else np.zeros_like(y_act_pred)
+    )
+    y_rest_pred = b_rest_np + y_act_pred
+    y_act_pred_vs_template = y_rest_pred - template_np
+
+    # Quick diagnostics: correlations (full spectrum)
+    def safe_corr(a, b):
+        a = np.asarray(a).ravel()
+        b = np.asarray(b).ravel()
+        if a.std() == 0 or b.std() == 0:
+            return np.nan
+        return float(np.corrcoef(a, b)[0, 1])
+
+    corr_raw = safe_corr(y_act_true, y_act_pred)
+    corr_tpl = safe_corr(y_act_true, y_act_pred_vs_template)
+
     # ------------- PLOTS -------------
     fig, axes = plt.subplots(2, 3, figsize=(18, 10))
     gs = fig.add_gridspec(2, 3)
@@ -1113,14 +1141,22 @@ def plot_activity(
         wavegrid,
         y_act_pred,
         "orange",
-        linewidth=2,
+        linewidth=1.5,
         alpha=0.8,
-        label="Predicted Activity",
+        label=f"Predicted y_act (vs b_rest)  r={corr_raw:.2f}",
+    )
+    ax_full.plot(
+        wavegrid,
+        y_act_pred_vs_template,
+        color="#1f77b4",
+        linewidth=1.5,
+        alpha=0.9,
+        label=f"Predicted (y_rest−template)  r={corr_tpl:.2f}",
     )
     ax_full.axhline(y=0, color="gray", linestyle="--", alpha=0.5)
     ax_full.set_xlabel("Wavelength (Å)")
     ax_full.set_ylabel("Activity Flux")
-    ax_full.set_title(f"Full Spectrum Activity Comparison")
+    ax_full.set_title("Full Spectrum Activity Comparison (raw vs template-referenced)")
     ax_full.legend()
     ax_full.grid(True, alpha=0.3)
 
@@ -1142,9 +1178,17 @@ def plot_activity(
             wavegrid[zoom_mask],
             y_act_pred[zoom_mask],
             "orange",
-            linewidth=2,
+            linewidth=1.5,
             alpha=0.8,
-            label="Predicted Activity",
+            label="Pred. y_act (vs b_rest)",
+        )
+        ax.plot(
+            wavegrid[zoom_mask],
+            y_act_pred_vs_template[zoom_mask],
+            color="#1f77b4",
+            linewidth=1.5,
+            alpha=0.9,
+            label="Pred. (y_rest−template)",
         )
         ax.axhline(y=0, color="gray", linestyle="--", alpha=0.5)
         ax.axvline(
@@ -1172,6 +1216,7 @@ def plot_activity(
         f"activity_epoch_{epoch}.png",
     )
     plt.savefig(filepath, dpi=300, bbox_inches="tight")
+    # plt.show()
     plt.close()
 
     # cleanup (facultatif)

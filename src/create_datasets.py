@@ -843,6 +843,11 @@ def create_rvdatachallenge_dataset(
     # ---- Activity: not available reliably => omit
     activity_ds = None
 
+    # ---- Build spectra_no_activity baseline from template (one per observation)
+    # By default it's the template repeated; if planets provided we'll inject velocities below
+    tmpl_batch = np.tile(template_ds.reshape(1, -1), (n_spectra, 1))
+    spectra_ds_no_activity = tmpl_batch.copy()
+
     # ---- Sigma per pixel and weights
     sigma_pix = reference_flux_masked / np.clip(snr_masked, 1e-12, None)
     if downscaling_factor is None or downscaling_factor <= 1:
@@ -872,21 +877,28 @@ def create_rvdatachallenge_dataset(
         v_np = compute_velocities(time_values, planets_obj)
         v_true = v_np.astype(float, copy=False)
 
-        # inject on dataset (activity is unknown: we inject on template to build spectra_no_activity)
+        # inject on dataset: shift both the downscaled observed spectra and the template
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         dtype = torch.float64
+
+        # prepare tensors
+        spectra_t = torch.tensor(spectra_ds, device=device, dtype=dtype)
         wave_t = torch.tensor(wavegrid_ds, device=device, dtype=dtype)
         v_t = torch.tensor(v_np, device=device, dtype=dtype)
 
+        # inject planets into observed downscaled spectra
+        spectra_inj = inject_with_velocities(
+            spectra_t, wave_t, v_t, batch_size=batch_size
+        )
+        spectra_ds = spectra_inj.detach().cpu().numpy()
+
+        # inject planets into template to build spectra_no_activity
         tmpl_t = torch.tensor(template_ds, device=device, dtype=dtype)
         tmpl_batch = tmpl_t.unsqueeze(0).expand(n_spectra, -1).contiguous()
         spectra_noact_inj = inject_with_velocities(
             tmpl_batch, wave_t, v_t, batch_size=batch_size
         )
         spectra_ds_no_activity = spectra_noact_inj.detach().cpu().numpy()
-
-        # also shift spectra_ds if you want to provide observed spectra with planets removed/added
-        # but user requested no alteration of observed fluxes, so we keep spectra_ds as read
 
     # ---- Metadata
     prep = PreprocessParams(
@@ -981,42 +993,42 @@ def create_rvdatachallenge_dataset(
 if __name__ == "__main__":
     clear_gpu_memory()
 
-    create_rvdatachallenge_dataset(
-        flux_path="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/rv_datachallenge/Sun_B57001_E61001_planet-FallChallenge1/HARPN/STAR1136_HPN_flux_YVA.npy",
-        summary_csv_path="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/rv_datachallenge/Sun_B57001_E61001_planet-FallChallenge1/HARPN/STAR1136_HPN_Analyse_summary.csv",
-        material_pkl_path="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/rv_datachallenge/Sun_B57001_E61001_planet-FallChallenge1/HARPN/STAR1136_HPN_Analyse_material.p",
-        idx_start=None,
-        idx_end=None,
-        wavemin=5000,
-        wavemax=5050,
-        downscaling_factor=1,
-        smooth_after_downscaling=False,
-        smooth_kernel_size=3,
-        planets_amplitudes=None,
-        planets_periods=None,
-        planets_phases=None,
-        output_dir="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/npz_datasets",
-    )
-
-    # create_soap_gpu_paper_dataset(
-    #     spectra_filepath="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/soap_gpu_paper/spec_cube_tot_filtered_normalized_float32.h5",
-    #     template_filepath="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/soap_gpu_paper/template.npy",
-    #     wavegrid_filepath="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/soap_gpu_paper/wavegrid.npy",
-    #     output_dir="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/npz_datasets",
-    #     idx_start=0,
-    #     idx_end=3292,
+    # create_rvdatachallenge_dataset(
+    #     flux_path="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/rv_datachallenge/Sun_B57001_E61001_planet-FallChallenge1/HARPN/STAR1136_HPN_flux_YVA.npy",
+    #     summary_csv_path="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/rv_datachallenge/Sun_B57001_E61001_planet-FallChallenge1/HARPN/STAR1136_HPN_Analyse_summary.csv",
+    #     material_pkl_path="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/rv_datachallenge/Sun_B57001_E61001_planet-FallChallenge1/HARPN/STAR1136_HPN_Analyse_material.p",
+    #     idx_start=None,
+    #     idx_end=None,
     #     wavemin=5000,
     #     wavemax=5050,
-    #     downscaling_factor=2,
-    #     smooth_after_downscaling=True,
+    #     downscaling_factor=1,
+    #     smooth_after_downscaling=False,
     #     smooth_kernel_size=3,
-    #     add_photon_noise=True,
-    #     snr_target=300.0,
-    #     noise_seed=42,
-    #     planets_amplitudes=[0.1],
-    #     planets_periods=[100],
-    #     planets_phases=[0.0],
-    #     batch_size=100,
-    #     use_rassine=False,
-    #     storage_dtype=np.float32,
+    #     planets_amplitudes=None,
+    #     planets_periods=None,
+    #     planets_phases=None,
+    #     output_dir="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/npz_datasets",
     # )
+
+    create_soap_gpu_paper_dataset(
+        spectra_filepath="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/soap_gpu_paper/spec_cube_tot_filtered_normalized_float32.h5",
+        template_filepath="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/soap_gpu_paper/template.npy",
+        wavegrid_filepath="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/soap_gpu_paper/wavegrid.npy",
+        output_dir="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/npz_datasets",
+        idx_start=0,
+        idx_end=3192,
+        wavemin=5000,
+        wavemax=5050,
+        downscaling_factor=2,
+        smooth_after_downscaling=True,
+        smooth_kernel_size=3,
+        add_photon_noise=False,
+        snr_target=300.0,
+        noise_seed=42,
+        planets_amplitudes=[0.1],
+        planets_periods=[100],
+        planets_phases=[0.0],
+        batch_size=100,
+        use_rassine=False,
+        storage_dtype=np.float32,
+    )

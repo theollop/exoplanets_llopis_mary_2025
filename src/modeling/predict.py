@@ -1269,7 +1269,7 @@ if __name__ == "__main__":
     # plt.legend()
     # plt.show()
     main(
-        experiment_dir="experiments/noised_snr_300_50A",
+        experiment_dir="experiments/soapgpu_ns1000_5000-5050_dx2_sm3_p100_k0p1_phi0_truebrest",
         # fap_threshold=0.01,
         # exclude_width_frac=0.05,
         # n_periods=5000,
