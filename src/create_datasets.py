@@ -10,6 +10,7 @@ import unicodedata
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Sequence, Tuple
 
+import pandas as pd
 import h5py
 import numpy as np
 import torch
@@ -698,6 +699,82 @@ def create_soap_gpu_paper_dataset(
     print(f"   - {n_bins} pixels spectraux")
     print(f"   - Gamme: {wavegrid_ds.min():.1f} - {wavegrid_ds.max():.1f} Å")
     print("🧹 Nettoyage mémoire terminé")
+
+
+def create_rvdatachallenge_dataset(
+    flux_path="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/rv_datachallenge/Sun_B57001_E61001_planet-FallChallenge1/HARPN/STAR1136_HPN_flux_YVA.npy",
+    summary_csv_path="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/rv_datachallenge/Sun_B57001_E61001_planet-FallChallenge1/HARPN/STAR1136_HPN_Analyse_summary.csv",
+    material_pkl_path="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/rv_datachallenge/Sun_B57001_E61001_planet-FallChallenge1/HARPN/STAR1136_HPN_Analyse_material.p",
+):
+    """
+    Charge et prépare le dataset RV Data Challenge sans normalisation ni ajout de bruit.
+    Exclut les pixels listés dans pixels_rnr et mask_brute.
+    Calcule le bruit par pixel : sigma_i = F_i / SNR_i.
+    """
+    # Charger le flux (spectres 2D)
+    flux = np.load(flux_path)  # shape: (n_obs, n_pix)
+
+    # Charger le temps (jdb)
+    df_summary = pd.read_csv(summary_csv_path)
+    if "jdb" in df_summary.columns:
+        times = df_summary["jdb"].values
+    else:
+        raise ValueError("Colonne 'jdb' non trouvée dans le CSV résumé.")
+
+    # Charger le pickle (spectre de référence, SNR, etc)
+    with open(material_pkl_path, "rb") as f:
+        material = pickle.load(f)
+
+    # Récupérer le spectre de référence (stellar_template ou reference_spectrum)
+    if "stellar_template" in material:
+        reference_flux = material["stellar_template"]
+    elif "reference_spectrum" in material:
+        reference_flux = material["reference_spectrum"]
+    else:
+        raise ValueError("Aucun spectre de référence trouvé dans le pickle.")
+
+    # Récupérer la courbe SNR
+    if "master_snr_curve" in material:
+        snr_curve = material["master_snr_curve"]
+    else:
+        raise ValueError("'master_snr_curve' non trouvé dans le pickle.")
+
+    # Correction éventuelle par ratio_factor_snr
+    if "ratio_factor_snr" in material:
+        snr_curve = snr_curve * material["ratio_factor_snr"]
+
+    # Pixels à exclure : pixels_rnr et mask_brute depuis le pickle
+    exclude_pixels = set()
+    if "pixels_rnr" in material and material["pixels_rnr"] is not None:
+        exclude_pixels.update(material["pixels_rnr"])
+    if "mask_brute" in material and material["mask_brute"] is not None:
+        exclude_pixels.update(material["mask_brute"])
+
+    # Masque des pixels à garder
+    n_pix = reference_flux.shape[0]
+    mask = np.ones(n_pix, dtype=bool)
+    if exclude_pixels:
+        exclude_pixels = np.array(list(exclude_pixels), dtype=int)
+        mask[exclude_pixels] = False
+
+    # Appliquer le masque
+    flux_masked = flux[:, mask]
+    reference_flux_masked = reference_flux[mask]
+    snr_curve_masked = snr_curve[mask]
+
+    # Calcul du bruit par pixel
+    sigma = reference_flux_masked / snr_curve_masked
+
+    # Préparer le dataset final
+    dataset = {
+        "flux": flux_masked,  # (n_obs, n_pix_masked)
+        "times": times,  # (n_obs,)
+        "reference_flux": reference_flux_masked,  # (n_pix_masked,)
+        "snr_curve": snr_curve_masked,  # (n_pix_masked,)
+        "sigma": sigma,  # (n_pix_masked,)
+        "mask": mask,  # (n_pix,)
+    }
+    return dataset
 
 
 if __name__ == "__main__":
