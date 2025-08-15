@@ -202,12 +202,6 @@ def load_experiment_checkpoint(path, device="cuda"):
 
     # Reconstruction du modèle
     config = ckpt["config"]
-    b_obs_init = config["b_obs_init"]
-    b_rest_init = config["b_rest_init"]
-    b_obs, b_rest = get_bobs_brest_init(dataset, b_obs_init, b_rest_init)
-    console.log(
-        f"✅ Initialisation b_obs : {config['b_obs_init']} b_rest : {config['b_rest_init']}"
-    )
     model = AESTRA(
         n_pixels=dataset.n_pixels,
         S=config["latent_dim"],
@@ -216,8 +210,8 @@ def load_experiment_checkpoint(path, device="cuda"):
         sigma_y=config["sigma_y"],
         k_reg_init=config["k_reg_init"],
         cycle_length=config["cycle_length"],
-        b_obs=b_obs,
-        b_rest=b_rest,
+        b_obs=ckpt.get("b_obs", None),
+        b_rest=ckpt.get("b_rest", None),
         device=device,
         dtype=getattr(torch, config.get("model_dtype", "float32")),
     )
