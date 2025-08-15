@@ -300,8 +300,9 @@ class AESTRA(nn.Module):
         k_reg_init=1.0,
         cycle_length=1000,  # Nombre d'itérations pour le cycle de régularisation
         dropout=0.0,
-        device="cuda",  # ⚠️ NOUVEAU: Paramètre device explicite
-        dtype=torch.float32,  # ⚠️ NOUVEAU: Paramètre dtype pour la précision
+        device="cuda",
+        dtype=torch.float32,
+        smooth_alpha: float = 0.0,  # Poids pour la perte de lissage (L2 sur dérivée)
     ):
         """
         Args:
@@ -339,6 +340,8 @@ class AESTRA(nn.Module):
         self.sigma_y = sigma_y
         self.k_reg_init = k_reg_init
         self.cycle_length = cycle_length
+        # Poids de lissage pour y_act (L2 sur la 1ère dérivée)
+        self.smooth_alpha = float(smooth_alpha)
 
     def set_phase(self, phase: str):
         self.phase = phase
@@ -416,6 +419,7 @@ class AESTRA(nn.Module):
             "c": torch.tensor(0),
             "reg": torch.tensor(0),
             "rv": torch.tensor(0),
+            "smooth": torch.tensor(0),
         }
         if self.rvestimator_trainable:
             batch_vobs_pred, batch_vaug_pred = self.get_rvestimator_pred(
@@ -459,6 +463,12 @@ class AESTRA(nn.Module):
                 iteration_count=iteration_count,
                 cycle_length=self.cycle_length,
             )
+
+            # Smoothness regularization on decoder activity (L2 on first derivative)
+            if self.smooth_alpha is not None and float(self.smooth_alpha) > 0.0:
+                losses["smooth"] = loss_smooth(batch_yact, alpha=self.smooth_alpha)
+            else:
+                losses["smooth"] = torch.tensor(0)
 
         return losses
 
@@ -517,6 +527,23 @@ def loss_c(s, s_aug, sigma_s=1.0):
     S = s.shape[1]
 
     return torch.mean(torch.sigmoid((s - s_aug) ** 2 / (S * sigma_s**2)) - 0.5)
+
+
+def loss_smooth(batch_yact, alpha=1.0):
+    """
+    Smoothness penalty: L2 on the first derivative along the wavelength axis.
+
+    Args:
+        batch_yact: tensor shape [M*B, P]
+        alpha: multiplicative weight
+    Returns:
+        scalar tensor
+    """
+    if batch_yact is None:
+        return torch.tensor(0)
+    # derivative along pixel axis
+    d = batch_yact[:, 1:] - batch_yact[:, :-1]
+    return alpha * torch.mean(d * d)
 
 
 def get_k_reg(k_reg_init: float, iteration_count: int = None, cycle_length: int = 1000):

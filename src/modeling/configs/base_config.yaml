@@ -53,6 +53,9 @@ cycle_length: 1000        # Nombre d'itérations pour le cycle de régularisatio
 get_aug_data: True         # Si True, calcule les données augmentées dans le forward pass et permet de calculer la loss de consistency
 sigma_s: 0.0001              # Poids dans la loss de consistency
 
+# Loss de smooth de l'activité
+smooth_alpha: 0.0
+
 model_dtype: float32      # Type de données pour les poids du modèle (float16/float32/float64)
 
 # --------------------------------------------------------------------------
@@ -78,7 +81,7 @@ plot_rv_every: 50         # Plot des prédictions RV tous les X epochs (0 = dés
 
 
 b_obs_init : true_template
-b_rest_init : true_template
+b_rest_init : mean
 # --------------------------------------------------------------------------
 # Phases d'entraînement
 # --------------------------------------------------------------------------
@@ -109,7 +112,7 @@ phases:
     
     trainable_params:
       b_obs: false
-      b_rest: false
+      b_rest: true
       rvestimator: true
       spender: true
 
@@ -120,7 +123,7 @@ phases:
     
     plot_activity_every: 20
 
-    scheduler: torch.optim.lr_scheduler.StepLR
-    scheduler_kwargs:
-      gamma: 0.7
-      step_size: 50
+    # scheduler: torch.optim.lr_scheduler.StepLR
+    # scheduler_kwargs:
+    #   gamma: 0.7
+    #   step_size: 50
