@@ -216,6 +216,7 @@ def load_experiment_checkpoint(path, device="cuda"):
         device=device,
         dtype=getattr(torch, config.get("model_dtype", "float32")),
         smooth_alpha=config.get("smooth_alpha", 0.0),
+        smooth_order=config.get("smooth_order", 1),
     )
 
     # Load state dict with compatibility handling
@@ -312,6 +313,7 @@ def save_losses_to_csv(losses_history, exp_name, phase_name, epoch, csv_dir, con
             "fid_loss",
             "c_loss",
             "reg_loss",
+            "smooth_loss",
             "total_loss",
         ]
         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
@@ -335,6 +337,7 @@ def save_losses_to_csv(losses_history, exp_name, phase_name, epoch, csv_dir, con
                     "fid_loss": losses_history["fid"][-1],
                     "c_loss": losses_history["c"][-1],
                     "reg_loss": losses_history["reg"][-1],
+                    "smooth_loss": losses_history.get("smooth", [0])[-1],
                     "total_loss": losses_history["total"][-1],
                 }
             )
@@ -635,6 +638,7 @@ def train_phase(
     table.add_column("FID", justify="right")
     table.add_column("C", justify="right")
     table.add_column("Reg", justify="right")
+    table.add_column("Smooth", justify="right")
     table.add_column("Total Loss", justify="right")
 
     model.set_phase(phase_name)
@@ -656,7 +660,7 @@ def train_phase(
         epoch_task = progress.add_task("Epochs", total=n_epochs)
 
         for epoch in range(start_epoch, n_epochs):
-            epoch_losses = {"rv": 0.0, "fid": 0.0, "c": 0.0, "reg": 0.0}
+            epoch_losses = {"rv": 0.0, "fid": 0.0, "c": 0.0, "reg": 0.0, "smooth": 0.0}
 
             for it, batch in enumerate(dataloader):
                 # Transfert CPU->GPU des batches si demandé
@@ -719,7 +723,9 @@ def train_phase(
                 # Accumulation des losses (avec detach pour éviter les gradients)
                 with torch.no_grad():
                     for key in epoch_losses:
-                        epoch_losses[key] += float(losses[key].detach()) * B
+                        epoch_losses[key] += (
+                            float(losses.get(key, torch.tensor(0)).detach()) * B
+                        )
 
             # Moyenne des losses
             for key in epoch_losses:
@@ -736,6 +742,7 @@ def train_phase(
             losses_history["fid"].append(epoch_losses["fid"])
             losses_history["c"].append(epoch_losses["c"])
             losses_history["reg"].append(epoch_losses["reg"])
+            losses_history.setdefault("smooth", []).append(epoch_losses["smooth"])
             losses_history["total"].append(total_loss)
             losses_history["lr"].append(float(optimizer.param_groups[0]["lr"]))
 
@@ -746,6 +753,7 @@ def train_phase(
                 f"{epoch_losses['fid']:.4e}",
                 f"{epoch_losses['c']:.4e}",
                 f"{epoch_losses['reg']:.4e}",
+                f"{epoch_losses['smooth']:.4e}",
                 f"{total_loss:.4e}",
             )
 
@@ -1078,6 +1086,7 @@ def main(
             device=device,
             dtype=getattr(torch, config.get("model_dtype", "float32")),
             smooth_alpha=config.get("smooth_alpha", 0.0),
+            smooth_order=config.get("smooth_order", 1),
         )
         console.log("✅ Modèle créé avec succès")
     except Exception as e:
@@ -1247,6 +1256,6 @@ def main(
 if __name__ == "__main__":
     main(
         config_path="src/modeling/configs/base_config.yaml",
-        dataset_filepath="data/npz_datasets/soapgpu_ns1000_5000-5050_dx2_sm3_p100_k0p1_phi0.npz",
+        dataset_filepath="data/npz_datasets/soapgpu_ns100_5000-5050_dx2_sm3_p50_k0p1_phi0.npz",
         output_root_dir="experiments",
     )

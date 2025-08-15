@@ -36,6 +36,7 @@ import emcee
 import corner
 import matplotlib.pyplot as plt
 from scipy.optimize import minimize
+import os
 
 # ==== MCMC ORBITAL INFERENCE ====
 
@@ -262,7 +263,11 @@ def _calculate_period_grid(
 
     if max_period is None:
         baseline = t.max() - t.min()
+
         max_period = max(baseline / 3.0, min_period * 1.1)
+
+        if t.max() < 120:
+            max_period = t.max()
 
     # Assurer un minimum raisonnable pour min_period
     time_step = np.median(np.diff(np.sort(t)))
@@ -1354,12 +1359,27 @@ if __name__ == "__main__":
     # plt.title("Reference Radial Velocity")
     # plt.legend()
     # plt.show()
+    # experiments_root = (
+    #     "/home/tliopis/Codes/exoplanets_llopis_mary_2025/experiments/exps_rapport"
+    # )
+    # for subdir in os.listdir(experiments_root):
+    #     full_path = os.path.join(experiments_root, subdir)
+    #     if os.path.isdir(full_path):
+    #         main(
+    #             experiment_dir=full_path,
+    #             # fap_threshold=0.01,
+    #             # exclude_width_frac=0.05,
+    #             # n_periods=5000,
+    #             # zoom_frac=0.15,
+    #             # batch_size=64,
+    #             perturbation_value=0.1,
+    #         )
     main(
-        experiment_dir="experiments/soapgpu_ns1000_5000-5050_dx2_sm3_p100_k0p1_phi0_truebrest",
+        experiment_dir="experiments/soapgpu_ns100_5000-5050_dx2_sm3_p50_k0p1_phi0",
         # fap_threshold=0.01,
         # exclude_width_frac=0.05,
         # n_periods=5000,
         # zoom_frac=0.15,
         # batch_size=64,
-        perturbation_value=0.1,
+        perturbation_value=0.01,
     )

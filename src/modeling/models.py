@@ -303,6 +303,7 @@ class AESTRA(nn.Module):
         device="cuda",
         dtype=torch.float32,
         smooth_alpha: float = 0.0,  # Poids pour la perte de lissage (L2 sur dérivée)
+        smooth_order: int = 1,  # 1 = pente, 2 = courbure
     ):
         """
         Args:
@@ -342,6 +343,7 @@ class AESTRA(nn.Module):
         self.cycle_length = cycle_length
         # Poids de lissage pour y_act (L2 sur la 1ère dérivée)
         self.smooth_alpha = float(smooth_alpha)
+        self.smooth_order = int(smooth_order)
 
     def set_phase(self, phase: str):
         self.phase = phase
@@ -466,7 +468,9 @@ class AESTRA(nn.Module):
 
             # Smoothness regularization on decoder activity (L2 on first derivative)
             if self.smooth_alpha is not None and float(self.smooth_alpha) > 0.0:
-                losses["smooth"] = loss_smooth(batch_yact, alpha=self.smooth_alpha)
+                losses["smooth"] = loss_smooth(
+                    batch_yact, alpha=self.smooth_alpha, order=self.smooth_order
+                )
             else:
                 losses["smooth"] = torch.tensor(0)
 
@@ -529,21 +533,36 @@ def loss_c(s, s_aug, sigma_s=1.0):
     return torch.mean(torch.sigmoid((s - s_aug) ** 2 / (S * sigma_s**2)) - 0.5)
 
 
-def loss_smooth(batch_yact, alpha=1.0):
+def loss_smooth(batch_yact, alpha=1.0, order=1, weight=None):
     """
-    Smoothness penalty: L2 on the first derivative along the wavelength axis.
+    Smoothness penalty: L2 on the n-th derivative along the wavelength axis.
 
     Args:
         batch_yact: tensor shape [M*B, P]
         alpha: multiplicative weight
+        order: derivative order (1 = slope, 2 = curvature)
+        weight: optional tensor [P] or [M*B, P] to weight the penalty
     Returns:
         scalar tensor
     """
     if batch_yact is None:
-        return torch.tensor(0)
-    # derivative along pixel axis
-    d = batch_yact[:, 1:] - batch_yact[:, :-1]
-    return alpha * torch.mean(d * d)
+        return batch_yact.new_tensor(0.0)
+
+    if order == 1:
+        d = batch_yact[:, 1:] - batch_yact[:, :-1]
+    elif order == 2:
+        d = batch_yact[:, 2:] - 2 * batch_yact[:, 1:-1] + batch_yact[:, :-2]
+    else:
+        raise ValueError("order must be 1 or 2")
+
+    if weight is not None:
+        if order > 1:
+            weight = weight[:, 1:-1]  # aligne la taille
+        else:
+            weight = weight[:, :-1]
+        d = d * weight
+
+    return alpha * torch.mean(d**2)
 
 
 def get_k_reg(k_reg_init: float, iteration_count: int = None, cycle_length: int = 1000):
