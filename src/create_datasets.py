@@ -707,7 +707,7 @@ def create_rvdatachallenge_dataset(
     material_pkl_path="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/rv_datachallenge/Sun_B57001_E61001_planet-FallChallenge1/HARPN/STAR1136_HPN_Analyse_material.p",
     output_dir: Optional[str] = None,
     output_filename: Optional[str] = None,
-    idx_start: int = 0,
+    idx_start: Optional[int] = None,
     idx_end: Optional[int] = None,
     wavemin: Optional[float] = 5000,
     wavemax: Optional[float] = 5050,
@@ -759,16 +759,49 @@ def create_rvdatachallenge_dataset(
         raise ValueError("'master_snr_curve' non trouvé dans le pickle.")
 
     if "ratio_factor_snr" in material and material["ratio_factor_snr"] is not None:
-        snr_curve = snr_curve * float(material["ratio_factor_snr"])
+        val = material["ratio_factor_snr"]
+        try:
+            # pandas Series
+            if hasattr(val, "values") and not np.isscalar(val):
+                arr = np.asarray(val.values)
+            else:
+                arr = np.asarray(val)
+
+            if arr.size == 1:
+                factor = float(arr.ravel()[0])
+                snr_curve = snr_curve * factor
+            elif arr.size == snr_curve.size:
+                snr_curve = snr_curve * arr
+            else:
+                # fallback: use first element and warn
+                print(
+                    "⚠️  ratio_factor_snr length != snr_curve length; using first element"
+                )
+                factor = float(arr.ravel()[0])
+                snr_curve = snr_curve * factor
+        except Exception as e:
+            print(f"⚠️  Impossible d'appliquer ratio_factor_snr: {e}")
 
     # ---- Temporal selection
     N_tot = flux_all.shape[0]
+    # If both None -> take full range
+    if idx_start is None:
+        idx_start_i = 0
+    else:
+        idx_start_i = int(idx_start)
     if idx_end is None:
-        idx_end = N_tot
-    idx_start = int(max(0, idx_start))
-    idx_end = int(min(N_tot, idx_end))
-    spectra_sel = flux_all[idx_start:idx_end]
-    time_values = times_all[idx_start:idx_end]
+        idx_end_i = N_tot
+    else:
+        idx_end_i = int(idx_end)
+
+    # clamp bounds
+    idx_start_i = max(0, idx_start_i)
+    idx_end_i = min(N_tot, idx_end_i)
+    if idx_end_i < idx_start_i:
+        raise ValueError(f"idx_end ({idx_end_i}) must be >= idx_start ({idx_start_i})")
+
+    spectra_sel = flux_all[idx_start_i:idx_end_i]
+    time_values = times_all[idx_start_i:idx_end_i]
     n_spectra = spectra_sel.shape[0]
 
     # ---- Spectral mask and exclusion
@@ -778,18 +811,10 @@ def create_rvdatachallenge_dataset(
         wavemax = float(wave.max())
     mask_wave = build_mask(wave, wavemin, wavemax)
 
-    exclude_pixels = set()
-    if "pixels_rnr" in material and material["pixels_rnr"] is not None:
-        exclude_pixels.update(material["pixels_rnr"])
-    if "mask_brute" in material and material["mask_brute"] is not None:
-        exclude_pixels.update(material["mask_brute"])
-
+    # Ne pas exclure de pixels supplémentaires: on utilise uniquement le masque
+    # spectral défini par wavemin/wavemax (pas de suppression via pixels_rnr/mask_brute)
     n_pix = reference_flux.shape[0]
     mask = mask_wave.copy()
-    if exclude_pixels:
-        ex = np.array(list(exclude_pixels), dtype=int)
-        ex = ex[(ex >= 0) & (ex < n_pix)]
-        mask[ex] = False
 
     # ---- Apply mask
     wave_masked = wave[mask]
@@ -910,12 +935,43 @@ def create_rvdatachallenge_dataset(
     payload["sigma"] = sigma_ds.astype(storage_dtype, copy=False)
 
     # Save if requested
+    # Save if requested — same naming bits but prefix 'rvdatachallenge_'
     if output_dir is not None:
+        planets_obj = (
+            PlanetParams(planets_amplitudes, planets_periods, planets_phases)
+            if (planets_amplitudes and planets_periods and planets_phases)
+            else None
+        )
         if not output_filename:
-            base_name = _slugify("rvdatachallenge_ns" + str(n_spectra))
-            output_filename = base_name + ".npz"
-        os.makedirs(output_dir, exist_ok=True)
-        output_filepath = os.path.join(output_dir, output_filename)
+            bits = [f"ns{n_spectra}", f"{int(wavemin)}-{int(wavemax)}"]
+            if prep.downscaling_factor and prep.downscaling_factor > 1:
+                bits.append(f"dx{prep.downscaling_factor}")
+            if prep.smooth_after_downscaling:
+                bits.append(f"sm{prep.smooth_kernel_size}")
+            if noise.add_photon_noise:
+                bits.append(
+                    "noise"
+                    if noise.snr_target is None
+                    else f"snr{_fmt_num(noise.snr_target)}"
+                )
+            if (
+                planets_obj is not None
+                and len(planets_obj.periods)
+                and len(planets_obj.amplitudes)
+                and len(planets_obj.phases)
+            ):
+                bits += [
+                    f"P{_fmt_list(planets_obj.periods)}",
+                    f"K{_fmt_list(planets_obj.amplitudes)}",
+                    f"Phi{_fmt_list(planets_obj.phases)}",
+                ]
+            base = _slugify("rvdatachallenge_" + "_".join(bits), max_len=80)
+            os.makedirs(output_dir, exist_ok=True)
+            output_filepath = os.path.join(output_dir, f"{base}.npz")
+        else:
+            os.makedirs(output_dir, exist_ok=True)
+            output_filepath = os.path.join(output_dir, output_filename)
+
         save_npz(output_filepath, payload)
         print(f"💾 RV Data Challenge payload saved: {output_filepath}")
 
@@ -925,25 +981,42 @@ def create_rvdatachallenge_dataset(
 if __name__ == "__main__":
     clear_gpu_memory()
 
-    create_soap_gpu_paper_dataset(
-        spectra_filepath="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/soap_gpu_paper/spec_cube_tot_filtered_normalized_float32.h5",
-        template_filepath="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/soap_gpu_paper/template.npy",
-        wavegrid_filepath="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/soap_gpu_paper/wavegrid.npy",
-        output_dir="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/npz_datasets",
-        idx_start=0,
-        idx_end=3292,
+    create_rvdatachallenge_dataset(
+        flux_path="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/rv_datachallenge/Sun_B57001_E61001_planet-FallChallenge1/HARPN/STAR1136_HPN_flux_YVA.npy",
+        summary_csv_path="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/rv_datachallenge/Sun_B57001_E61001_planet-FallChallenge1/HARPN/STAR1136_HPN_Analyse_summary.csv",
+        material_pkl_path="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/rv_datachallenge/Sun_B57001_E61001_planet-FallChallenge1/HARPN/STAR1136_HPN_Analyse_material.p",
+        idx_start=None,
+        idx_end=None,
         wavemin=5000,
         wavemax=5050,
-        downscaling_factor=2,
-        smooth_after_downscaling=True,
+        downscaling_factor=1,
+        smooth_after_downscaling=False,
         smooth_kernel_size=3,
-        add_photon_noise=True,
-        snr_target=300.0,
-        noise_seed=42,
-        planets_amplitudes=[0.1],
-        planets_periods=[100],
-        planets_phases=[0.0],
-        batch_size=100,
-        use_rassine=False,
-        storage_dtype=np.float32,
+        planets_amplitudes=None,
+        planets_periods=None,
+        planets_phases=None,
+        output_dir="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/npz_datasets",
     )
+
+    # create_soap_gpu_paper_dataset(
+    #     spectra_filepath="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/soap_gpu_paper/spec_cube_tot_filtered_normalized_float32.h5",
+    #     template_filepath="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/soap_gpu_paper/template.npy",
+    #     wavegrid_filepath="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/soap_gpu_paper/wavegrid.npy",
+    #     output_dir="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/npz_datasets",
+    #     idx_start=0,
+    #     idx_end=3292,
+    #     wavemin=5000,
+    #     wavemax=5050,
+    #     downscaling_factor=2,
+    #     smooth_after_downscaling=True,
+    #     smooth_kernel_size=3,
+    #     add_photon_noise=True,
+    #     snr_target=300.0,
+    #     noise_seed=42,
+    #     planets_amplitudes=[0.1],
+    #     planets_periods=[100],
+    #     planets_phases=[0.0],
+    #     batch_size=100,
+    #     use_rassine=False,
+    #     storage_dtype=np.float32,
+    # )

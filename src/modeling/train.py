@@ -240,8 +240,6 @@ def load_experiment_checkpoint(path, device="cuda"):
     model.load_state_dict(filtered_state_dict, strict=False)
     model.set_phase(ckpt.get("model_phase", "joint"))
 
-    plt.plot(model.b_rest.detach().cpu() - dataset.spectra.mean(dim=0).detach().cpu())
-
     if torch.cuda.is_available():
         model = model.cuda()
 
