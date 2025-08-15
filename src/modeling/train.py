@@ -28,6 +28,7 @@ import os
 import yaml
 import torch
 import csv
+import matplotlib.pyplot as plt
 from datetime import datetime
 from torch.utils.data import DataLoader
 from torch.cuda.amp import GradScaler as DeprecatedGradScaler  # compat
@@ -210,8 +211,8 @@ def load_experiment_checkpoint(path, device="cuda"):
         sigma_y=config["sigma_y"],
         k_reg_init=config["k_reg_init"],
         cycle_length=config["cycle_length"],
-        b_obs=ckpt.get("b_obs", None),
-        b_rest=ckpt.get("b_rest", None),
+        b_obs=dataset.spectra.mean(dim=0),
+        b_rest=dataset.spectra.mean(dim=0),
         device=device,
         dtype=getattr(torch, config.get("model_dtype", "float32")),
     )
@@ -238,6 +239,8 @@ def load_experiment_checkpoint(path, device="cuda"):
     # Load the filtered state dict
     model.load_state_dict(filtered_state_dict, strict=False)
     model.set_phase(ckpt.get("model_phase", "joint"))
+
+    plt.plot(model.b_rest.detach().cpu() - dataset.spectra.mean(dim=0).detach().cpu())
 
     if torch.cuda.is_available():
         model = model.cuda()

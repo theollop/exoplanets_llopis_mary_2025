@@ -705,76 +705,221 @@ def create_rvdatachallenge_dataset(
     flux_path="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/rv_datachallenge/Sun_B57001_E61001_planet-FallChallenge1/HARPN/STAR1136_HPN_flux_YVA.npy",
     summary_csv_path="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/rv_datachallenge/Sun_B57001_E61001_planet-FallChallenge1/HARPN/STAR1136_HPN_Analyse_summary.csv",
     material_pkl_path="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/rv_datachallenge/Sun_B57001_E61001_planet-FallChallenge1/HARPN/STAR1136_HPN_Analyse_material.p",
+    output_dir: Optional[str] = None,
+    output_filename: Optional[str] = None,
+    idx_start: int = 0,
+    idx_end: Optional[int] = None,
+    wavemin: Optional[float] = 5000,
+    wavemax: Optional[float] = 5050,
+    downscaling_factor: int = 2,
+    smooth_after_downscaling: bool = False,
+    smooth_kernel_size: int = 3,
+    planets_amplitudes: Optional[Sequence[float]] = None,
+    planets_periods: Optional[Sequence[float]] = None,
+    planets_phases: Optional[Sequence[float]] = None,
+    batch_size: int = 100,
+    storage_dtype=np.float64,
 ):
     """
-    Charge et prépare le dataset RV Data Challenge sans normalisation ni ajout de bruit.
-    Exclut les pixels listés dans pixels_rnr et mask_brute.
-    Calcule le bruit par pixel : sigma_i = F_i / SNR_i.
-    """
-    # Charger le flux (spectres 2D)
-    flux = np.load(flux_path)  # shape: (n_obs, n_pix)
+    Construis un payload comparable à `create_soap_gpu_paper_dataset` à partir des
+    données RV Data Challenge. Aucun traitement de normalisation ni ajout de bruit
+    n'est appliqué (comme demandé). Les clés pour lesquelles il n'y a pas de
+    vérité terrain (ex: `activity`) ne sont pas ajoutées.
 
-    # Charger le temps (jdb)
+    Si `output_dir` est fourni, le fichier .npz est sauvegardé comme dans
+    `create_soap_gpu_paper_dataset`.
+    """
+
+    # ---- Load raw files
+    flux_all = np.load(flux_path)  # (N_tot, P)
     df_summary = pd.read_csv(summary_csv_path)
     if "jdb" in df_summary.columns:
-        times = df_summary["jdb"].values
+        times_all = df_summary["jdb"].values
     else:
         raise ValueError("Colonne 'jdb' non trouvée dans le CSV résumé.")
 
-    # Charger le pickle (spectre de référence, SNR, etc)
     with open(material_pkl_path, "rb") as f:
         material = pickle.load(f)
 
-    # Récupérer le spectre de référence (stellar_template ou reference_spectrum)
+    if "wave" in material:
+        wave = np.asarray(material["wave"])
+    else:
+        raise ValueError("'wave' absent du fichier material.p")
+
     if "stellar_template" in material:
-        reference_flux = material["stellar_template"]
+        reference_flux = np.asarray(material["stellar_template"])
     elif "reference_spectrum" in material:
-        reference_flux = material["reference_spectrum"]
+        reference_flux = np.asarray(material["reference_spectrum"])
     else:
         raise ValueError("Aucun spectre de référence trouvé dans le pickle.")
 
-    # Récupérer la courbe SNR
     if "master_snr_curve" in material:
-        snr_curve = material["master_snr_curve"]
+        snr_curve = np.asarray(material["master_snr_curve"])
     else:
         raise ValueError("'master_snr_curve' non trouvé dans le pickle.")
 
-    # Correction éventuelle par ratio_factor_snr
-    if "ratio_factor_snr" in material:
-        snr_curve = snr_curve * material["ratio_factor_snr"]
+    if "ratio_factor_snr" in material and material["ratio_factor_snr"] is not None:
+        snr_curve = snr_curve * float(material["ratio_factor_snr"])
 
-    # Pixels à exclure : pixels_rnr et mask_brute depuis le pickle
+    # ---- Temporal selection
+    N_tot = flux_all.shape[0]
+    if idx_end is None:
+        idx_end = N_tot
+    idx_start = int(max(0, idx_start))
+    idx_end = int(min(N_tot, idx_end))
+    spectra_sel = flux_all[idx_start:idx_end]
+    time_values = times_all[idx_start:idx_end]
+    n_spectra = spectra_sel.shape[0]
+
+    # ---- Spectral mask and exclusion
+    if wavemin is None:
+        wavemin = float(wave.min())
+    if wavemax is None:
+        wavemax = float(wave.max())
+    mask_wave = build_mask(wave, wavemin, wavemax)
+
     exclude_pixels = set()
     if "pixels_rnr" in material and material["pixels_rnr"] is not None:
         exclude_pixels.update(material["pixels_rnr"])
     if "mask_brute" in material and material["mask_brute"] is not None:
         exclude_pixels.update(material["mask_brute"])
 
-    # Masque des pixels à garder
     n_pix = reference_flux.shape[0]
-    mask = np.ones(n_pix, dtype=bool)
+    mask = mask_wave.copy()
     if exclude_pixels:
-        exclude_pixels = np.array(list(exclude_pixels), dtype=int)
-        mask[exclude_pixels] = False
+        ex = np.array(list(exclude_pixels), dtype=int)
+        ex = ex[(ex >= 0) & (ex < n_pix)]
+        mask[ex] = False
 
-    # Appliquer le masque
-    flux_masked = flux[:, mask]
+    # ---- Apply mask
+    wave_masked = wave[mask]
     reference_flux_masked = reference_flux[mask]
-    snr_curve_masked = snr_curve[mask]
+    snr_masked = snr_curve[mask]
+    spectra_masked = spectra_sel[:, mask]
 
-    # Calcul du bruit par pixel
-    sigma = reference_flux_masked / snr_curve_masked
+    # ---- Downscaling
+    if downscaling_factor is None or downscaling_factor <= 1:
+        wavegrid_ds = wave_masked
+        template_ds = reference_flux_masked
+        spectra_ds = spectra_masked
+        n_bins = wave_masked.size
+    else:
+        wavegrid_ds = downscale_mean_1d(wave_masked, downscaling_factor)
+        template_ds = downscale_mean_1d(reference_flux_masked, downscaling_factor)
+        spectra_ds, n_bins = downscale_mean_2d(spectra_masked, downscaling_factor)
 
-    # Préparer le dataset final
-    dataset = {
-        "flux": flux_masked,  # (n_obs, n_pix_masked)
-        "times": times,  # (n_obs,)
-        "reference_flux": reference_flux_masked,  # (n_pix_masked,)
-        "snr_curve": snr_curve_masked,  # (n_pix_masked,)
-        "sigma": sigma,  # (n_pix_masked,)
-        "mask": mask,  # (n_pix,)
+    # ---- Optional smoothing
+    if smooth_after_downscaling:
+        template_ds = uniform_filter1d(
+            template_ds, size=smooth_kernel_size, mode="reflect"
+        )
+        maybe_smooth_inplace(spectra_ds, size=smooth_kernel_size)
+
+    # ---- Activity: not available reliably => omit
+    activity_ds = None
+
+    # ---- Sigma per pixel and weights
+    sigma_pix = reference_flux_masked / np.clip(snr_masked, 1e-12, None)
+    if downscaling_factor is None or downscaling_factor <= 1:
+        sigma_ds = sigma_pix
+    else:
+        sigma_ds = downscale_mean_1d(sigma_pix, downscaling_factor)
+
+    with np.errstate(divide="ignore"):
+        weights_pix = 1.0 / (sigma_ds**2)
+    weights_pix = np.nan_to_num(weights_pix, posinf=0.0, neginf=0.0)
+    # replicate per spectrum to match create_soap shape when needed
+    weights_fid = np.tile(weights_pix, (n_spectra, 1))
+
+    # ---- Planets
+    planets_obj = None
+    v_true = np.zeros(n_spectra, dtype=float)
+    spectra_ds_no_activity = None
+    if (
+        planets_amplitudes is not None
+        and planets_periods is not None
+        and planets_phases is not None
+        and len(planets_amplitudes)
+        and len(planets_periods)
+        and len(planets_phases)
+    ):
+        planets_obj = PlanetParams(planets_amplitudes, planets_periods, planets_phases)
+        v_np = compute_velocities(time_values, planets_obj)
+        v_true = v_np.astype(float, copy=False)
+
+        # inject on dataset (activity is unknown: we inject on template to build spectra_no_activity)
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        dtype = torch.float64
+        wave_t = torch.tensor(wavegrid_ds, device=device, dtype=dtype)
+        v_t = torch.tensor(v_np, device=device, dtype=dtype)
+
+        tmpl_t = torch.tensor(template_ds, device=device, dtype=dtype)
+        tmpl_batch = tmpl_t.unsqueeze(0).expand(n_spectra, -1).contiguous()
+        spectra_noact_inj = inject_with_velocities(
+            tmpl_batch, wave_t, v_t, batch_size=batch_size
+        )
+        spectra_ds_no_activity = spectra_noact_inj.detach().cpu().numpy()
+
+        # also shift spectra_ds if you want to provide observed spectra with planets removed/added
+        # but user requested no alteration of observed fluxes, so we keep spectra_ds as read
+
+    # ---- Metadata
+    prep = PreprocessParams(
+        wavemin,
+        wavemax,
+        downscaling_factor,
+        smooth_after_downscaling,
+        smooth_kernel_size,
+    )
+    noise = NoiseParams(add_photon_noise=False, snr_target=None, seed=None)
+    metadata = build_metadata(
+        n_file_total=N_tot,
+        n_spectra=n_spectra,
+        wavemin=wavemin,
+        wavemax=wavemax,
+        wavegrid_ds=wavegrid_ds,
+        prep=prep,
+        noise=noise,
+        batch_size=batch_size,
+        original_pixels=int(n_pix),
+        downscaled_pixels=int(n_bins),
+        planets=planets_obj,
+    )
+
+    # ---- Build payload similar to create_soap_gpu_paper_dataset
+    payload = {
+        "wavegrid": wavegrid_ds.astype(storage_dtype, copy=False),
+        "template": template_ds.astype(storage_dtype, copy=False),
+        "spectra": spectra_ds.astype(storage_dtype, copy=False),
+        "time_values": time_values[:n_spectra].astype(storage_dtype, copy=False),
+        "v_true": v_true.astype(storage_dtype, copy=False),
+        "metadata": metadata,
     }
-    return dataset
+
+    if activity_ds is not None:
+        payload["activity"] = activity_ds.astype(storage_dtype, copy=False)
+    if spectra_ds_no_activity is not None:
+        payload["spectra_no_activity"] = spectra_ds_no_activity[:n_spectra].astype(
+            storage_dtype, copy=False
+        )
+    if weights_fid is not None:
+        payload["weights_fid"] = weights_fid[:n_spectra].astype(
+            storage_dtype, copy=False
+        )
+    # add sigma per pixel
+    payload["sigma"] = sigma_ds.astype(storage_dtype, copy=False)
+
+    # Save if requested
+    if output_dir is not None:
+        if not output_filename:
+            base_name = _slugify("rvdatachallenge_ns" + str(n_spectra))
+            output_filename = base_name + ".npz"
+        os.makedirs(output_dir, exist_ok=True)
+        output_filepath = os.path.join(output_dir, output_filename)
+        save_npz(output_filepath, payload)
+        print(f"💾 RV Data Challenge payload saved: {output_filepath}")
+
+    return payload
 
 
 if __name__ == "__main__":
