@@ -564,13 +564,6 @@ def predict(model, dataset, batch_size=64, perturbation_value=1.0):
                 batch_activity_proxies_norm,
             ) = batch
 
-            print(
-                batch_yobs.shape,
-                batch_yaug.shape,
-                batch_voffset_true.shape,
-                batch_activity_proxies_norm.shape,
-            )
-
             batch_vobs_pred, batch_vaug_pred = model.get_rvestimator_pred(
                 batch_yobs=batch_yobs, batch_yaug=batch_yaug
             )
@@ -810,6 +803,7 @@ def main(
     fig_latent = os.path.join(fig_dir, "latent")
     fig_corr = os.path.join(fig_dir, "correlations")
     fig_ccf_compare = os.path.join(fig_dir, "ccf_comparison")
+    fig_timeseries = os.path.join(fig_dir, "time_series")
     data_dir = os.path.join(out_root, "data")
 
     for d in [
@@ -818,6 +812,7 @@ def main(
         fig_latent,
         fig_corr,
         fig_ccf_compare,
+        fig_timeseries,
         data_dir,
     ]:
         os.makedirs(d, exist_ok=True)
@@ -857,6 +852,42 @@ def main(
     v_ref, depth_ref, span_ref, fwhm_ref = get_vref(dataset, CCF_params)
     print("Calcul des vitesses corrigées par méthode traditionnelle...")
     v_traditionnal = get_vtraditionnal(v_apparent, depth, span, fwhm)
+
+    # Plot overlay: v_apparent vs v_correct (AESTRA)
+    try:
+        overlay_path = os.path.join(fig_timeseries, "v_apparent_vs_v_correct.png")
+        plt.figure(figsize=(10, 5))
+        plt.plot(
+            times_values,
+            v_apparent - v_apparent[0],
+            alpha=0.8,
+            label="v_apparent (CCF)",
+        )
+        plt.plot(
+            times_values,
+            v_correct - v_correct[0],
+            alpha=0.9,
+            label="v_correct (AESTRA)",
+        )
+        plt.plot(
+            times_values,
+            v_traditionnal - v_traditionnal[0],
+            alpha=0.9,
+            label="v_traditionnal (AESTRA)",
+        )
+        plt.xlabel("Time (days)")
+        plt.ylabel("Radial Velocity (m/s)")
+        plt.title(
+            "RV time series: CCF vs AESTRA (v_apparent, v_correct, v_traditionnal)"
+        )
+        plt.legend()
+        plt.grid(alpha=0.2)
+        plt.tight_layout()
+        plt.savefig(overlay_path, dpi=200)
+        plt.close()
+        print(f"Saved RV overlay plot: {overlay_path}")
+    except Exception as e:
+        print(f"Erreur lors du plot v_apparent vs v_correct: {e}")
 
     # --- CCF comparison: try to obtain RVs on dataset without injected signal
     v_no_signal = None
@@ -1386,7 +1417,7 @@ if __name__ == "__main__":
     #             perturbation_value=0.1,
     #         )
     main(
-        experiment_dir="experiments/soapgpu_ns100_5000-5055_dx2_sm3_p50_k0p1_phi0",
+        experiment_dir="experiments/soapgpu_ns1000_5000-5010_dx2_sm3_p50_k0p1_phi0",
         # fap_threshold=0.01,
         # exclude_width_frac=0.05,
         # n_periods=5000,

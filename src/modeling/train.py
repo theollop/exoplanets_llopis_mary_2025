@@ -1304,7 +1304,6 @@ def main(
 if __name__ == "__main__":
     main(
         config_path="src/modeling/configs/base_config.yaml",
-        dataset_filepath="data/npz_datasets/soapgpu_ns100_5000-5055_dx2_sm3_p50_k0p1_phi0.npz",
+        dataset_filepath="data/npz_datasets/soapgpu_ns1000_5000-5010_dx2_sm3_p50_k0p1_phi0.npz",
         output_root_dir="experiments",
-        # checkpoint_path="experiments/soapgpu_ns100_5000-5050_dx2_sm3_p50_k0p1_phi0_corr/models/model_rvonly_epoch_200.pth",
     )
