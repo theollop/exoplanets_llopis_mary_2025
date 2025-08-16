@@ -28,7 +28,6 @@ import os
 import yaml
 import torch
 import csv
-import matplotlib.pyplot as plt
 from datetime import datetime
 from torch.utils.data import DataLoader
 from torch.cuda.amp import GradScaler as DeprecatedGradScaler  # compat
@@ -42,7 +41,7 @@ from rich.progress import (
 )
 from rich.table import Table
 
-from src.modeling.models import AESTRA, save_checkpoint
+from src.modeling.models import AESTRA, AESTRAM, save_checkpoint
 from src.dataset import SpectrumDataset, generate_collate_fn
 from src.utils import get_class, clear_gpu_memory, get_gpu_memory_info
 from src.plots_aestra import (
@@ -203,24 +202,69 @@ def load_experiment_checkpoint(path, device="cuda"):
 
     # Reconstruction du modèle
     config = ckpt["config"]
-    model = AESTRA(
-        n_pixels=dataset.n_pixels,
-        S=config["latent_dim"],
-        sigma_v=config["sigma_v"],
-        sigma_s=config["sigma_s"],
-        sigma_y=config["sigma_y"],
-        k_reg_init=config["k_reg_init"],
-        cycle_length=config["cycle_length"],
-        b_obs=dataset.spectra.mean(dim=0),
-        b_rest=dataset.spectra.mean(dim=0),
-        device=device,
-        dtype=getattr(torch, config.get("model_dtype", "float32")),
-        smooth_alpha=config.get("smooth_alpha", 0.0),
-        smooth_order=config.get("smooth_order", 1),
-        sigma_l=config.get("sigma_l", 0.0),
-        sigma_corr=config.get("sigma_corr", 0.0),
-        include_activity_proxies=config.get("include_activity_proxies", False),
-    )
+    if getattr(dataset, "spectra_lines", None) is not None:
+        # Recréer AESTRAM (masked)
+        L = dataset.n_lines
+        W = dataset.window_size
+        include_ap = bool(config.get("include_activity_proxies", False))
+        # Base rows from template_lines + pos_norm
+        b_obs_lines = dataset.template_lines  # [L,W]
+        b_rest_lines = dataset.template_lines.clone()
+        pos_norm = getattr(dataset, "line_positions_norm", None)
+        if pos_norm is None:
+            pos_norm = torch.linspace(
+                0, 1, steps=L, dtype=b_obs_lines.dtype, device=b_obs_lines.device
+            )
+        else:
+            pos_norm = pos_norm.to(b_obs_lines.device, dtype=b_obs_lines.dtype)
+        pos_col = pos_norm.view(L, 1)
+        rows_obs = torch.cat([b_obs_lines, pos_col], dim=1)
+        rows_rest = torch.cat([b_rest_lines, pos_col], dim=1)
+        if include_ap:
+            zeros_proxy = torch.zeros(
+                3, W + 1, dtype=rows_obs.dtype, device=rows_obs.device
+            )
+            rows_obs = torch.cat([rows_obs, zeros_proxy], dim=0)
+            rows_rest = torch.cat([rows_rest, zeros_proxy], dim=0)
+        b_obs_flat = rows_obs.view(-1)
+        b_rest_flat = rows_rest.view(-1)
+
+        model = AESTRAM(
+            n_lines=L,
+            window_size=W,
+            b_obs_flat=b_obs_flat,
+            b_rest_flat=b_rest_flat,
+            include_activity_proxies=include_ap,
+            S=config["latent_dim"],
+            sigma_v=config["sigma_v"],
+            sigma_s=config["sigma_s"],
+            sigma_y=config["sigma_y"],
+            sigma_l=config.get("sigma_l", 1.0),
+            sigma_corr=config.get("sigma_corr", 0.0),
+            k_reg_init=config["k_reg_init"],
+            cycle_length=config["cycle_length"],
+            device=device,
+            dtype=getattr(torch, config.get("model_dtype", "float32")),
+        )
+    else:
+        model = AESTRA(
+            n_pixels=dataset.n_pixels,
+            S=config["latent_dim"],
+            sigma_v=config["sigma_v"],
+            sigma_s=config["sigma_s"],
+            sigma_y=config["sigma_y"],
+            k_reg_init=config["k_reg_init"],
+            cycle_length=config["cycle_length"],
+            b_obs=dataset.spectra.mean(dim=0),
+            b_rest=dataset.spectra.mean(dim=0),
+            device=device,
+            dtype=getattr(torch, config.get("model_dtype", "float32")),
+            smooth_alpha=config.get("smooth_alpha", 0.0),
+            smooth_order=config.get("smooth_order", 1),
+            sigma_l=config.get("sigma_l", 0.0),
+            sigma_corr=config.get("sigma_corr", 0.0),
+            include_activity_proxies=config.get("include_activity_proxies", False),
+        )
 
     # Load state dict with compatibility handling
     model_state_dict = ckpt["model_state_dict"]
@@ -698,6 +742,60 @@ def train_phase(
 
                 B = batch[0].shape[0]
 
+                # Préparer entrées aplaties pour AESTRAM si nécessaire (lines-mode)
+                xobs_flat = xaug_flat = None
+                if isinstance(model, AESTRAM):
+                    # batch tuples for lines-mode:
+                    # (yobs_lines[B,L,W], yaug_lines[B,L,W], voffset[B], wavegrid_lines[B,L,W], line_weights[B,L], indices, _, proxies?)
+                    yobs_lines, yaug_lines = batch[0], batch[1]
+                    L = yobs_lines.shape[1]
+                    W = yobs_lines.shape[2]
+                    # Build rows [B, L, W+1]
+                    pos_norm = getattr(dataset, "line_positions_norm", None)
+                    if pos_norm is None:
+                        pos_norm = torch.linspace(
+                            0,
+                            1,
+                            steps=L,
+                            dtype=yobs_lines.dtype,
+                            device=yobs_lines.device,
+                        )
+                    else:
+                        pos_norm = pos_norm.to(
+                            yobs_lines.device, dtype=yobs_lines.dtype
+                        )
+                    pos_col = pos_norm.view(1, L, 1).expand(B, L, 1)
+
+                    rows_obs = torch.cat([yobs_lines, pos_col], dim=2)  # [B,L,W+1]
+                    rows_aug = torch.cat([yaug_lines, pos_col], dim=2)
+
+                    if (
+                        getattr(model, "include_activity_proxies", False)
+                        and batch[-1] is not None
+                    ):
+                        proxies = batch[-1]
+                        if proxies.dim() == 1:
+                            proxies = proxies.view(B, 1)
+                        if proxies.shape[1] >= 3:
+                            prox3 = proxies[:, :3]
+                        else:
+                            pad = torch.zeros(
+                                B,
+                                3 - proxies.shape[1],
+                                dtype=proxies.dtype,
+                                device=proxies.device,
+                            )
+                            prox3 = torch.cat([proxies, pad], dim=1)
+                        prox_rows = prox3.unsqueeze(-1).expand(B, 3, 1)
+                        prox_rows = prox_rows.expand(B, 3, 1).repeat(1, 1, W + 1)
+                        rows_obs = torch.cat(
+                            [rows_obs, prox_rows], dim=1
+                        )  # [B,L+3,W+1]
+                        rows_aug = torch.cat([rows_aug, prox_rows], dim=1)
+
+                    xobs_flat = rows_obs.view(B, -1)
+                    xaug_flat = rows_aug.view(B, -1)
+
                 # ⚠️ CRITIQUE: Reset gradients à chaque batch
                 optimizer.zero_grad()
 
@@ -712,21 +810,41 @@ def train_phase(
                         amp_ctx = legacy_autocast()
 
                     with amp_ctx:
+                        if isinstance(model, AESTRAM):
+                            losses = model.get_losses(
+                                batch=batch,
+                                xobs_flat=xobs_flat,
+                                xaug_flat=xaug_flat,
+                                extrapolate="linear",
+                                iteration_count=it,
+                                get_aug_data=config.get("get_aug_data", True),
+                            )
+                        else:
+                            losses = model.get_losses(
+                                batch=batch,
+                                extrapolate="linear",
+                                iteration_count=it,
+                                get_aug_data=config.get("get_aug_data", True),
+                            )
+                        # Calculer la loss totale pour ce batch
+                        total_batch_loss = sum(losses.values())
+                else:
+                    if isinstance(model, AESTRAM):
+                        losses = model.get_losses(
+                            batch=batch,
+                            xobs_flat=xobs_flat,
+                            xaug_flat=xaug_flat,
+                            extrapolate="linear",
+                            iteration_count=it,
+                            get_aug_data=config.get("get_aug_data", True),
+                        )
+                    else:
                         losses = model.get_losses(
                             batch=batch,
                             extrapolate="linear",
                             iteration_count=it,
                             get_aug_data=config.get("get_aug_data", True),
                         )
-                        # Calculer la loss totale pour ce batch
-                        total_batch_loss = sum(losses.values())
-                else:
-                    losses = model.get_losses(
-                        batch=batch,
-                        extrapolate="linear",
-                        iteration_count=it,
-                        get_aug_data=config.get("get_aug_data", True),
-                    )
                     # Calculer la loss totale pour ce batch
                     total_batch_loss = sum(losses.values())
 
@@ -877,17 +995,20 @@ def train_phase(
                     if exp_dirs
                     else phase_config.get("spectra_plot_dir", "reports/spectra")
                 )
-                plot_aestra_analysis(
-                    batch,
-                    dataset,
-                    model,
-                    exp_name,
-                    phase_name,
-                    epoch + 1,
-                    spectra_plot_dir,
-                    zoom_line=True,
-                    data_root_dir=config.get("data_root_dir", "data"),
-                )
+                try:
+                    plot_aestra_analysis(
+                        batch,
+                        dataset,
+                        model,
+                        exp_name,
+                        phase_name,
+                        epoch + 1,
+                        spectra_plot_dir,
+                        zoom_line=True,
+                        data_root_dir=config.get("data_root_dir", "data"),
+                    )
+                except Exception as e:
+                    console.log(f"⚠️  Spectra plotting skipped/failed: {e}")
 
             # Sauvegarde CSV périodique
             csv_save_every = config.get("csv_save_every", 0)  # Par défaut pas de CSV
@@ -1088,35 +1209,83 @@ def main(
 
     # Création du modèle
     try:
-        b_obs_init, b_rest_init = get_bobs_brest_init(
-            b_obs=config.get("b_obs_init", "true_template"),
-            b_rest=config.get("b_rest_init", "mean"),
-            dataset=dataset,
-        )
-        console.log(
-            f"✅ Initialisation b_obs : {config.get('b_obs_init', 'true_template')} b_rest : {config.get('b_rest_init', 'mean')}"
-        )
-        model = AESTRA(
-            n_pixels=dataset.n_pixels,
-            S=config["latent_dim"],
-            sigma_v=config["sigma_v"],
-            sigma_s=config["sigma_s"],
-            sigma_y=config["sigma_y"],
-            k_reg_init=config["k_reg_init"],
-            cycle_length=config["cycle_length"],
-            b_obs=b_obs_init,
-            b_rest=b_rest_init,
-            device=device,
-            dtype=getattr(torch, config.get("model_dtype", "float32")),
-            smooth_alpha=config.get("smooth_alpha", 0.0),
-            smooth_order=config.get("smooth_order", 1),
-            sigma_l=config.get("sigma_l", 1.0),
-            sigma_corr=config.get("sigma_corr", 0.0),
-            include_activity_proxies=config.get("include_activity_proxies", False),
-        )
-        console.log(
-            f"✅ Modèle créé avec succès (include_activity_proxies={model.include_activity_proxies})"
-        )
+        if getattr(dataset, "spectra_lines", None) is not None:
+            # AESTRAM
+            L = dataset.n_lines
+            W = dataset.window_size
+            include_ap = bool(config.get("include_activity_proxies", False))
+            # Rows from template_lines + pos_norm
+            b_obs_lines = dataset.template_lines
+            b_rest_lines = dataset.template_lines.clone()
+            pos_norm = getattr(dataset, "line_positions_norm", None)
+            if pos_norm is None:
+                pos_norm = torch.linspace(
+                    0, 1, steps=L, dtype=b_obs_lines.dtype, device=b_obs_lines.device
+                )
+            else:
+                pos_norm = pos_norm.to(b_obs_lines.device, dtype=b_obs_lines.dtype)
+            pos_col = pos_norm.view(L, 1)
+            rows_obs = torch.cat([b_obs_lines, pos_col], dim=1)
+            rows_rest = torch.cat([b_rest_lines, pos_col], dim=1)
+            if include_ap:
+                zeros_proxy = torch.zeros(
+                    3, W + 1, dtype=rows_obs.dtype, device=rows_obs.device
+                )
+                rows_obs = torch.cat([rows_obs, zeros_proxy], dim=0)
+                rows_rest = torch.cat([rows_rest, zeros_proxy], dim=0)
+            b_obs_flat = rows_obs.view(-1)
+            b_rest_flat = rows_rest.view(-1)
+
+            model = AESTRAM(
+                n_lines=L,
+                window_size=W,
+                b_obs_flat=b_obs_flat,
+                b_rest_flat=b_rest_flat,
+                include_activity_proxies=include_ap,
+                dropout=0.0,
+                S=config["latent_dim"],
+                sigma_v=config["sigma_v"],
+                sigma_s=config["sigma_s"],
+                sigma_y=config["sigma_y"],
+                sigma_l=config.get("sigma_l", 1.0),
+                sigma_corr=config.get("sigma_corr", 0.0),
+                k_reg_init=config["k_reg_init"],
+                cycle_length=config["cycle_length"],
+                device=device,
+                dtype=getattr(torch, config.get("model_dtype", "float32")),
+            )
+            console.log("✅ Modèle AESTRAM (masked) créé avec succès")
+        else:
+            # AESTRA
+            b_obs_init, b_rest_init = get_bobs_brest_init(
+                b_obs=config.get("b_obs_init", "true_template"),
+                b_rest=config.get("b_rest_init", "mean"),
+                dataset=dataset,
+            )
+            console.log(
+                f"✅ Initialisation b_obs : {config.get('b_obs_init', 'true_template')} b_rest : {config.get('b_rest_init', 'mean')}"
+            )
+            model = AESTRA(
+                n_pixels=dataset.n_pixels,
+                S=config["latent_dim"],
+                sigma_v=config["sigma_v"],
+                sigma_s=config["sigma_s"],
+                sigma_y=config["sigma_y"],
+                k_reg_init=config["k_reg_init"],
+                cycle_length=config["cycle_length"],
+                b_obs=b_obs_init,
+                b_rest=b_rest_init,
+                device=device,
+                dtype=getattr(torch, config.get("model_dtype", "float32")),
+                smooth_alpha=config.get("smooth_alpha", 0.0),
+                smooth_order=config.get("smooth_order", 1),
+                sigma_l=config.get("sigma_l", 1.0),
+                sigma_corr=config.get("sigma_corr", 0.0),
+                include_activity_proxies=config.get("include_activity_proxies", False),
+            )
+            console.log(
+                f"✅ Modèle AESTRA créé avec succès (include_activity_proxies={model.include_activity_proxies})"
+            )
     except Exception as e:
         console.log(f"❌ Erreur lors de la création du modèle: {e}")
         raise
@@ -1211,7 +1380,12 @@ def main(
             "⚠️  Activity proxies are included in the model but not in the dataset"
         )
 
-    console.log(f"📊 Dataset: {len(dataset)} spectres, {dataset.n_pixels} pixels")
+    if getattr(dataset, "spectra_lines", None) is not None:
+        console.log(
+            f"📊 Dataset: {len(dataset)} spectres, lines-mode: L={dataset.n_lines}, W={dataset.window_size}"
+        )
+    else:
+        console.log(f"📊 Dataset: {len(dataset)} spectres, {dataset.n_pixels} pixels")
     console.log(f"🔧 Modèle: {sum(p.numel() for p in model.parameters())} paramètres")
     console.log(f"Batch size: {config['batch_size']}")
 

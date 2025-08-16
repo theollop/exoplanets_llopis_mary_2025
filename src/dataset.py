@@ -2,7 +2,12 @@ import os
 import numpy as np
 import torch
 from torch.utils.data import Dataset
-from src.interpolate import augment_spectra_uniform
+from src.interpolate import (
+    augment_spectra_uniform,
+    shift_spectra_linear,
+    shift_spectra_cubic,
+)
+from src.utils import get_mask
 
 ##############################################################################
 ##############################################################################
@@ -100,6 +105,10 @@ class SpectrumDataset(Dataset):
         split: str = "all",  # ignoré, conservé pour compatibilité API
         data_dtype: torch.dtype = torch.float32,
         cuda: bool = True,
+        # --- Lignes / fenêtres ---
+        use_lines: bool = True,
+        mask_type: str = "G2",
+        window_half_width: int = 16,  # W = 2*half+1 pixels
     ):
         if not dataset_filepath.endswith(".npz"):
             raise ValueError("dataset_filepath doit pointer vers un fichier .npz")
@@ -109,6 +118,9 @@ class SpectrumDataset(Dataset):
         self.dataset_filepath = dataset_filepath
         self.split = split  # ignoré, conservé pour compatibilité
         self.data_dtype = data_dtype
+        self.use_lines = use_lines
+        self.mask_type = mask_type
+        self.window_half_width = int(window_half_width)
 
         self._init_from_npz(dataset_filepath, data_dtype)
 
@@ -148,10 +160,7 @@ class SpectrumDataset(Dataset):
         spectra_no_activity_np = pick("spectra_no_activity")
         v_true_np = pick("v_true")
         weights_fid_np = pick("weights_fid")
-        activity_proxies_np = pick("activity_proxies")
         activity_proxies_norm_np = pick("activity_proxies_norm")
-        activity_proxies_med_np = pick("activity_proxies_med")
-        activity_proxies_mad_np = pick("activity_proxies_mad")
 
         # Fallback v_true si absent -> sinus de metadata
         if v_true_np is None:
@@ -206,13 +215,31 @@ class SpectrumDataset(Dataset):
                 "spectra_no_activity et spectra doivent avoir la même forme"
             )
 
+        # Préparer la représentation par raies si demandé
+        if self.use_lines:
+            self._build_line_windows()
+        else:
+            # marqueurs vides si non utilisé
+            self.spectra_lines = None
+            self.template_lines = None
+            self.wavegrid_lines = None
+            self.line_positions = None
+            self.line_positions_norm = None
+            self.line_weights = None
+            self.line_center_idx = None
+            self.window_indices = None
+            self.n_lines = 0
+            self.window_size = 0
+
     # --------- API Dataset ----------
     def __len__(self):
         return self.n_spectra
 
     def __getitem__(self, idx):
-        # On conserve ton comportement minimal (retourne le spectre).
-        # Si tu veux plus d’info, tu peux changer ici pour retourner un dict.
+        # Retourne par défaut les fenêtres centrées sur les raies si disponibles
+        if getattr(self, "spectra_lines", None) is not None:
+            return self.spectra_lines[idx], idx  # [M, W], idx
+        # Fallback: spectre complet
         return self.spectra[idx], idx
 
     # --------- utilitaires ----------
@@ -225,6 +252,12 @@ class SpectrumDataset(Dataset):
             + mb(self.wavegrid)
             + mb(self.template)
             + mb(self.time_values)
+            + mb(getattr(self, "spectra_lines", None))
+            + mb(getattr(self, "wavegrid_lines", None))
+            + mb(getattr(self, "template_lines", None))
+            + mb(getattr(self, "line_positions", None))
+            + mb(getattr(self, "line_positions_norm", None))
+            + mb(getattr(self, "line_weights", None))
         )
 
     def move_to_cuda(self):
@@ -238,6 +271,13 @@ class SpectrumDataset(Dataset):
                 "spectra_no_activity",
                 "activity_proxies_norm",
                 "v_true",
+                # Lignes
+                "spectra_lines",
+                "template_lines",
+                "wavegrid_lines",
+                "line_positions",
+                "line_positions_norm",
+                "line_weights",
             ]:
                 t = getattr(self, name, None)
                 if t is not None:
@@ -258,6 +298,13 @@ class SpectrumDataset(Dataset):
             "activity",
             "spectra_no_activity",
             "v_true",
+            # Lignes
+            "spectra_lines",
+            "template_lines",
+            "wavegrid_lines",
+            "line_positions",
+            "line_positions_norm",
+            "line_weights",
         ]:
             cast(k)
         self.data_dtype = new_dtype
@@ -275,10 +322,15 @@ class SpectrumDataset(Dataset):
             f"\n======== SpectrumDataset ({self.split}) ========\n"
             f"n_spectra={self.n_spectra}, n_pixels={self.n_pixels}\n"
             f"spectra={shape_dtype(self.spectra)}\n"
+            f"spectra_lines={shape_dtype(getattr(self, 'spectra_lines', None))}\n"
             f"spectra_no_activity={shape_dtype(self.spectra_no_activity)}\n"
             f"activity={shape_dtype(self.activity)}\n"
             f"wavegrid={shape_dtype(self.wavegrid)}\n"
+            f"wavegrid_lines={shape_dtype(getattr(self, 'wavegrid_lines', None))}\n"
             f"template={shape_dtype(self.template)}\n"
+            f"template_lines={shape_dtype(getattr(self, 'template_lines', None))}\n"
+            f"line_positions={shape_dtype(getattr(self, 'line_positions', None))}\n"
+            f"line_positions_norm={shape_dtype(getattr(self, 'line_positions_norm', None))}\n"
             f"time_values={shape_dtype(self.time_values)}\n"
             f"v_true={shape_dtype(self.v_true)}\n"
             f"[{self.wavemin:.3f}, {self.wavemax:.3f}]  dtype={self.data_dtype}\n"
@@ -293,6 +345,96 @@ class SpectrumDataset(Dataset):
             "data_dtype": self.data_dtype,
             "cuda": self.spectra.is_cuda,
         }
+
+    # --------- construction des fenêtres autour des raies ----------
+    def _build_line_windows(self):
+        """
+        Construit les tenseurs:
+          - spectra_lines: [N, M, W]
+          - template_lines: [M, W]
+          - wavegrid_lines: [M, W]
+          - line_positions: [M]
+          - line_weights: [M]
+
+        où M = nb de raies du masque sélectionnées dans [wavemin, wavemax]
+           W = 2*window_half_width + 1
+        """
+        # Charger le masque
+        mask_np = get_mask(self.mask_type)  # shape [L, 2]
+        if mask_np.ndim != 2 or mask_np.shape[1] < 2:
+            raise ValueError("Le masque doit avoir deux colonnes: position, poids")
+
+        # Sélection des raies dans l'intervalle
+        mask_pos = mask_np[:, 0]
+        mask_w = mask_np[:, 1]
+        in_range = (mask_pos >= self.wavemin) & (mask_pos <= self.wavemax)
+        pos_sel = mask_pos[in_range]
+        w_sel = mask_w[in_range]
+
+        if pos_sel.size == 0:
+            raise ValueError(
+                f"Aucune raie du masque {self.mask_type} dans [{self.wavemin}, {self.wavemax}]"
+            )
+
+        # Trouver l'index du pixel le plus proche pour chaque raie
+        wg_np = self.wavegrid.detach().cpu().numpy()
+
+        def nearest_index(arr: np.ndarray, x: float) -> int:
+            i = np.searchsorted(arr, x)
+            if i == 0:
+                return 0
+            if i >= arr.size:
+                return arr.size - 1
+            # choisir le plus proche entre i-1 et i
+            return i - 1 if (x - arr[i - 1]) <= (arr[i] - x) else i
+
+        centers = np.array([nearest_index(wg_np, x) for x in pos_sel], dtype=np.int64)
+
+        # Garder seulement les raies dont la fenêtre tient entièrement dans le spectre
+        H = int(self.window_half_width)
+        W = 2 * H + 1
+        valid = (centers - H >= 0) & (centers + H < self.n_pixels)
+        centers = centers[valid]
+        pos_sel = pos_sel[valid]
+        w_sel = w_sel[valid]
+
+        if centers.size == 0:
+            raise ValueError(
+                "Les fenêtres autour des raies sélectionnées dépassent les bords du spectre. Réduire window_half_width."
+            )
+
+        # Indices de fenêtres [M, W]
+        offsets = np.arange(-H, H + 1, dtype=np.int64)[None, :]
+        centers2d = centers[:, None]
+        win_idx = centers2d + offsets  # [M, W], garanti in-bounds
+
+        # Construire les tenseurs lignes
+        # -> indices en torch.Long
+        win_idx_t = torch.from_numpy(win_idx.astype(np.int64))
+
+        # template_lines / wavegrid_lines: [M, W]
+        self.template_lines = self.template[win_idx_t]
+        self.wavegrid_lines = self.wavegrid[win_idx_t]
+
+        # spectra_lines: [N, M, W] via take_along_dim
+        # Préparer indices [N, M, W]
+        idx_exp = win_idx_t.unsqueeze(0).expand(self.n_spectra, -1, -1)
+        M_lines = idx_exp.shape[1]
+        spectra_exp = self.spectra.unsqueeze(1).expand(-1, M_lines, -1)  # [N, M, P]
+        self.spectra_lines = torch.take_along_dim(spectra_exp, idx_exp, dim=2)
+        # self.spectra_lines: [N, M, W]
+
+        # Mémoriser infos lignes
+        self.line_positions = torch.as_tensor(pos_sel, dtype=self.data_dtype)
+        # Normalisation simple 0..1 dans l'intervalle spectral global
+        denom = (self.wavemax - self.wavemin) if (self.wavemax > self.wavemin) else 1.0
+        pos_norm_np = (pos_sel - self.wavemin) / denom
+        self.line_positions_norm = torch.as_tensor(pos_norm_np, dtype=self.data_dtype)
+        self.line_weights = torch.as_tensor(w_sel, dtype=self.data_dtype)
+        self.line_center_idx = torch.as_tensor(centers, dtype=torch.long)
+        self.window_indices = win_idx_t  # [M, W] (long)
+        self.n_lines = int(centers.size)
+        self.window_size = int(W)
 
 
 def _take_opt(
@@ -339,7 +481,7 @@ def _take_opt(
 # * -- Fonction de collate pour le DataLoader (simplifie la vie) --
 def generate_collate_fn(
     dataset,
-    M=1,
+    M=1,  # nombre d'augmentations par échantillon
     vmin=-3,
     vmax=3,
     interpolate="linear",
@@ -365,81 +507,169 @@ def generate_collate_fn(
         # batch : liste de (y_obs, idx) de taille B
         spectra_list, indices_list = zip(*batch)
 
-        batch_yobs = torch.stack(spectra_list, dim=0)  # [B, n_pix]
-        B, n_pix = batch_yobs.shape
-
-        # Étendre à M * B
-        if M > 1:
-            batch_yobs = batch_yobs.unsqueeze(1).expand(B, M, n_pix).reshape(-1, n_pix)
-        # sinon, on garde tel quel (B, n_pix)
-        MB = batch_yobs.shape[0]
-
-        # Indices alignés sur M*B et sur le bon device
-        batch_indices = torch.as_tensor(
-            indices_list, dtype=torch.long, device=batch_yobs.device
-        )
-        if M > 1:
-            batch_indices = batch_indices.repeat_interleave(M)  # [M*B]
-
-        # Wavegrid sur le bon device/dtype, sans dupliquer la mémoire
-        batch_wavegrid = (
-            dataset.wavegrid.to(batch_yobs.device, dtype=batch_yobs.dtype)
-            .unsqueeze(0)
-            .expand(MB, -1)
-            .contiguous()
+        # Détection mode lignes vs spectre complet
+        lines_mode = (
+            hasattr(dataset, "spectra_lines") and dataset.spectra_lines is not None
         )
 
-        # Augment
-        batch_yaug, batch_voffset = augment_spectra_uniform(
-            batch_yobs,
-            batch_wavegrid,
-            vmin=vmin,
-            vmax=vmax,
-            interpolate=interpolate,
-            extrapolate=extrapolate,
-            out_dtype=out_dtype,
-        )
+        if lines_mode:
+            # y_obs: [B, M_lines, W]
+            batch_yobs = torch.stack(spectra_list, dim=0)
+            B, M_lines, W = batch_yobs.shape
 
-        # Préparer indices batch et device pour la sélection des optionnels
-        batch_device = batch_yobs.device
-        # batch_indices est déjà [MB]
+            # Étendre à M * B (M = nb d'augmentations par échantillon)
+            if M > 1:
+                batch_yobs = (
+                    batch_yobs.unsqueeze(1)
+                    .expand(B, M, M_lines, W)
+                    .reshape(-1, M_lines, W)
+                )
+            MB = batch_yobs.shape[0]
 
-        # Optionnels (via helper _take_opt)
-        batch_weights_fid = _take_opt(
-            dataset,
-            "weights_fid",
-            True,
-            batch_indices,
-            MB,
-            batch_device,
-        )
-        batch_yact_true = _take_opt(
-            dataset,
-            "activity",
-            True,
-            batch_indices,
-            MB,
-            batch_device,
-        )
-        batch_activity_proxies_norm = _take_opt(
-            dataset,
-            "activity_proxies_norm",
-            dataset.metadata.get("activity_proxies_included", False),
-            batch_indices,
-            MB,
-            batch_device,
-        )
+            # Indices alignés [MB]
+            batch_indices = torch.as_tensor(
+                indices_list, dtype=torch.long, device=batch_yobs.device
+            )
+            if M > 1:
+                batch_indices = batch_indices.repeat_interleave(M)
 
-        return (
-            batch_yobs,  # [M*B, n_pix]
-            batch_yaug,  # [M*B, n_pix]
-            batch_voffset,  # [M*B]
-            batch_wavegrid,  # [M*B, n_pix]
-            batch_weights_fid,  # [M*B, ...] ou None
-            batch_indices,  # [M*B]
-            batch_yact_true,  # [M*B, n_pix] ou None
-            batch_activity_proxies_norm,  # [M*B, P] ou None
-        )
+            # Wavegrid lignes: [MB, M_lines, W]
+            base_wave = dataset.wavegrid_lines.to(
+                batch_yobs.device, dtype=batch_yobs.dtype
+            )
+            batch_wavegrid = base_wave.unsqueeze(0).expand(MB, -1, -1).contiguous()
+
+            # Échantillonner une vitesse par élément (même v pour toutes les raies d'un échantillon)
+            batch_voffset = (
+                torch.from_numpy(np.random.uniform(vmin, vmax, size=(MB, 1)))
+                .to(batch_yobs.device)
+                .double()
+            )
+
+            # Appliquer le shift par raie en aplatissant [MB*M_lines, W]
+            y_flat = batch_yobs.reshape(MB * M_lines, W)
+            w_flat = batch_wavegrid.reshape(MB * M_lines, W)
+            v_flat = batch_voffset.repeat_interleave(M_lines, dim=0)
+
+            if interpolate == "linear":
+                yaug_flat = shift_spectra_linear(
+                    spectra=y_flat,
+                    wavegrid=w_flat,
+                    velocities=v_flat,
+                    extrapolate=extrapolate,
+                    return_mask=False,
+                )
+            elif interpolate == "cubic":
+                yaug_flat = shift_spectra_cubic(
+                    spectra=y_flat,
+                    wavegrid=w_flat,
+                    velocities=v_flat,
+                    return_mask=False,
+                )
+            else:
+                raise ValueError("interpolate doit être 'linear' ou 'cubic'")
+
+            # Remise en forme [MB, M_lines, W]
+            batch_yaug = yaug_flat.reshape(MB, M_lines, W).to(out_dtype)
+            batch_yobs = batch_yobs.to(out_dtype)
+            batch_voffset = batch_voffset.squeeze(-1).to(out_dtype)
+            batch_wavegrid = batch_wavegrid.to(out_dtype)
+
+            # Poids des raies (du masque): [MB, M_lines]
+            line_w = dataset.line_weights.to(batch_yobs.device, dtype=out_dtype)
+            batch_line_weights = line_w.unsqueeze(0).expand(MB, -1).contiguous()
+
+            # Proxies d'activité optionnels (si présents dans le dataset)
+            batch_device = batch_yobs.device
+            batch_activity_proxies_norm = _take_opt(
+                dataset,
+                "activity_proxies_norm",
+                dataset.metadata.get("activity_proxies_included", False),
+                batch_indices,
+                MB,
+                batch_device,
+            )
+
+            return (
+                batch_yobs,  # [MB, M_lines, W]
+                batch_yaug,  # [MB, M_lines, W]
+                batch_voffset,  # [MB]
+                batch_wavegrid,  # [MB, M_lines, W]
+                batch_line_weights,  # [MB, M_lines]
+                batch_indices,  # [MB]
+                None,  # compat placeholder (activity)
+                batch_activity_proxies_norm,  # [MB, P] ou None
+            )
+        else:
+            # Mode spectre complet (fallback)
+            batch_yobs = torch.stack(spectra_list, dim=0)  # [B, n_pix]
+            B, n_pix = batch_yobs.shape
+
+            if M > 1:
+                batch_yobs = (
+                    batch_yobs.unsqueeze(1).expand(B, M, n_pix).reshape(-1, n_pix)
+                )
+            MB = batch_yobs.shape[0]
+
+            batch_indices = torch.as_tensor(
+                indices_list, dtype=torch.long, device=batch_yobs.device
+            )
+            if M > 1:
+                batch_indices = batch_indices.repeat_interleave(M)  # [M*B]
+
+            batch_wavegrid = (
+                dataset.wavegrid.to(batch_yobs.device, dtype=batch_yobs.dtype)
+                .unsqueeze(0)
+                .expand(MB, -1)
+                .contiguous()
+            )
+
+            batch_yaug, batch_voffset = augment_spectra_uniform(
+                batch_yobs,
+                batch_wavegrid,
+                vmin=vmin,
+                vmax=vmax,
+                interpolate=interpolate,
+                extrapolate=extrapolate,
+                out_dtype=out_dtype,
+            )
+
+            batch_device = batch_yobs.device
+            batch_weights_fid = _take_opt(
+                dataset,
+                "weights_fid",
+                True,
+                batch_indices,
+                MB,
+                batch_device,
+            )
+            batch_yact_true = _take_opt(
+                dataset,
+                "activity",
+                True,
+                batch_indices,
+                MB,
+                batch_device,
+            )
+            batch_activity_proxies_norm = _take_opt(
+                dataset,
+                "activity_proxies_norm",
+                dataset.metadata.get("activity_proxies_included", False),
+                batch_indices,
+                MB,
+                batch_device,
+            )
+
+            return (
+                batch_yobs,  # [M*B, n_pix]
+                batch_yaug,  # [M*B, n_pix]
+                batch_voffset,  # [M*B]
+                batch_wavegrid,  # [M*B, n_pix]
+                batch_weights_fid,  # [M*B, ...] ou None
+                batch_indices,  # [M*B]
+                batch_yact_true,  # [M*B, n_pix] ou None
+                batch_activity_proxies_norm,  # [M*B, P] ou None
+            )
 
     return collate_fn
 

@@ -587,6 +587,258 @@ class AESTRA(nn.Module):
         return batch_yobs_prime, batch_yact, batch_yact_aug, s, s_aug
 
 
+class AESTRAM(nn.Module):
+    """
+    AESTRA masked (par raies): même structure conceptuelle que AESTRA mais entrée aplatie
+    provenant d'un tenseur [B, L, W+1] (optionnellement [B, L+3, W+1] si 3 proxies d'activité).
+
+    Convention d'encodage par "ligne" (row):
+      - Chaque "row" fait W+1 colonnes: [flux sur W pixels | pos_norm (1)]
+      - Les dernières 3 rows (si include_activity_proxies=True) contiennent les proxies activité;
+        elles sont ignorées pour le shift/L_fid (mais visibles des réseaux).
+
+    Le modèle opère sur le vecteur aplati de taille n_in_flat = (L + P) * (W+1),
+    où P=3 si proxies inclus, 0 sinon. Pour calculer L_fid, on recompose [B, L, W]
+    depuis la sortie du décodeur (y_rest_flat), puis on applique le shift Doppler
+    par raie en utilisant la wavegrid des fenêtres.
+    """
+
+    def __init__(
+        self,
+        n_lines: int,
+        window_size: int,
+        b_obs_flat: torch.Tensor,
+        b_rest_flat: torch.Tensor,
+        include_activity_proxies: bool = False,
+        dropout: float = 0.0,
+        S: int = 3,
+        sigma_v: float = 1.0,
+        sigma_s: float = 1.0,
+        sigma_y: float = 1.0,
+        sigma_l: float = 1.0,
+        sigma_corr: float = 1.0,
+        k_reg_init: float = 1.0,
+        cycle_length: int = 1000,
+        device: str = "cuda",
+        dtype: torch.dtype = torch.float32,
+    ):
+        super().__init__()
+
+        self.L = int(n_lines)
+        self.W = int(window_size)
+        self.include_activity_proxies = bool(include_activity_proxies)
+        self.P = 3 if self.include_activity_proxies else 0
+        self.row_len = self.W + 1  # flux(W) + pos_norm(1)
+        self.n_in_flat = (self.L + self.P) * self.row_len
+
+        assert (
+            b_obs_flat.numel() == self.n_in_flat
+            and b_rest_flat.numel() == self.n_in_flat
+        ), "b_obs_flat et b_rest_flat doivent matcher (L+P)*(W+1)"
+
+        self.device = device
+        self.dtype = dtype
+
+        # Modules partagés avec AESTRA
+        self.spender = SPENDER(self.n_in_flat, S=S)
+        self.rvestimator = RVEstimator(self.n_in_flat, dropout=dropout)
+
+        if device == "cuda" and torch.cuda.is_available():
+            self.spender = self.spender.cuda()
+            self.rvestimator = self.rvestimator.cuda()
+
+        self.spender = self.spender.to(dtype=dtype)
+        self.rvestimator = self.rvestimator.to(dtype=dtype)
+
+        self.b_obs = nn.Parameter(b_obs_flat.to(dtype=dtype), requires_grad=False)
+        self.b_rest = nn.Parameter(b_rest_flat.to(dtype=dtype), requires_grad=True)
+
+        # Hyperparamètres pertes
+        self.sigma_v = sigma_v
+        self.sigma_s = sigma_s
+        self.sigma_y = sigma_y
+        self.sigma_l = sigma_l
+        self.sigma_corr = sigma_corr
+        self.k_reg_init = k_reg_init
+        self.cycle_length = cycle_length
+
+        # Phases/flags d'entraînement
+        self.phase = "joint"
+        self.rvestimator_trainable = True
+        self.spender_trainable = True
+
+    def set_phase(self, phase: str):
+        self.phase = phase
+
+    def set_trainable(self, b_obs=False, b_rest=True, rvestimator=True, spender=True):
+        self.b_obs.requires_grad = b_obs
+        self.b_rest.requires_grad = b_rest
+        for p in self.rvestimator.parameters():
+            p.requires_grad = rvestimator
+        for p in self.spender.parameters():
+            p.requires_grad = spender
+        self.rvestimator_trainable = rvestimator
+        self.spender_trainable = spender
+
+    def convert_dtype(self, new_dtype):
+        self.dtype = new_dtype
+        self.spender = self.spender.to(dtype=new_dtype)
+        self.rvestimator = self.rvestimator.to(dtype=new_dtype)
+        self.b_obs.data = self.b_obs.data.to(dtype=new_dtype)
+        self.b_rest.data = self.b_rest.data.to(dtype=new_dtype)
+        return self
+
+    # Helpers de (dé)composition
+    def _view_rows(self, x_flat: torch.Tensor) -> torch.Tensor:
+        # [B, (L+P)*(W+1)] -> [B, L+P, W+1]
+        B = x_flat.size(0)
+        return x_flat.view(B, self.L + self.P, self.row_len)
+
+    def _slice_lines_flux(self, x_rows: torch.Tensor) -> torch.Tensor:
+        # x_rows: [B, L+P, W+1] -> flux lignes [B, L, W]
+        return x_rows[:, : self.L, : self.W]
+
+    def _expand_weights_pix(self, line_w: torch.Tensor) -> torch.Tensor:
+        # line_w: [B, L] -> [B, L, W]
+        return line_w.unsqueeze(-1).expand(-1, -1, self.W)
+
+    def get_rvestimator_pred(self, xobs_flat: torch.Tensor, xaug_flat: torch.Tensor):
+        robs = xobs_flat - self.b_obs.unsqueeze(0)
+        raug = xaug_flat - self.b_obs.unsqueeze(0)
+        vobs = self.rvestimator(robs)
+        vaug = self.rvestimator(raug)
+        return vobs, vaug
+
+    def get_spender_pred(
+        self,
+        xobs_flat: torch.Tensor,
+        xaug_flat: Optional[torch.Tensor],
+        wavegrid_lines: torch.Tensor,  # [B, L, W]
+        vobs_pred: torch.Tensor,  # [B]
+        extrapolate: str = "linear",
+        get_aug_data: bool = True,
+    ):
+        # Obs branch
+        robs = xobs_flat - self.b_obs.unsqueeze(0)
+        yact_obs, s_obs = self.spender(robs)
+        yrest_obs = self.b_rest.unsqueeze(0) + yact_obs  # [B, n_in_flat]
+
+        yrest_rows = self._view_rows(yrest_obs)
+        yrest_flux = self._slice_lines_flux(yrest_rows)  # [B, L, W]
+
+        # Shift par raie
+        B, L, W = yrest_flux.shape
+        y_flat = yrest_flux.reshape(B * L, W)
+        w_flat = wavegrid_lines.reshape(B * L, W)
+        v_flat = vobs_pred.view(-1, 1).repeat_interleave(L, dim=0)
+        yobs_prime_flat = shift_spectra_linear(
+            spectra=y_flat, wavegrid=w_flat, velocities=v_flat, extrapolate=extrapolate
+        )
+        yobs_prime = yobs_prime_flat.view(B, L, W)
+
+        if get_aug_data and xaug_flat is not None:
+            raug = xaug_flat - self.b_obs.unsqueeze(0)
+            yact_aug, s_aug = self.spender(raug)
+        else:
+            yact_aug, s_aug = None, None
+
+        return yobs_prime, yact_obs, yact_aug, s_obs, s_aug
+
+    def get_losses(
+        self,
+        batch,
+        xobs_flat: torch.Tensor,
+        xaug_flat: torch.Tensor,
+        extrapolate: str = "linear",
+        iteration_count: Optional[int] = None,
+        get_aug_data: bool = True,
+    ):
+        """
+        Args:
+          batch: tuple renvoyé par le collate "lignes":
+            (yobs_lines[B,L,W], yaug_lines[B,L,W], voffset[B], wavegrid_lines[B,L,W], line_weights[B,L], indices, _, _)
+          xobs_flat: [B, (L+P)*(W+1)] vecteur aplati d'entrée pour le modèle
+          xaug_flat: idem pour la version augmentée
+        """
+        (
+            yobs_lines,
+            yaug_lines,
+            voffset_true,
+            wavegrid_lines,
+            line_weights,
+            _indices,
+            _a,
+            _p,
+        ) = batch
+
+        losses = {
+            k: yobs_lines.new_tensor(0.0)
+            for k in ["fid", "c", "reg", "rv", "smooth", "corr"]
+        }
+
+        # RV
+        if self.rvestimator_trainable:
+            vobs_pred, vaug_pred = self.get_rvestimator_pred(xobs_flat, xaug_flat)
+            voffset_pred = vaug_pred - vobs_pred
+            losses["rv"] = loss_rv(voffset_true, voffset_pred, sigma_v=self.sigma_v)
+        else:
+            # Dummy pour la suite
+            vobs_pred = yobs_lines.new_zeros(yobs_lines.size(0))
+
+        # SPENDER / yprime & pertes
+        if self.spender_trainable:
+            yobs_prime, yact, yact_aug, s, s_aug = self.get_spender_pred(
+                xobs_flat=xobs_flat,
+                xaug_flat=xaug_flat if get_aug_data else None,
+                wavegrid_lines=wavegrid_lines,
+                vobs_pred=vobs_pred,
+                extrapolate=extrapolate,
+                get_aug_data=get_aug_data,
+            )
+
+            # L_fid pondérée par les poids de raies
+            w_pix = self._expand_weights_pix(line_weights)  # [B,L,W]
+            diff = yobs_lines - yobs_prime
+            losses["fid"] = self.sigma_l * torch.mean(w_pix * diff * diff)
+
+            # s-contrast
+            if get_aug_data and (s is not None) and (yact_aug is not None):
+                losses["c"] = loss_c(s, s_aug, sigma_s=self.sigma_s)
+            else:
+                losses["c"] = yobs_lines.new_tensor(0.0)
+
+            # Régularisation activité (sur yact à plat)
+            losses["reg"] = loss_reg(
+                yact,
+                k_reg_init=self.k_reg_init,
+                sigma_y=self.sigma_y,
+                iteration_count=iteration_count,
+                cycle_length=self.cycle_length,
+            )
+        else:
+            s = s_aug = None
+
+        # Corrélation Δv vs S
+        if (
+            self.sigma_corr > 0
+            and self.rvestimator_trainable
+            and self.spender_trainable
+            and (s is not None)
+            and (s_aug is not None)
+        ):
+            losses["corr"] = self.sigma_corr * corr_loss_pairs(
+                v_obs=vobs_pred,
+                v_aug=vobs_pred + voffset_true,  # approx si pas dispo
+                v_offset=voffset_true,
+                S_obs=s,
+                S_aug=s_aug,
+                use_avg_S=True,
+                stopgrad_S=True,
+            )
+
+        return losses
+
+
 def loss_rv(batch_voffset_true, batch_voffset_pred, sigma_v=1.0):
     return torch.mean((batch_voffset_true - batch_voffset_pred) ** 2 / (sigma_v**2))
 
