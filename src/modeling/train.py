@@ -218,6 +218,7 @@ def load_experiment_checkpoint(path, device="cuda"):
         smooth_alpha=config.get("smooth_alpha", 0.0),
         smooth_order=config.get("smooth_order", 1),
         sigma_l=config.get("sigma_l", 0.0),
+        sigma_corr=config.get("sigma_corr", 0.0),
     )
 
     # Load state dict with compatibility handling
@@ -315,6 +316,7 @@ def save_losses_to_csv(losses_history, exp_name, phase_name, epoch, csv_dir, con
             "c_loss",
             "reg_loss",
             "smooth_loss",
+            "corr_loss",
             "total_loss",
         ]
         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
@@ -339,6 +341,7 @@ def save_losses_to_csv(losses_history, exp_name, phase_name, epoch, csv_dir, con
                     "c_loss": losses_history["c"][-1],
                     "reg_loss": losses_history["reg"][-1],
                     "smooth_loss": losses_history.get("smooth", [0])[-1],
+                    "corr_loss": losses_history.get("corr", [0])[-1],
                     "total_loss": losses_history["total"][-1],
                 }
             )
@@ -630,7 +633,15 @@ def train_phase(
         console.log(f"🔧 Précision standard (float32) pour la phase '{phase_name}'")
 
     # Historique des losses pour plotting
-    losses_history = {"rv": [], "fid": [], "c": [], "reg": [], "total": [], "lr": []}
+    losses_history = {
+        "rv": [],
+        "fid": [],
+        "c": [],
+        "reg": [],
+        "total": [],
+        "lr": [],
+        "corr": [],
+    }
 
     # Table pour les losses
     table = Table(expand=True)
@@ -640,6 +651,7 @@ def train_phase(
     table.add_column("C", justify="right")
     table.add_column("Reg", justify="right")
     table.add_column("Smooth", justify="right")
+    table.add_column("Corr", justify="right")
     table.add_column("Total Loss", justify="right")
 
     model.set_phase(phase_name)
@@ -661,7 +673,14 @@ def train_phase(
         epoch_task = progress.add_task("Epochs", total=n_epochs)
 
         for epoch in range(start_epoch, n_epochs):
-            epoch_losses = {"rv": 0.0, "fid": 0.0, "c": 0.0, "reg": 0.0, "smooth": 0.0}
+            epoch_losses = {
+                "rv": 0.0,
+                "fid": 0.0,
+                "c": 0.0,
+                "reg": 0.0,
+                "smooth": 0.0,
+                "corr": 0.0,
+            }
 
             for it, batch in enumerate(dataloader):
                 # Transfert CPU->GPU des batches si demandé
@@ -744,6 +763,7 @@ def train_phase(
             losses_history["c"].append(epoch_losses["c"])
             losses_history["reg"].append(epoch_losses["reg"])
             losses_history.setdefault("smooth", []).append(epoch_losses["smooth"])
+            losses_history.setdefault("corr", []).append(epoch_losses["corr"])
             losses_history["total"].append(total_loss)
             losses_history["lr"].append(float(optimizer.param_groups[0]["lr"]))
 
@@ -755,6 +775,7 @@ def train_phase(
                 f"{epoch_losses['c']:.4e}",
                 f"{epoch_losses['reg']:.4e}",
                 f"{epoch_losses['smooth']:.4e}",
+                f"{epoch_losses['corr']:.4e}",
                 f"{total_loss:.4e}",
             )
 
@@ -1089,6 +1110,7 @@ def main(
             smooth_alpha=config.get("smooth_alpha", 0.0),
             smooth_order=config.get("smooth_order", 1),
             sigma_l=config.get("sigma_l", 1.0),
+            sigma_corr=config.get("sigma_corr", 0.0),
         )
         console.log("✅ Modèle créé avec succès")
     except Exception as e:
@@ -1257,7 +1279,9 @@ def main(
 
 if __name__ == "__main__":
     main(
-        config_path="src/modeling/configs/base_config.yaml",
-        dataset_filepath="data/npz_datasets/soapgpu_ns100_5000-5050_dx2_sm3_p50_k0p1_phi0.npz",
-        output_root_dir="experiments",
+        # config_path="src/modeling/configs/base_config.yaml",
+        # dataset_filepath="data/npz_datasets/soapgpu_ns100_5000-5050_dx2_sm3_p50_k0p1_phi0.npz",
+        # output_root_dir="experiments",
+        # experiment_name="soapgpu_ns100_5000-5050_dx2_sm3_p50_k0p1_phi0_corr"
+        checkpoint_path="experiments/soapgpu_ns100_5000-5050_dx2_sm3_p50_k0p1_phi0_corr/models/model_rvonly_epoch_200.pth"
     )

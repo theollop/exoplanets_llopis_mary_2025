@@ -50,7 +50,7 @@ k_reg_init: 0.              # Coefficient de régularisation pour la perte
 cycle_length: 0        # Nombre d'itérations pour le cycle de régularisation
 
 # Loss consistency
-get_aug_data: False         # Si True, calcule les données augmentées dans le forward pass et permet de calculer la loss de consistency
+get_aug_data: True         # Si True, calcule les données augmentées dans le forward pass et permet de calculer la loss de consistency
 sigma_s: 0.0001              # Poids dans la loss de consistency
 
 # Loss de smooth de l'activité
@@ -59,6 +59,9 @@ smooth_order: 2
 
 # Loss fid
 sigma_l: 1.0
+
+# Loss corr
+sigma_corr: 10.0 #! <-------------- NECESSITE get_aug_data == TRUE !!!!!!!
 
 model_dtype: float32      # Type de données pour les poids du modèle (float16/float32/float64)
 
@@ -123,7 +126,7 @@ phases:
       b_obs: false
       b_rest: false
       rvestimator: true
-      spender: false
+      spender: true
 
     optimizer: "torch.optim.Adam"
     optimizer_kwargs:

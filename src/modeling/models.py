@@ -305,6 +305,7 @@ class AESTRA(nn.Module):
         smooth_alpha: float = 0.0,  # Poids pour la perte de lissage (L2 sur dérivée)
         smooth_order: int = 1,  # 1 = pente, 2 = courbure
         sigma_l: float = 1.0,  # Poids pour la perte de fidélité
+        sigma_corr: float = 1.0,  # Poids pour la perte de corrélation
     ):
         """
         Args:
@@ -347,6 +348,7 @@ class AESTRA(nn.Module):
         self.smooth_order = int(smooth_order)
 
         self.sigma_l = sigma_l
+        self.sigma_corr = sigma_corr
 
     def set_phase(self, phase: str):
         self.phase = phase
@@ -430,6 +432,7 @@ class AESTRA(nn.Module):
             "reg": torch.tensor(0),
             "rv": torch.tensor(0),
             "smooth": torch.tensor(0),
+            "corr": torch.tensor(0),
         }
         if self.rvestimator_trainable:
             batch_vobs_pred, batch_vaug_pred = self.get_rvestimator_pred(
@@ -482,6 +485,22 @@ class AESTRA(nn.Module):
                 )
             else:
                 losses["smooth"] = torch.tensor(0)
+
+        if (
+            self.sigma_corr > 0.0
+            and self.rvestimator_trainable
+            and self.spender_trainable
+        ):
+            losses["corr"] = self.sigma_corr * corr_loss_pairs(
+                v_obs=batch_vobs_pred,
+                v_aug=batch_vaug_pred,
+                v_offset=batch_voffset_true,
+                S_obs=s,
+                S_aug=s_aug,
+                use_avg_S=True,
+                stopgrad_S=True,
+                eps=1e-8,
+            )
 
         return losses
 
@@ -591,6 +610,58 @@ def loss_reg(
 ):
     current_k_reg = get_k_reg(k_reg_init, iteration_count, cycle_length)
     return (current_k_reg / sigma_y**2) * torch.mean(batch_yact**2)
+
+
+def _zscore(x, dim=0, eps=1e-8):
+    x = x - x.mean(dim=dim, keepdim=True)
+    std = x.std(dim=dim, unbiased=False, keepdim=True).clamp_min(eps)
+    return x / std
+
+
+def corr_loss_v_vs_S(
+    v: torch.Tensor,  # (B,)
+    S: torch.Tensor,  # (B, Sdim)
+    stopgrad_S: bool = True,
+    eps: float = 1e-8,
+) -> torch.Tensor:
+    """
+    L_corr = mean_k rho(v, S[:,k])^2  (batch-wise)
+    Conseillé: stopgrad_S=True pour cibler la tête RV.
+    """
+    if v.ndim != 1:
+        v = v.view(-1)
+    assert S.shape[0] == v.shape[0], "Batch mismatch v/S"
+    B = v.shape[0]
+    if B < 4:
+        return v.new_zeros(())
+    if stopgrad_S:
+        S = S.detach()
+
+    v_n = _zscore(v, dim=0, eps=eps)  # (B,)
+    S_n = _zscore(S, dim=0, eps=eps)  # (B, Sdim)
+    # rho_k = mean_b [ v_n[b] * S_n[b,k] ]
+    rho = (v_n.unsqueeze(1) * S_n).mean(dim=0)  # (Sdim,)
+    return (rho**2).mean()  # scalaire
+
+
+def corr_loss_pairs(
+    v_obs: torch.Tensor,  # (B,)
+    v_aug: torch.Tensor,  # (B,)
+    v_offset: torch.Tensor,  # (B,)
+    S_obs: torch.Tensor,  # (B, Sdim)
+    S_aug: torch.Tensor,  # (B, Sdim) (doit être proche de S_obs si encodeur invariant)
+    use_avg_S: bool = True,
+    stopgrad_S: bool = True,
+    eps: float = 1e-8,
+) -> torch.Tensor:
+    """
+    L_corr_pairs = mean_k rho(Δv, S[:,k])^2
+    Δv = (v_aug - v_obs - v_offset)
+    S = (S_obs + S_aug)/2 par défaut (plus robuste si légère non-invariance).
+    """
+    dv = v_aug - v_obs - v_offset
+    S = 0.5 * (S_obs + S_aug) if use_avg_S else S_obs
+    return corr_loss_v_vs_S(dv, S, stopgrad_S=stopgrad_S, eps=eps)
 
 
 def save_checkpoint(

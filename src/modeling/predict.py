@@ -1376,7 +1376,7 @@ if __name__ == "__main__":
     #             perturbation_value=0.1,
     #         )
     main(
-        experiment_dir="experiments/soapgpu_ns100_5000-5050_dx2_sm3_p50_k0p1_phi0_noreg",
+        experiment_dir="experiments/soapgpu_ns100_5000-5050_dx2_sm3_p50_k0p1_phi0_corr",
         # fap_threshold=0.01,
         # exclude_width_frac=0.05,
         # n_periods=5000,
