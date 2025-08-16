@@ -39,7 +39,7 @@ out_dtype: float32        # Type de sortie des spectres augmentés (float16 éco
 # --------------------------------------------------------------------------
 # Modèle
 # --------------------------------------------------------------------------
-latent_dim: 3             # Dimension de l'espace latent (anciennement "S")
+latent_dim: 1             # Dimension de l'espace latent (anciennement "S")
 
 # Loss RV
 sigma_v: 0.3              # Écart-type pour le bruit Doppler
@@ -61,7 +61,9 @@ smooth_order: 2
 sigma_l: 1.0
 
 # Loss corr
-sigma_corr: 10.0 #! <-------------- NECESSITE get_aug_data == TRUE !!!!!!!
+sigma_corr: 0.0 #! <-------------- NECESSITE get_aug_data == TRUE !!!!!!!
+
+include_activity_proxies: true
 
 model_dtype: float32      # Type de données pour les poids du modèle (float16/float32/float64)
 
@@ -94,7 +96,7 @@ b_rest_init : true_template
 # --------------------------------------------------------------------------
 phases:
   - name: rvonly
-    n_epochs: 200
+    n_epochs: 1
 
     trainable_params:
       b_obs: false

@@ -124,28 +124,6 @@ def build_mask(wavegrid: np.ndarray, wavemin: float, wavemax: float) -> np.ndarr
     return (wavegrid >= wavemin) & (wavegrid <= wavemax)
 
 
-def load_spectra_selection(
-    spectra_filepath: str,
-    mask: np.ndarray,
-    split: IndexSplit,
-) -> Tuple[np.ndarray, np.ndarray, int]:
-    """Retourne spectra, time_values, n_file_total."""
-    with h5py.File(spectra_filepath, "r") as f:
-        n_file_total = f["spec_cube"].shape[0]
-        n_tot_indices = np.arange(n_file_total)
-        if "filtered" in spectra_filepath:
-            # cohérence temporelle si fichier déjà filtré
-            removed = np.array([246, 249, 1196, 1453, 2176], dtype=int)
-            n_tot_indices = np.delete(n_tot_indices, removed)
-        t_indices = n_tot_indices[split.start : split.end]
-        spectra = f["spec_cube"][t_indices, :][:, mask]
-
-    assert t_indices.shape[0] == spectra.shape[0], (
-        "Incohérence entre la sélection temporelle et la sélection des spectres"
-    )
-    return spectra, t_indices, n_file_total
-
-
 # ============================================================
 # ---------------------- Pré-traitements ---------------------
 # ============================================================
@@ -173,6 +151,36 @@ def compute_activity_pre_noise(
     spectra_ds: np.ndarray, template_ds: np.ndarray
 ) -> np.ndarray:
     return spectra_ds - template_ds
+
+
+def load_activity_proxies_npz(path_npz: str) -> np.ndarray:
+    """
+    Charge un fichier .npz de résultats CCF et construit un tableau (N,3)
+    contenant [depths, fwhms, spans] en float32.
+    """
+    npz = np.load(path_npz)
+    # Adapte les noms de clés si besoin (depths, fwhms, spans sont attendus)
+    fwhm = npz["fwhms"].astype(np.float32)  # (N,)
+    depth = npz["depths"].astype(np.float32)  # (N,)
+    bis = npz["spans"].astype(np.float32)  # (N,)
+    proxies = np.stack([depth, fwhm, bis], axis=1)  # (N,3)
+
+    return proxies
+
+
+def robust_zscore_train_only(x_train: np.ndarray, eps=1e-6):
+    """Compute med and mad on training set for robust z-score.
+
+    Returns med, mad arrays with same last-dim as features.
+    """
+    med = np.median(x_train, axis=0)
+    mad = np.median(np.abs(x_train - med), axis=0)
+    mad = np.maximum(mad, eps)
+    return med, mad
+
+
+def apply_robust_zscore(x: np.ndarray, med: np.ndarray, mad: np.ndarray):
+    return (x - med) / mad
 
 
 def _add_photon_noise(
@@ -508,6 +516,7 @@ def create_soap_gpu_paper_dataset(
     spectra_filepath: str,
     template_filepath: str,
     wavegrid_filepath: str,
+    time_values_filepath: str,
     output_dir: str,
     output_filename: Optional[str] = None,
     idx_start: int = 0,
@@ -526,12 +535,14 @@ def create_soap_gpu_paper_dataset(
     smooth_kernel_size: int = 3,
     use_rassine=False,
     storage_dtype=np.float64,
+    ccf_npz_path: Optional[str] = None,
 ):
     print("🔄 Création du dataset SOAP GPU Paper...")
 
     # ---- Load template & build mask
     template = np.load(template_filepath)
     wavegrid = np.load(wavegrid_filepath)
+    time_values = np.load(time_values_filepath)
     if wavemin is None:
         wavemin = wavegrid.min()
     if wavemax is None:
@@ -544,9 +555,11 @@ def create_soap_gpu_paper_dataset(
     split = IndexSplit(idx_start, idx_end)
 
     # ---- Load spectra selection (+ time)
-    spectra, time_values, n_file_total = load_spectra_selection(
-        spectra_filepath, mask, split
-    )
+    with h5py.File(spectra_filepath, "r") as f:
+        n_file_total = f["spec_cube"].shape[0]
+        spectra = f["spec_cube"][split.start : split.end, :][:, mask]
+        time_values = time_values[split.start : split.end]
+
     n_spectra = spectra.shape[0]
     print(f"Données chargées: fichier={n_file_total} | sélection={n_spectra} spectra")
     print(f"Gamme spectrale: {wavemin:.1f} - {wavemax:.1f} Å")
@@ -676,6 +689,30 @@ def create_soap_gpu_paper_dataset(
         "v_true": v_true_out.astype(storage_dtype, copy=False),
         "metadata": metadata,
     }
+    # Optional: load activity proxies from a CCF analysis .npz and add to payload
+    if ccf_npz_path is not None:
+        try:
+            proxies = load_activity_proxies_npz(ccf_npz_path)  # (N,3)
+            if proxies.shape[0] < n_spectra:
+                raise ValueError(
+                    f"CCF proxies length ({proxies.shape[0]}) < n_spectra ({n_spectra})"
+                )
+            proxies = proxies[split.start : split.end, :]  # (n_spectra, 3)
+            # Compute robust zscore med/mad on training set (here whole set used as train)
+            med, mad = robust_zscore_train_only(proxies)
+            proxies_norm = apply_robust_zscore(proxies, med, mad)
+
+            payload["activity_proxies"] = proxies.astype(np.float32, copy=False)
+            payload["activity_proxies_norm"] = proxies_norm.astype(
+                np.float32, copy=False
+            )
+            # Store normalization params for downstream denormalization
+            payload["activity_proxies_med"] = med.astype(np.float32, copy=False)
+            payload["activity_proxies_mad"] = mad.astype(np.float32, copy=False)
+            # Add to metadata a flag
+            payload["metadata"]["activity_proxies_included"] = True
+        except Exception as e:
+            print(f"⚠️  Loading activity proxies failed: {e}")
     if spectra_ds_no_activity is not None:
         payload["spectra_no_activity"] = spectra_ds_no_activity[:n_spectra].astype(
             storage_dtype, copy=False
@@ -719,6 +756,7 @@ def create_rvdatachallenge_dataset(
     planets_phases: Optional[Sequence[float]] = None,
     batch_size: int = 100,
     storage_dtype=np.float64,
+    ccf_npz_path: Optional[str] = None,
 ):
     """
     Construis un payload comparable à `create_soap_gpu_paper_dataset` à partir des
@@ -802,6 +840,7 @@ def create_rvdatachallenge_dataset(
 
     spectra_sel = flux_all[idx_start_i:idx_end_i]
     time_values = times_all[idx_start_i:idx_end_i]
+
     n_spectra = spectra_sel.shape[0]
 
     # ---- Spectral mask and exclusion
@@ -932,6 +971,27 @@ def create_rvdatachallenge_dataset(
         "v_true": v_true.astype(storage_dtype, copy=False),
         "metadata": metadata,
     }
+    # Optional: add activity proxies from CCF .npz if provided
+    if ccf_npz_path is not None:
+        try:
+            proxies = load_activity_proxies_npz(ccf_npz_path)
+            if proxies.shape[0] < n_spectra:
+                raise ValueError(
+                    f"CCF proxies length ({proxies.shape[0]}) < n_spectra ({n_spectra})"
+                )
+            proxies = proxies[:n_spectra]
+            med, mad = robust_zscore_train_only(proxies)
+            proxies_norm = apply_robust_zscore(proxies, med, mad)
+
+            payload["activity_proxies"] = proxies.astype(np.float32, copy=False)
+            payload["activity_proxies_norm"] = proxies_norm.astype(
+                np.float32, copy=False
+            )
+            payload["activity_proxies_med"] = med.astype(np.float32, copy=False)
+            payload["activity_proxies_mad"] = mad.astype(np.float32, copy=False)
+            payload["metadata"]["activity_proxies_included"] = True
+        except Exception as e:
+            print(f"⚠️  Loading activity proxies failed: {e}")
 
     if activity_ds is not None:
         payload["activity"] = activity_ds.astype(storage_dtype, copy=False)
@@ -1014,11 +1074,12 @@ if __name__ == "__main__":
         spectra_filepath="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/soap_gpu_paper/spec_cube_tot_filtered_normalized_float32.h5",
         template_filepath="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/soap_gpu_paper/template.npy",
         wavegrid_filepath="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/soap_gpu_paper/wavegrid.npy",
+        time_values_filepath="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/soap_gpu_paper/time_values.npy",
         output_dir="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/npz_datasets",
         idx_start=0,
         idx_end=100,
         wavemin=5000,
-        wavemax=5050,
+        wavemax=5055,
         downscaling_factor=2,
         smooth_after_downscaling=True,
         smooth_kernel_size=3,
@@ -1031,4 +1092,5 @@ if __name__ == "__main__":
         batch_size=100,
         use_rassine=False,
         storage_dtype=np.float32,
+        ccf_npz_path="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/ccf_results/ccf_analysis_results.npz",
     )

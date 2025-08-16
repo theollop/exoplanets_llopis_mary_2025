@@ -148,6 +148,10 @@ class SpectrumDataset(Dataset):
         spectra_no_activity_np = pick("spectra_no_activity")
         v_true_np = pick("v_true")
         weights_fid_np = pick("weights_fid")
+        activity_proxies_np = pick("activity_proxies")
+        activity_proxies_norm_np = pick("activity_proxies_norm")
+        activity_proxies_med_np = pick("activity_proxies_med")
+        activity_proxies_mad_np = pick("activity_proxies_mad")
 
         # Fallback v_true si absent -> sinus de metadata
         if v_true_np is None:
@@ -168,6 +172,7 @@ class SpectrumDataset(Dataset):
         self.spectra = _to_tensor(spectra_np, data_dtype)
         self.wavegrid = _to_tensor(wavegrid_np, data_dtype)
         self.template = _to_tensor(template_np, data_dtype)
+        self.activity_proxies_norm = _to_tensor(activity_proxies_norm_np, data_dtype)
         self.planet_periods = self.metadata.get("planets_periods", [])
         self.planet_amplitudes = self.metadata.get("planets_amplitudes", [])
         self.planet_phases = self.metadata.get("planets_phases", [])
@@ -231,6 +236,7 @@ class SpectrumDataset(Dataset):
                 "time_values",
                 "activity",
                 "spectra_no_activity",
+                "activity_proxies_norm",
                 "v_true",
             ]:
                 t = getattr(self, name, None)
@@ -289,6 +295,47 @@ class SpectrumDataset(Dataset):
         }
 
 
+def _take_opt(
+    dataset, attr: str, enabled: bool, batch_indices: torch.Tensor, MB: int, device
+) -> torch.Tensor:
+    """Sélectionne les données optionnelles pour le batch en respectant les formes attendues.
+
+    Règles:
+    - Si tensor a une première dimension = n_spectra (par ex. [N, K] ou [N, P]), on indexe avec batch_indices -> [MB, ...]
+    - Si tensor est 1D (par ex. [K] ou [P]), on le réplique sur le batch -> [MB, K]
+    - Si tensor a shape [1, ...], on l'étend -> [MB, ...]
+    - Sinon, si la première dimension vaut déjà MB, on renvoie tel quel.
+    Retourne None si `enabled` est False ou si l'attribut est absent.
+    """
+    if not enabled:
+        return None
+    x = getattr(dataset, attr, None)
+    if x is None:
+        return None
+    # Assure le bon device
+    if x.device != device:
+        x = x.to(device)
+
+    # Cas per-sample: première dim = N (n_spectra)
+    if x.dim() >= 1 and x.shape[0] == dataset.n_spectra:
+        return x[batch_indices]
+
+    # Cas 1D: répliquer pour chaque élément du batch
+    if x.dim() == 1:
+        return x.unsqueeze(0).expand(MB, -1).contiguous()
+
+    # Cas [1, ...]: étendre sur MB
+    if x.dim() >= 1 and x.shape[0] == 1:
+        return x.expand(MB, *x.shape[1:]).contiguous()
+
+    # Déjà à la bonne taille
+    if x.dim() >= 1 and x.shape[0] == MB:
+        return x
+
+    # Forme non reconnue -> None pour éviter les plantages inattendus
+    return None
+
+
 # * -- Fonction de collate pour le DataLoader (simplifie la vie) --
 def generate_collate_fn(
     dataset,
@@ -315,23 +362,34 @@ def generate_collate_fn(
     """
 
     def collate_fn(batch):
-        # batch : liste de y_obs (Tensor [n_pixel]) de taille B
-        spectra_list, indices_list = zip(*batch)  # sépare les deux
-        batch_indices = torch.tensor(indices_list, dtype=torch.long)  # [B]
-        batch_yobs = torch.stack(spectra_list, dim=0)  # Tensor [B, n_pixel]
+        # batch : liste de (y_obs, idx) de taille B
+        spectra_list, indices_list = zip(*batch)
 
-        batch_yobs = (
-            batch_yobs.unsqueeze(1).repeat(1, M, 1).view(-1, dataset.n_pixels)
-        )  # Tensor [M*B, n_pixel]
+        batch_yobs = torch.stack(spectra_list, dim=0)  # [B, n_pix]
+        B, n_pix = batch_yobs.shape
 
+        # Étendre à M * B
+        if M > 1:
+            batch_yobs = batch_yobs.unsqueeze(1).expand(B, M, n_pix).reshape(-1, n_pix)
+        # sinon, on garde tel quel (B, n_pix)
+        MB = batch_yobs.shape[0]
+
+        # Indices alignés sur M*B et sur le bon device
+        batch_indices = torch.as_tensor(
+            indices_list, dtype=torch.long, device=batch_yobs.device
+        )
+        if M > 1:
+            batch_indices = batch_indices.repeat_interleave(M)  # [M*B]
+
+        # Wavegrid sur le bon device/dtype, sans dupliquer la mémoire
         batch_wavegrid = (
-            dataset.wavegrid.unsqueeze(0)
-            .repeat(batch_yobs.shape[0], 1)
-            .to(batch_yobs.device)
+            dataset.wavegrid.to(batch_yobs.device, dtype=batch_yobs.dtype)
+            .unsqueeze(0)
+            .expand(MB, -1)
             .contiguous()
-        )  # Tensor [M*B, n_pixel]
+        )
 
-        # Tensor [M*B, n_pixel]
+        # Augment
         batch_yaug, batch_voffset = augment_spectra_uniform(
             batch_yobs,
             batch_wavegrid,
@@ -342,27 +400,45 @@ def generate_collate_fn(
             out_dtype=out_dtype,
         )
 
-        batch_weights_fid = None
-        if getattr(dataset, "weights_fid", None) is not None:
-            batch_weights_fid = dataset.weights_fid[
-                batch_yobs.device.index if batch_yobs.is_cuda else ...
-            ]
-            batch_weights_fid = batch_weights_fid[: batch_yobs.shape[0]]
-        batch_yact_true = None
-        if getattr(dataset, "activity", None) is not None:
-            batch_yact_true = dataset.activity[
-                batch_yobs.device.index if batch_yobs.is_cuda else ...
-            ]
-            batch_yact_true = batch_yact_true[: batch_yobs.shape[0]]
+        # Préparer indices batch et device pour la sélection des optionnels
+        batch_device = batch_yobs.device
+        # batch_indices est déjà [MB]
+
+        # Optionnels (via helper _take_opt)
+        batch_weights_fid = _take_opt(
+            dataset,
+            "weights_fid",
+            True,
+            batch_indices,
+            MB,
+            batch_device,
+        )
+        batch_yact_true = _take_opt(
+            dataset,
+            "activity",
+            True,
+            batch_indices,
+            MB,
+            batch_device,
+        )
+        batch_activity_proxies_norm = _take_opt(
+            dataset,
+            "activity_proxies_norm",
+            dataset.metadata.get("activity_proxies_included", False),
+            batch_indices,
+            MB,
+            batch_device,
+        )
 
         return (
-            batch_yobs,
-            batch_yaug,
-            batch_voffset,
-            batch_wavegrid,
-            batch_weights_fid,
-            batch_indices,
-            batch_yact_true,
+            batch_yobs,  # [M*B, n_pix]
+            batch_yaug,  # [M*B, n_pix]
+            batch_voffset,  # [M*B]
+            batch_wavegrid,  # [M*B, n_pix]
+            batch_weights_fid,  # [M*B, ...] ou None
+            batch_indices,  # [M*B]
+            batch_yact_true,  # [M*B, n_pix] ou None
+            batch_activity_proxies_norm,  # [M*B, P] ou None
         )
 
     return collate_fn

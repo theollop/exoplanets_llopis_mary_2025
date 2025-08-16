@@ -306,6 +306,7 @@ class AESTRA(nn.Module):
         smooth_order: int = 1,  # 1 = pente, 2 = courbure
         sigma_l: float = 1.0,  # Poids pour la perte de fidélité
         sigma_corr: float = 1.0,  # Poids pour la perte de corrélation
+        include_activity_proxies: bool = False,  # Inclure les proxies d'activité
     ):
         """
         Args:
@@ -319,7 +320,6 @@ class AESTRA(nn.Module):
         """
         super().__init__()
 
-        # ⚠️ CORRECTION: Création des modules sans forcer .cuda()
         self.device = device
         self.dtype = dtype
         self.spender = SPENDER(n_pixels, S=S)
@@ -349,6 +349,8 @@ class AESTRA(nn.Module):
 
         self.sigma_l = sigma_l
         self.sigma_corr = sigma_corr
+
+        self.include_activity_proxies = include_activity_proxies
 
     def set_phase(self, phase: str):
         self.phase = phase
@@ -413,7 +415,7 @@ class AESTRA(nn.Module):
         Calcule les pertes en fonction de la phase du modèle.
 
         Args:
-            batch: tuple contenant (batch_yobs, batch_yaug, batch_voffset_true, batch_wavegrid, batch_weights_fid, batch_indices, batch_yact_true)
+            batch: tuple contenant (batch_yobs, batch_yaug, batch_voffset_true, batch_wavegrid, batch_weights_fid, batch_indices, batch_yact_true, batch_activity_proxies_norm)
             extrapolate: méthode d'extrapolation pour le shift Doppler
             batch_weights: poids pour la perte FID (facultatif)
         """
@@ -425,6 +427,7 @@ class AESTRA(nn.Module):
             batch_weights_fid,
             batch_indices,
             batch_yact_true,
+            batch_activity_proxies_norm,
         ) = batch
         losses = {
             "fid": torch.tensor(0),
@@ -456,6 +459,8 @@ class AESTRA(nn.Module):
                 batch_vobs_pred=batch_vobs_pred,
                 extrapolate=extrapolate,
                 get_aug_data=get_aug_data,
+                batch_activity_proxies_norm=batch_activity_proxies_norm,
+                include_activity_proxies=self.include_activity_proxies,
             )
 
             losses["fid"] = loss_fid(
@@ -521,8 +526,30 @@ class AESTRA(nn.Module):
         batch_vobs_pred,
         extrapolate="linear",
         get_aug_data=True,
+        include_activity_proxies=False,
+        batch_activity_proxies_norm=None,
     ):
         batch_robs = batch_yobs - self.b_obs.unsqueeze(0)
+
+        # Optionally concatenate activity proxies (ensure proper shape/device/dtype)
+        if include_activity_proxies and batch_activity_proxies_norm is not None:
+            if batch_activity_proxies_norm.dim() == 1:
+                batch_activity_proxies_norm = batch_activity_proxies_norm.unsqueeze(
+                    0
+                ).expand(batch_robs.size(0), -1)
+            if batch_activity_proxies_norm.size(0) != batch_robs.size(0):
+                # Try to expand a single-row tensor; otherwise, skip to avoid crash
+                if batch_activity_proxies_norm.size(0) == 1:
+                    batch_activity_proxies_norm = batch_activity_proxies_norm.expand(
+                        batch_robs.size(0), -1
+                    )
+                else:
+                    batch_activity_proxies_norm = None
+            if batch_activity_proxies_norm is not None:
+                batch_activity_proxies_norm = batch_activity_proxies_norm.to(
+                    device=batch_robs.device, dtype=batch_robs.dtype
+                )
+                batch_robs = torch.cat([batch_robs, batch_activity_proxies_norm], dim=1)
 
         batch_yact, s = self.spender(batch_robs)
 
@@ -537,6 +564,22 @@ class AESTRA(nn.Module):
 
         if get_aug_data:
             batch_raug = batch_yaug - self.b_obs.unsqueeze(0)
+            if include_activity_proxies and batch_activity_proxies_norm is not None:
+                if batch_activity_proxies_norm.dim() == 1:
+                    batch_activity_proxies_norm = batch_activity_proxies_norm.unsqueeze(
+                        0
+                    ).expand(batch_raug.size(0), -1)
+                if batch_activity_proxies_norm.size(0) == 1:
+                    batch_activity_proxies_norm = batch_activity_proxies_norm.expand(
+                        batch_raug.size(0), -1
+                    )
+                if batch_activity_proxies_norm.size(0) == batch_raug.size(0):
+                    batch_activity_proxies_norm = batch_activity_proxies_norm.to(
+                        device=batch_raug.device, dtype=batch_raug.dtype
+                    )
+                    batch_raug = torch.cat(
+                        [batch_raug, batch_activity_proxies_norm], dim=1
+                    )
             batch_yact_aug, s_aug = self.spender(batch_raug)
         else:
             batch_yact_aug, s_aug = None, None

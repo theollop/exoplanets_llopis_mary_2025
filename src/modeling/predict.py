@@ -561,7 +561,15 @@ def predict(model, dataset, batch_size=64, perturbation_value=1.0):
                 batch_weights_fid,
                 batch_indices,
                 batch_yact_true,
+                batch_activity_proxies_norm,
             ) = batch
+
+            print(
+                batch_yobs.shape,
+                batch_yaug.shape,
+                batch_voffset_true.shape,
+                batch_activity_proxies_norm.shape,
+            )
 
             batch_vobs_pred, batch_vaug_pred = model.get_rvestimator_pred(
                 batch_yobs=batch_yobs, batch_yaug=batch_yaug
@@ -574,6 +582,8 @@ def predict(model, dataset, batch_size=64, perturbation_value=1.0):
                     batch_wavegrid=batch_wavegrid,
                     batch_vobs_pred=batch_vobs_pred,
                     get_aug_data=True,
+                    batch_activity_proxies_norm=batch_activity_proxies_norm,
+                    include_activity_proxies=model.include_activity_proxies,
                 )
             )
 
@@ -1376,7 +1386,7 @@ if __name__ == "__main__":
     #             perturbation_value=0.1,
     #         )
     main(
-        experiment_dir="experiments/soapgpu_ns100_5000-5050_dx2_sm3_p50_k0p1_phi0_corr",
+        experiment_dir="experiments/soapgpu_ns100_5000-5055_dx2_sm3_p50_k0p1_phi0",
         # fap_threshold=0.01,
         # exclude_width_frac=0.05,
         # n_periods=5000,

@@ -219,6 +219,7 @@ def load_experiment_checkpoint(path, device="cuda"):
         smooth_order=config.get("smooth_order", 1),
         sigma_l=config.get("sigma_l", 0.0),
         sigma_corr=config.get("sigma_corr", 0.0),
+        include_activity_proxies=config.get("include_activity_proxies", False),
     )
 
     # Load state dict with compatibility handling
@@ -1111,8 +1112,11 @@ def main(
             smooth_order=config.get("smooth_order", 1),
             sigma_l=config.get("sigma_l", 1.0),
             sigma_corr=config.get("sigma_corr", 0.0),
+            include_activity_proxies=config.get("include_activity_proxies", False),
         )
-        console.log("✅ Modèle créé avec succès")
+        console.log(
+            f"✅ Modèle créé avec succès (include_activity_proxies={model.include_activity_proxies})"
+        )
     except Exception as e:
         console.log(f"❌ Erreur lors de la création du modèle: {e}")
         raise
@@ -1186,6 +1190,26 @@ def main(
     console.log(
         f"📦 DataLoader: batch_size={config['batch_size']}, workers={num_workers}, pin_memory={pin_memory}, prefetch_factor={prefetch_factor}"
     )
+
+    if (
+        dataset.metadata.get("activity_proxies_included", False)
+        and model.include_activity_proxies
+    ):
+        console.log("🔄 Including activity proxies in training")
+    elif (
+        dataset.metadata.get("activity_proxies_included", False)
+        and not model.include_activity_proxies
+    ):
+        console.log(
+            "⚠️  Activity proxies are included in the dataset but not in the model"
+        )
+    elif (
+        not dataset.metadata.get("activity_proxies_included", False)
+        and model.include_activity_proxies
+    ):
+        console.log(
+            "⚠️  Activity proxies are included in the model but not in the dataset"
+        )
 
     console.log(f"📊 Dataset: {len(dataset)} spectres, {dataset.n_pixels} pixels")
     console.log(f"🔧 Modèle: {sum(p.numel() for p in model.parameters())} paramètres")
@@ -1279,9 +1303,8 @@ def main(
 
 if __name__ == "__main__":
     main(
-        # config_path="src/modeling/configs/base_config.yaml",
-        # dataset_filepath="data/npz_datasets/soapgpu_ns100_5000-5050_dx2_sm3_p50_k0p1_phi0.npz",
-        # output_root_dir="experiments",
-        # experiment_name="soapgpu_ns100_5000-5050_dx2_sm3_p50_k0p1_phi0_corr"
-        checkpoint_path="experiments/soapgpu_ns100_5000-5050_dx2_sm3_p50_k0p1_phi0_corr/models/model_rvonly_epoch_200.pth"
+        config_path="src/modeling/configs/base_config.yaml",
+        dataset_filepath="data/npz_datasets/soapgpu_ns100_5000-5055_dx2_sm3_p50_k0p1_phi0.npz",
+        output_root_dir="experiments",
+        # checkpoint_path="experiments/soapgpu_ns100_5000-5050_dx2_sm3_p50_k0p1_phi0_corr/models/model_rvonly_epoch_200.pth",
     )
