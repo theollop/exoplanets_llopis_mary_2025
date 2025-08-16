@@ -217,6 +217,7 @@ def load_experiment_checkpoint(path, device="cuda"):
         dtype=getattr(torch, config.get("model_dtype", "float32")),
         smooth_alpha=config.get("smooth_alpha", 0.0),
         smooth_order=config.get("smooth_order", 1),
+        sigma_l=config.get("sigma_l", 0.0),
     )
 
     # Load state dict with compatibility handling
@@ -1087,6 +1088,7 @@ def main(
             dtype=getattr(torch, config.get("model_dtype", "float32")),
             smooth_alpha=config.get("smooth_alpha", 0.0),
             smooth_order=config.get("smooth_order", 1),
+            sigma_l=config.get("sigma_l", 1.0),
         )
         console.log("✅ Modèle créé avec succès")
     except Exception as e:

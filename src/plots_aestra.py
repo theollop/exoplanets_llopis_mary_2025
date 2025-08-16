@@ -1016,107 +1016,59 @@ def plot_activity(
     # Créer le sous-dossier organisé par type pour la phase
     typed_plot_dir = create_typed_plot_dir(plot_dir, phase_name, "activity")
 
+    # Unpack batch (we expect batch_yact_true to be present)
     (
-        batch_yobs,  # [M*B, P] si M>1 || [B, P] si M=1
-        batch_yaug,  # [M*B, P] idem
-        batch_voffset,  # [M*B]     idem
-        batch_wavegrid,  # [M*B, P]  idem
-        batch_weights_fid,  # [M*B, P]  (ou None)
-        batch_indices,  # [B]       indices globaux dataset
+        batch_yobs,
+        batch_yaug,
+        batch_voffset,
+        batch_wavegrid,
+        batch_weights_fid,
+        batch_indices,
+        batch_yact_true,
     ) = batch
 
-    # ------------- ALIGNEMENT & METADONNÉES B/M -------------
-    # Ref batch = indices -> B_base
-    B_base = int(batch_indices.shape[0])
+    # Prefer using batch_yact_true supplied in the batch; otherwise fallback to dataset.activity
+    def to_numpy(x):
+        if torch.is_tensor(x):
+            return x.detach().cpu().numpy()
+        return np.asarray(x)
 
-    # Tailles observées côté "flatten"
-    B_y = int(batch_yobs.shape[0])
-    # Déduire M si possible
-    M = B_y // B_base if B_base > 0 else 1
-    if B_base * M != B_y:
-        # Incohérence (pas multiple) -> on force M=1 et on tronque les autres au B_base
-        M = 1
-
-    # Taille batch "logique" = B_base
-    batch_size = B_base
-
-    # ------------- SÉLECTION D’UN ÉCHANTILLON (BASE) -------------
+    # Determine sample index and flat index (assume no multiple augmentations for simplicity)
+    batch_size = (
+        int(batch_indices.shape[0])
+        if batch_indices is not None
+        else int(batch_yact_true.shape[0])
+    )
     if sample_idx is None:
         sample_idx = np.random.randint(0, batch_size)
-    else:
-        # clamp pour rester dans [0, batch_size)
-        if sample_idx < 0:
-            sample_idx = 0
-        elif sample_idx >= batch_size:
-            sample_idx = sample_idx % batch_size
+    sample_idx = int(sample_idx % batch_size)
 
-    # Index global dataset pour cet échantillon
-    if torch.is_tensor(batch_indices):
-        global_idx = int(batch_indices[sample_idx].detach().cpu().item())
-    else:
-        global_idx = int(batch_indices[sample_idx])
+    # Extract wavegrid, true activity and run model prediction for the same sample
+    flat_idx = sample_idx
+    wavegrid = to_numpy(batch_wavegrid[flat_idx])
+    y_act_true = to_numpy(batch_yact_true[sample_idx])
 
-    # ------------- MAPPINGS D’INDEX -------------
-    # On utilise systématiquement la première augmentation m=0 pour tracer
-    flat_idx = sample_idx * M  # -> index dans [M*B] pour yobs/yaug/wavegrid/voffset
-
-    # ------------- PRÉPA MASQUE DES RAIES -------------
-    g2mask = get_mask("G2")
-    line_positions, line_weights = g2mask[:, 0], g2mask[:, 1]
-
-    # on prend la grille correspondant à l'échantillon (m=0)
-    wavegrid = batch_wavegrid[flat_idx].detach().cpu().numpy()
-
-    in_range = (line_positions >= wavegrid.min()) & (line_positions <= wavegrid.max())
-    line_positions = line_positions[in_range]
-    line_weights = line_weights[in_range]
-
-    if line_positions.size == 0:
-        selected_lines = np.array([])
-        selected_weights = np.array([])
-    else:
-        n_lines = min(3, line_positions.size)
-        top_idx = np.argsort(line_weights)[-n_lines:]
-        # trier pour que la plus lourde soit en premier (optionnel)
-        order = np.argsort(line_weights[top_idx])[::-1]
-        top_idx = top_idx[order]
-        selected_lines = line_positions[top_idx]
-        selected_weights = line_weights[top_idx]
-
-    # ------------- FORWARD MODÈLE -------------
     model.eval()
     with torch.no_grad():
-        batch_robs = batch_yobs - model.b_obs.unsqueeze(0)  # [M*B, P]
-        batch_yact, batch_s = model.spender(batch_robs)  # [M*B, P], [...]
+        batch_robs = batch_yobs - model.b_obs.unsqueeze(0)
+        batch_yact_pred, _ = model.spender(batch_robs)
+    y_act_pred = to_numpy(batch_yact_pred[flat_idx])
 
-    # ------------- EXTRACTIONS SÛRES -------------
-    wavegrid = batch_wavegrid[flat_idx].detach().cpu().numpy()
-    y_act_pred = batch_yact[flat_idx].detach().cpu().numpy()
-
-    # activité vraie côté dataset (index global)
-    if not hasattr(dataset, "activity") or dataset.activity is None:
-        print("⚠️ Dataset n'a pas 'activity' -> skip.")
-        return
-    y_act_true = dataset.activity[global_idx].detach().cpu().numpy()
-
-    # NOTE: The model's y_act is defined relative to b_rest (trainable),
-    # whereas the dataset 'activity' is defined relative to the template.
-    # To compare apples-to-apples, also compute the model-implied activity
-    # in the template frame: (b_rest + y_act_pred) - template.
-    b_rest_np = (
-        model.b_rest.detach().cpu().numpy()
-        if hasattr(model, "b_rest")
+    # If dataset.template exists, compute template-referenced prediction for direct comparison
+    template_np = (
+        to_numpy(dataset.template)
+        if hasattr(dataset, "template") and dataset.template is not None
         else np.zeros_like(y_act_pred)
     )
-    template_np = (
-        dataset.template.detach().cpu().numpy()
-        if hasattr(dataset, "template") and dataset.template is not None
+    b_rest_np = (
+        to_numpy(model.b_rest)
+        if hasattr(model, "b_rest")
         else np.zeros_like(y_act_pred)
     )
     y_rest_pred = b_rest_np + y_act_pred
     y_act_pred_vs_template = y_rest_pred - template_np
 
-    # Quick diagnostics: correlations (full spectrum)
+    # Simple safe correlation
     def safe_corr(a, b):
         a = np.asarray(a).ravel()
         b = np.asarray(b).ravel()
@@ -1124,114 +1076,79 @@ def plot_activity(
             return np.nan
         return float(np.corrcoef(a, b)[0, 1])
 
-    corr_raw = safe_corr(y_act_true, y_act_pred)
-    corr_tpl = safe_corr(y_act_true, y_act_pred_vs_template)
+    corr_pred = safe_corr(y_act_true, y_act_pred_vs_template)
 
-    # ------------- PLOTS -------------
-    fig, axes = plt.subplots(2, 3, figsize=(18, 10))
-    gs = fig.add_gridspec(2, 3)
-    ax_full = fig.add_subplot(gs[0, :])
-    for i in range(3):
-        axes[0, i].remove()
+    # Select up to 3 strong lines from G2 mask for zooms
+    g2mask = get_mask("G2")
+    line_positions, line_weights = g2mask[:, 0], g2mask[:, 1]
+    in_range = (line_positions >= wavegrid.min()) & (line_positions <= wavegrid.max())
+    sel_pos = line_positions[in_range]
+    sel_w = line_weights[in_range]
+    if sel_pos.size > 0:
+        n_lines = min(3, sel_pos.size)
+        top_idx = np.argsort(sel_w)[-n_lines:]
+        order = np.argsort(sel_w[top_idx])[::-1]
+        top_idx = top_idx[order]
+        selected_lines = sel_pos[top_idx]
+        selected_weights = sel_w[top_idx]
+    else:
+        selected_lines = np.array([])
+        selected_weights = np.array([])
 
-    ax_full.plot(
-        wavegrid, y_act_true, "k-", linewidth=2, alpha=0.8, label="True Activity"
+    # ------------- PLOTTING -------------
+    fig, axes = plt.subplots(
+        2, 1, figsize=(14, 8), gridspec_kw={"height_ratios": [2, 1]}
     )
-    ax_full.plot(
-        wavegrid,
-        y_act_pred,
-        "orange",
-        linewidth=1.5,
-        alpha=0.8,
-        label=f"Predicted y_act (vs b_rest)  r={corr_raw:.2f}",
-    )
-    ax_full.plot(
+
+    # Full spectrum
+    ax = axes[0]
+    ax.plot(wavegrid, y_act_true, color="k", lw=1.5, label="True activity")
+    ax.plot(
         wavegrid,
         y_act_pred_vs_template,
         color="#1f77b4",
-        linewidth=1.5,
+        lw=1.2,
         alpha=0.9,
-        label=f"Predicted (y_rest−template)  r={corr_tpl:.2f}",
+        label=f"Predicted (template frame)  r={corr_pred:.2f}",
     )
-    ax_full.axhline(y=0, color="gray", linestyle="--", alpha=0.5)
-    ax_full.set_xlabel("Wavelength (Å)")
-    ax_full.set_ylabel("Activity Flux")
-    ax_full.set_title("Full Spectrum Activity Comparison (raw vs template-referenced)")
-    ax_full.legend()
-    ax_full.grid(True, alpha=0.3)
+    ax.axhline(0.0, color="gray", ls="--", alpha=0.5)
+    ax.set_xlabel("Wavelength (Å)")
+    ax.set_ylabel("Activity flux")
+    ax.set_title(f"Activity comparison — sample {sample_idx} — epoch {epoch}")
+    ax.legend()
+    ax.grid(True, alpha=0.3)
 
-    halfwin = 0.18
-    # tracer seulement le nombre de lignes disponibles (0..3)
-    for i in range(min(3, len(selected_lines))):
-        ax = axes[1, i]
-        line_pos = selected_lines[i]
-        zoom_mask = (wavegrid >= line_pos - halfwin) & (wavegrid <= line_pos + halfwin)
-        ax.plot(
-            wavegrid[zoom_mask],
-            y_act_true[zoom_mask],
-            "k-",
-            linewidth=2,
-            alpha=0.8,
-            label="True Activity",
-        )
-        ax.plot(
-            wavegrid[zoom_mask],
-            y_act_pred[zoom_mask],
-            "orange",
-            linewidth=1.5,
-            alpha=0.8,
-            label="Pred. y_act (vs b_rest)",
-        )
-        ax.plot(
-            wavegrid[zoom_mask],
-            y_act_pred_vs_template[zoom_mask],
-            color="#1f77b4",
-            linewidth=1.5,
-            alpha=0.9,
-            label="Pred. (y_rest−template)",
-        )
-        ax.axhline(y=0, color="gray", linestyle="--", alpha=0.5)
-        ax.axvline(
-            x=line_pos,
-            color="red",
-            linestyle=":",
-            alpha=0.7,
-            label=f"Line @ {line_pos:.2f}Å",
-        )
-        ax.set_xlabel("Wavelength (Å)")
-        ax.set_ylabel("Activity Flux")
-        w = selected_weights[i]
-        ax.set_title(f"Line {i + 1}: {line_pos:.2f}Å (Weight: {w:.3f})")
-        ax.set_xlim(line_pos - halfwin, line_pos + halfwin)
-        ax.legend(fontsize=8)
-        ax.grid(True, alpha=0.3)
-
-    # masquer les axes restants s’il y a <3 raies
-    for j in range(len(selected_lines), 3):
-        axes[1, j].axis("off")
+    # Zoom row: show up to 3 lines side by side
+    n_zoom = min(3, max(1, selected_lines.size))
+    axes_zoom = []
+    gs2 = fig.add_gridspec(1, n_zoom, top=0.35, bottom=0.05)
+    for i in range(n_zoom):
+        axz = fig.add_subplot(gs2[0, i])
+        if i < selected_lines.size:
+            lp = selected_lines[i]
+            halfwin = 0.18
+            mask = (wavegrid >= lp - halfwin) & (wavegrid <= lp + halfwin)
+            axz.plot(wavegrid[mask], y_act_true[mask], "k-", lw=1.2)
+            axz.plot(
+                wavegrid[mask], y_act_pred_vs_template[mask], color="#1f77b4", lw=1.0
+            )
+            axz.axvline(lp, color="red", ls=":", alpha=0.7)
+            axz.set_title(f"Line @{lp:.2f} Å (w={selected_weights[i]:.3f})")
+        else:
+            axz.text(0.5, 0.5, "No line", ha="center", va="center")
+            axz.set_axis_off()
+        axz.grid(True, alpha=0.3)
+        axes_zoom.append(axz)
 
     plt.tight_layout()
-    filepath = os.path.join(
-        create_typed_plot_dir(plot_dir, phase_name, "activity"),
-        f"activity_epoch_{epoch}.png",
-    )
+    outdir = create_typed_plot_dir(plot_dir, phase_name, "activity")
+    filepath = os.path.join(outdir, f"activity_epoch_{epoch}_sample{sample_idx}.png")
     plt.savefig(filepath, dpi=300, bbox_inches="tight")
-    plt.show()
-    # plt.close()
+    plt.close()
 
-    # cleanup (facultatif)
-    del (
-        batch_yobs,
-        batch_yaug,
-        batch_voffset,
-        batch_wavegrid,
-        batch_robs,
-        batch_yact,
-        batch_s,
+    print(
+        f"📊 Activity plot saved: {os.path.join(phase_name, 'activity', os.path.basename(filepath))}"
     )
-    gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
 
 
 # ==== Plots de predict.py ====

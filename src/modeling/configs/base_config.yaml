@@ -29,9 +29,9 @@ non_blocking_transfer: true   # Utilise le transfert non bloquant CPU→GPU
 # --------------------------------------------------------------------------
 # Augmentation
 # --------------------------------------------------------------------------
-M_aug: 1                  # Combien de versions augmentées par spectre
-vmin: -3                  # Vitesse min (m/s) pour décalage Doppler
-vmax: +3                  # Vitesse max (m/s)
+M_aug: 2                  # Combien de versions augmentées par spectre
+vmin: -6                  # Vitesse min (m/s) pour décalage Doppler
+vmax: +6                  # Vitesse max (m/s)
 interpolate: "linear"     # Méthode d'interpolation
 extrapolate: "linear"     # Méthode d'extrapolation hors bornes
 out_dtype: float32        # Type de sortie des spectres augmentés (float16 économise ~50% mémoire GPU)
@@ -47,15 +47,18 @@ sigma_v: 0.3              # Écart-type pour le bruit Doppler
 # Loss reg
 sigma_y: 1             # Écart-type pour le bruit de flux
 k_reg_init: 0.              # Coefficient de régularisation pour la perte
-cycle_length: 1000        # Nombre d'itérations pour le cycle de régularisation
+cycle_length: 0        # Nombre d'itérations pour le cycle de régularisation
 
 # Loss consistency
-get_aug_data: True         # Si True, calcule les données augmentées dans le forward pass et permet de calculer la loss de consistency
+get_aug_data: False         # Si True, calcule les données augmentées dans le forward pass et permet de calculer la loss de consistency
 sigma_s: 0.0001              # Poids dans la loss de consistency
 
 # Loss de smooth de l'activité
-smooth_alpha: 1
+smooth_alpha: 0
 smooth_order: 2
+
+# Loss fid
+sigma_l: 1.0
 
 model_dtype: float32      # Type de données pour les poids du modèle (float16/float32/float64)
 
@@ -100,6 +103,11 @@ phases:
     optimizer_kwargs:
       lr: 0.001
       weight_decay: 0.0
+    
+    scheduler: torch.optim.lr_scheduler.StepLR
+    scheduler_kwargs:
+      gamma: 0.7
+      step_size: 50
 
     # early_stopping:
     #   patience: 20
@@ -115,7 +123,7 @@ phases:
       b_obs: false
       b_rest: false
       rvestimator: true
-      spender: true
+      spender: false
 
     optimizer: "torch.optim.Adam"
     optimizer_kwargs:

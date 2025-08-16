@@ -304,6 +304,7 @@ class AESTRA(nn.Module):
         dtype=torch.float32,
         smooth_alpha: float = 0.0,  # Poids pour la perte de lissage (L2 sur dérivée)
         smooth_order: int = 1,  # 1 = pente, 2 = courbure
+        sigma_l: float = 1.0,  # Poids pour la perte de fidélité
     ):
         """
         Args:
@@ -344,6 +345,8 @@ class AESTRA(nn.Module):
         # Poids de lissage pour y_act (L2 sur la 1ère dérivée)
         self.smooth_alpha = float(smooth_alpha)
         self.smooth_order = int(smooth_order)
+
+        self.sigma_l = sigma_l
 
     def set_phase(self, phase: str):
         self.phase = phase
@@ -398,13 +401,17 @@ class AESTRA(nn.Module):
         return self
 
     def get_losses(
-        self, batch, extrapolate="linear", iteration_count=None, get_aug_data=True
+        self,
+        batch,
+        extrapolate="linear",
+        iteration_count=None,
+        get_aug_data=True,
     ):
         """
         Calcule les pertes en fonction de la phase du modèle.
 
         Args:
-            batch: tuple contenant (batch_yobs, batch_yaug, batch_voffset_true, batch_wavegrid, batch_weights_fid, batch_indices)
+            batch: tuple contenant (batch_yobs, batch_yaug, batch_voffset_true, batch_wavegrid, batch_weights_fid, batch_indices, batch_yact_true)
             extrapolate: méthode d'extrapolation pour le shift Doppler
             batch_weights: poids pour la perte FID (facultatif)
         """
@@ -415,6 +422,7 @@ class AESTRA(nn.Module):
             batch_wavegrid,
             batch_weights_fid,
             batch_indices,
+            batch_yact_true,
         ) = batch
         losses = {
             "fid": torch.tensor(0),
@@ -451,6 +459,7 @@ class AESTRA(nn.Module):
                 batch_yobs_prime=batch_yobs_prime,
                 batch_yobs=batch_yobs,
                 batch_weights=batch_weights_fid,
+                sigma_l=self.sigma_l,
             )
 
             if get_aug_data:
@@ -520,11 +529,11 @@ def loss_rv(batch_voffset_true, batch_voffset_pred, sigma_v=1.0):
     return torch.mean((batch_voffset_true - batch_voffset_pred) ** 2 / (sigma_v**2))
 
 
-def loss_fid(batch_yobs_prime, batch_yobs, batch_weights=None):
+def loss_fid(batch_yobs_prime, batch_yobs, batch_weights=None, sigma_l=1.0):
     if batch_weights is None:
         batch_weights = torch.ones_like(batch_yobs_prime)
 
-    return torch.mean(batch_weights * (batch_yobs - batch_yobs_prime) ** 2)
+    return sigma_l * torch.mean(batch_weights * (batch_yobs - batch_yobs_prime) ** 2)
 
 
 def loss_c(s, s_aug, sigma_s=1.0):

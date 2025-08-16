@@ -348,6 +348,12 @@ def generate_collate_fn(
                 batch_yobs.device.index if batch_yobs.is_cuda else ...
             ]
             batch_weights_fid = batch_weights_fid[: batch_yobs.shape[0]]
+        batch_yact_true = None
+        if getattr(dataset, "activity", None) is not None:
+            batch_yact_true = dataset.activity[
+                batch_yobs.device.index if batch_yobs.is_cuda else ...
+            ]
+            batch_yact_true = batch_yact_true[: batch_yobs.shape[0]]
 
         return (
             batch_yobs,
@@ -356,6 +362,7 @@ def generate_collate_fn(
             batch_wavegrid,
             batch_weights_fid,
             batch_indices,
+            batch_yact_true,
         )
 
     return collate_fn

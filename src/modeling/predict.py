@@ -560,6 +560,7 @@ def predict(model, dataset, batch_size=64, perturbation_value=1.0):
                 batch_wavegrid,
                 batch_weights_fid,
                 batch_indices,
+                batch_yact_true,
             ) = batch
 
             batch_vobs_pred, batch_vaug_pred = model.get_rvestimator_pred(
@@ -1375,7 +1376,7 @@ if __name__ == "__main__":
     #             perturbation_value=0.1,
     #         )
     main(
-        experiment_dir="experiments/soapgpu_ns100_5000-5050_dx2_sm3_p50_k0p1_phi0",
+        experiment_dir="experiments/soapgpu_ns100_5000-5050_dx2_sm3_p50_k0p1_phi0_noreg",
         # fap_threshold=0.01,
         # exclude_width_frac=0.05,
         # n_periods=5000,
