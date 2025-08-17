@@ -263,6 +263,7 @@ def load_experiment_checkpoint(path, device="cuda", dataset_filepath=None):
         alpha_act=config.get("alpha_act", 1.0),
         beta_brest=config.get("beta_brest", 1.0),
         consistency_mode=config.get("consistency_mode", "mse"),
+        encode_in_rest_frame=config.get("encode_in_rest_frame", True),
     )
 
     # Load state dict with compatibility handling
@@ -1166,6 +1167,8 @@ def main(
             console.log("🔄 loss_activity is enabled")
         if config.get("b_rest_equal_b_obs", False):
             console.log("🔄 b_rest_equal_b_obs is enabled")
+        if config.get("encode_in_rest_frame", True):
+            console.log("🔄 encode_in_rest_frame is enabled")
 
         model = AESTRA(
             n_pixels=dataset.n_pixels,
@@ -1193,6 +1196,7 @@ def main(
             alpha_act=config.get("alpha_act", 1.0),
             beta_brest=config.get("beta_brest", 1.0),
             consistency_mode=config.get("consistency_mode", "mse"),
+            encode_in_rest_frame=config.get("encode_in_rest_frame", True),
         )
         console.log(
             f"✅ Modèle créé avec succès (include_activity_proxies={model.include_activity_proxies})"

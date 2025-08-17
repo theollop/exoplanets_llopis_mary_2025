@@ -393,6 +393,7 @@ class AESTRA(nn.Module):
         alpha_act: float = 1.0,
         beta_brest: float = 1.0,
         consistency_mode: str = "mse",
+        encode_in_rest_frame: bool = True,
     ):
         """
         Args:
@@ -459,6 +460,7 @@ class AESTRA(nn.Module):
         # Conversion vers le dtype spécifié
         self.spender = self.spender.to(dtype=dtype)
         self.rvestimator = self.rvestimator.to(dtype=dtype)
+        self.encode_in_rest_frame = encode_in_rest_frame
 
     def set_phase(self, phase: str):
         self.phase = phase
@@ -564,10 +566,12 @@ class AESTRA(nn.Module):
                 batch_yaug=batch_yaug,
                 batch_wavegrid=batch_wavegrid,
                 batch_vobs_pred=batch_vobs_pred,
+                batch_vaug_pred=batch_vaug_pred,
                 extrapolate=extrapolate,
                 get_aug_data=get_aug_data,
                 batch_activity_proxies_norm=batch_activity_proxies_norm,
                 include_activity_proxies=self.include_activity_proxies,
+                encode_in_rest_frame=self.encode_in_rest_frame,
             )
 
             losses["fid"] = loss_fid(
@@ -653,12 +657,20 @@ class AESTRA(nn.Module):
         batch_yaug,
         batch_wavegrid,
         batch_vobs_pred,
+        batch_vaug_pred,
         extrapolate="linear",
         get_aug_data=True,
         include_activity_proxies=False,
         batch_activity_proxies_norm=None,
+        encode_in_rest_frame=True,
     ):
-        batch_robs = batch_yobs - self.b_obs.unsqueeze(0)
+        if encode_in_rest_frame:
+            yobs_rest = shift_spectra_linear(
+                batch_yobs, batch_wavegrid, -batch_vobs_pred
+            )
+            batch_robs = yobs_rest - self.b_obs.unsqueeze(0)
+        else:
+            batch_robs = batch_yobs - self.b_obs.unsqueeze(0)
 
         proxies_obs = None
         if include_activity_proxies and batch_activity_proxies_norm is not None:
@@ -685,7 +697,14 @@ class AESTRA(nn.Module):
         )
 
         if get_aug_data:
-            batch_raug = batch_yaug - self.b_obs.unsqueeze(0)
+            if self.encode_in_rest_frame:
+                batch_raug = shift_spectra_linear(
+                    spectra=batch_yaug,
+                    wavegrid=batch_wavegrid,
+                    velocities=batch_vaug_pred,
+                ) - self.b_obs.unsqueeze(0)
+            else:
+                batch_raug = batch_yaug - self.b_obs.unsqueeze(0)
             proxies_aug = None
             if include_activity_proxies and batch_activity_proxies_norm is not None:
                 if batch_activity_proxies_norm.ndim == 1:

@@ -77,7 +77,7 @@ activity_proxies_dim: 0 # Dimension des proxies d'activité (0 = désactivé) (3
 proxies_proj_dim: 32 # Dimension de projection des proxies
 conditioning_mode: "concat" # Mode de conditionnement ("concat" ou "add")
 
-
+encode_in_rest_frame: true
 
 model_dtype: float32      # Type de données pour les poids du modèle (float16/float32/float64)
 
