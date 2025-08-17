@@ -182,7 +182,7 @@ def save_experiment_checkpoint(
     console.log(f"💾 Experiment checkpoint saved: {path}")
 
 
-def load_experiment_checkpoint(path, device="cuda"):
+def load_experiment_checkpoint(path, device="cuda", dataset_filepath=None):
     """
     Charge un checkpoint d'expérience complet.
 
@@ -194,11 +194,44 @@ def load_experiment_checkpoint(path, device="cuda"):
     if not os.path.exists(path):
         raise FileNotFoundError(f"Checkpoint not found: {path}")
 
-    ckpt = torch.load(path, map_location=device)
+    # Try loading normally first. Some checkpoints may contain tensors
+    # backed by external storages (e.g. UntypedStorage tagged with an NPZ file)
+    # which can raise a RuntimeError like:
+    # "don't know how to restore data location of torch.storage.UntypedStorage (...)"
+    # In that case, fall back to a storage-preserving map_location which lets
+    # the unpickler return storages as-is.
+    try:
+        ckpt = torch.load(path, map_location=device)
+    except RuntimeError as e:
+        msg = str(e)
+        if (
+            "don't know how to restore data location of torch.storage.UntypedStorage"
+            in msg
+            or "UntypedStorage" in msg
+            or "Tagged" in msg
+        ):
+            console.log(
+                "⚠️ Fallback: torch.load failed to restore tagged storage locations, retrying with storage-preserving map_location"
+            )
+            # This map_location returns the storage object unchanged. It's the
+            # recommended fallback when loading checkpoints that reference
+            # external storage files (e.g. custom npz-backed storages).
+            ckpt = torch.load(path, map_location=lambda storage, loc: storage)
+        else:
+            raise
 
     # Reconstruction du dataset
     dataset_metadata = ckpt["dataset_metadata"]
-    # data_root_dir override supprimé: on utilise le chemin complet enregistré
+    # If the caller provided an explicit dataset_filepath, prefer it and
+    # override the saved path in the checkpoint metadata. Previously the
+    # code added a `data_root_dir` key which doesn't match the
+    # SpectrumDataset API and caused a TypeError.
+    if dataset_filepath is not None:
+        dataset_metadata["dataset_filepath"] = dataset_filepath
+
+    # Construct the SpectrumDataset from the (possibly overridden)
+    # metadata saved in the checkpoint. SpectrumDataset expects a
+    # `dataset_filepath` argument.
     dataset = SpectrumDataset(**dataset_metadata)
 
     # Reconstruction du modèle

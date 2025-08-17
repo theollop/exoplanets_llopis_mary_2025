@@ -37,6 +37,7 @@ import corner
 import matplotlib.pyplot as plt
 from scipy.optimize import minimize
 import os
+from src.utils import clear_gpu_memory
 
 # ==== MCMC ORBITAL INFERENCE ====
 
@@ -493,7 +494,7 @@ def compute_periodogram_metrics(
     if ls is None or np.all(np.isnan(power)):
         print("ERROR: Periodogram computation failed, returning empty metrics")
         metrics = {
-            "fap_at_PNj": None,
+            "fap_at_Pinj": None,
             "power_ratio": None,
             "n_sig_peaks_outside": 0,
             "P_detected": None,
@@ -505,7 +506,7 @@ def compute_periodogram_metrics(
     mask_planet_window = _get_planet_window_mask(periods, P_inj, exclude_width_frac)
 
     # Analyze planet detection
-    fap_at_PNj, power_ratio, P_detected, delta_P = _analyze_planet_detection(
+    fap_at_Pinj, power_ratio, P_detected, delta_P = _analyze_planet_detection(
         periods, power, mask_planet_window, P_inj, ls, ls_method
     )
 
@@ -521,7 +522,7 @@ def compute_periodogram_metrics(
     )
 
     metrics = {
-        "fap_at_PNj": fap_at_PNj,
+        "fap_at_Pinj": fap_at_Pinj,
         "power_ratio": power_ratio,
         "n_sig_peaks_outside": n_sig_peaks_outside,
         "P_detected": P_detected,
@@ -679,6 +680,69 @@ def compute_latent_distances(all_s, all_saug, seed=None):
     return delta_s_rand, delta_s_aug
 
 
+def detrend_vencode_with_latent(v_encode: np.ndarray, s: np.ndarray, knn: int = 10):
+    """AESTRA de-trending: remove latent-driven bias v0(s_i) from v_encode.
+
+    We estimate v0(s_i) as a Gaussian-weighted average of neighboring
+    v_encode values in latent space:
+
+        <v>_i = sum_{j!=i} w_ij * v_encode_j / sum_{j!=i} w_ij
+        w_ij = exp(-||s_i - s_j||^2 / (2 * sigma_R^2))
+
+    where sigma_R is the characteristic latent distance defined as the mean
+    of the distances to the knn nearest neighbors, averaged across all i.
+
+    Returns
+    -------
+    v_correct : np.ndarray
+        v_encode - <v> (shape [N,])
+    v0_avg : np.ndarray
+        The estimated latent bias <v> per sample (shape [N,])
+    sigma_R : float
+        The characteristic latent distance used in the kernel
+    """
+    v_encode = np.asarray(v_encode).astype(np.float32).reshape(-1)
+    S = np.asarray(s).astype(np.float32)
+    N = S.shape[0]
+    if N == 0:
+        return v_encode.copy(), np.zeros_like(v_encode), 0.0
+    knn = max(1, min(knn, max(1, N - 1)))
+
+    # Pairwise squared distances using the (a - b)^2 = a^2 + b^2 - 2ab trick
+    row_norm2 = np.sum(S * S, axis=1)
+    # D2 = ||s_i||^2 + ||s_j||^2 - 2 s_i.s_j
+    D2 = row_norm2[:, None] + row_norm2[None, :] - 2.0 * (S @ S.T)
+    # Numeric cleanup
+    np.fill_diagonal(D2, np.inf)
+    D2 = np.maximum(D2, 0.0)
+
+    # For each i, get KNN indices and distances
+    # Use argpartition for O(N*K)
+    knn_idx = np.argpartition(D2, knn, axis=1)[:, :knn]
+    # Gather squared distances and convert to Euclidean
+    rows = np.arange(N)[:, None]
+    knn_d2 = D2[rows, knn_idx]
+    knn_d = np.sqrt(knn_d2)
+
+    # sigma_R = average of per-sample mean distance to knn
+    sigma_i = np.mean(knn_d, axis=1)
+    sigma_R = float(np.mean(sigma_i))
+    eps = 1e-8
+    denom = 2.0 * max(sigma_R**2, eps)
+
+    # Compute weights and <v> for each i over its knn
+    w = np.exp(-knn_d2 / denom).astype(np.float32)
+    # normalize weights per i
+    w_sum = np.sum(w, axis=1, keepdims=True) + eps
+    w_norm = w / w_sum
+
+    v_neighbors = v_encode[knn_idx]  # [N, K]
+    v0_avg = np.sum(w_norm * v_neighbors, axis=1)
+
+    v_correct = v_encode - v0_avg
+    return v_correct.astype(np.float32), v0_avg.astype(np.float32), sigma_R
+
+
 def rank_metrics_across_experiments(
     experiments_root: str = "experiments",
     metrics_rel_path: str = os.path.join("postprocessing", "data", "metrics.csv"),
@@ -690,7 +754,7 @@ def rank_metrics_across_experiments(
     Règles:
     - pearson_r: on classe par |valeur| (plus grand est meilleur)
     - power_ratio: plus grand est meilleur
-    - fap_at_PNj, delta_P, n_sig_peaks_outside: plus petit est meilleur
+    - fap_at_Pinj, delta_P, n_sig_peaks_outside: plus petit est meilleur
 
     Retourne un dict {metric: [ {experiment, value, row}, ... ]} trié, et imprime le top-k.
     """
@@ -758,6 +822,7 @@ def rank_metrics_across_experiments(
 
 def main(
     experiment_dir: str,
+    dataset_filepath: str = None,
     fap_threshold: float = 0.01,
     exclude_width_frac: float = 0.05,
     min_period: float = 2.0,
@@ -817,24 +882,120 @@ def main(
     ]:
         os.makedirs(d, exist_ok=True)
 
-    # Load experiment
+    # Helper to check if an artifact already exists
+    def _exists(path: str) -> bool:
+        return isinstance(path, str) and os.path.exists(path)
+
+    # Load experiment (needed at least for dataset/time grid)
     if ckpt_path is None or not os.path.exists(ckpt_path):
         ckpt_path = find_latest_checkpoint(exp_path=experiment_dir)
-    exp = load_experiment_checkpoint(ckpt_path)
+    # Pass dataset_filepath as a keyword to avoid it being interpreted as the
+    # `device` positional argument (common accidental bug when calling the API).
+    exp = load_experiment_checkpoint(ckpt_path, dataset_filepath=dataset_filepath)
     model = exp["model"]
     dataset = exp["dataset"]
     dataset.move_to_cuda()
 
-    # Predictions
-    prediction_results = predict(
-        model=model,
-        dataset=dataset,
-        batch_size=batch_size,
-        perturbation_value=perturbation_value,
+    # Predefine expected artifact paths
+    overlay_path = os.path.join(fig_timeseries, "v_apparent_vs_v_correct.png")
+    ccf_compare_path = os.path.join(
+        fig_ccf_compare, "ccf_rv_with_vs_without_signal.png"
+    )
+    corr_path = os.path.join(fig_corr, "correlation_matrix.png")
+    latent3d_path = os.path.join(fig_latent, "latent_space_3d.png")
+    latent_distplot_path = os.path.join(fig_latent, "distance_distribution.png")
+    latent_marginals_path = os.path.join(fig_latent, "marginal_distributions.png")
+    act_perturb_path = os.path.join(fig_latent, "activity_perturbations.png")
+    mcmc_path = os.path.join(fig_dir, "mcmc_orbital_fit.png")
+    detrending_npz_path = os.path.join(data_dir, "detrending_latent.npz")
+    latent_distances_npz_path = os.path.join(data_dir, "latent_distances.npz")
+    periodograms_npz_path = os.path.join(data_dir, "periodograms.npz")
+    metrics_csv_path = os.path.join(data_dir, "metrics.csv")
+
+    # Which RV periodogram PNGs are missing
+    rv_series_pngs = {
+        "v_apparent": os.path.join(fig_periodo_rv, "v_apparent.png"),
+        "v_encode": os.path.join(fig_periodo_rv, "v_encode.png"),
+        "v_correct": os.path.join(fig_periodo_rv, "v_correct.png"),
+        "v_traditionnal": os.path.join(fig_periodo_rv, "v_traditionnal.png"),
+        "v_ref": os.path.join(fig_periodo_rv, "v_ref.png"),
+    }
+    missing_rv_periodos = {k: not _exists(p) for k, p in rv_series_pngs.items()}
+
+    # Decide which heavy computations are needed
+    need_overlay = not _exists(overlay_path)
+    need_ccf_compare = not _exists(ccf_compare_path)
+    need_corr = not _exists(corr_path)
+    need_latent3d = not _exists(latent3d_path)
+    need_latent_distplot = not _exists(latent_distplot_path)
+    need_latent_marginals = not _exists(latent_marginals_path)
+    need_act_perturb = not _exists(act_perturb_path)
+    need_mcmc = not _exists(mcmc_path)
+
+    # Compute needs for v_correct/latent
+    needs_vcorrect_or_latent = (
+        need_overlay
+        or need_latent3d
+        or need_latent_marginals
+        or need_corr
+        or need_mcmc
+        or missing_rv_periodos.get("v_correct", False)
+    )
+    # Heavy prediction is required for artifacts depending on s_aug or yact_perturbed
+    need_predict_heavy = need_act_perturb or need_latent_distplot
+    # CCF is required for these
+    need_ccf = (
+        need_overlay
+        or need_ccf_compare
+        or need_corr
+        or missing_rv_periodos.get("v_apparent", False)
+        or missing_rv_periodos.get("v_traditionnal", False)
+        or missing_rv_periodos.get("v_ref", False)
     )
 
-    v_correct = prediction_results["all_vobs"]
+    # Make time vector available
     times_values = dataset.time_values.cpu().detach().numpy()
+
+    # Prepare containers that will be filled on-demand
+    prediction_results = None
+    v_correct = None
+    s_latent = None
+
+    # If we need v_correct or latent vectors, try to use cached detrending results first
+    if needs_vcorrect_or_latent and not need_predict_heavy:
+        if _exists(detrending_npz_path):
+            try:
+                cache = np.load(detrending_npz_path)
+                v_correct = cache.get("v_correct")
+                s_latent = cache.get("s")
+            except Exception:
+                v_correct, s_latent = None, None
+
+    # Run prediction if required (heavy path) or if cache is missing
+    if need_predict_heavy or (
+        needs_vcorrect_or_latent and (v_correct is None or s_latent is None)
+    ):
+        prediction_results = predict(
+            model=model,
+            dataset=dataset,
+            batch_size=batch_size,
+            perturbation_value=perturbation_value,
+        )
+        # De-trending AESTRA
+        v_encode = prediction_results["all_vobs"].astype(np.float32)
+        s_latent = prediction_results["all_s"].astype(np.float32)
+        v_correct, v0_avg, sigma_R = detrend_vencode_with_latent(
+            v_encode, s_latent, knn=10
+        )
+        if not _exists(detrending_npz_path):
+            np.savez(
+                detrending_npz_path,
+                v_encode=v_encode,
+                v0_avg=v0_avg,
+                v_correct=v_correct,
+                s=s_latent,
+                sigma_R=sigma_R,
+            )
 
     # CCF analysis
     CCF_params = {
@@ -846,130 +1007,195 @@ def main(
         "normalize": True,
     }
 
-    print("Calcul des vitesses par CCF classique...")
-    v_apparent, depth, span, fwhm = get_vapparent(dataset, CCF_params)
-    print("Calcul des vitesses de référence...")
-    v_ref, depth_ref, span_ref, fwhm_ref = get_vref(dataset, CCF_params)
-    print("Calcul des vitesses corrigées par méthode traditionnelle...")
-    v_traditionnal = get_vtraditionnal(v_apparent, depth, span, fwhm)
+    v_apparent = v_ref = v_traditionnal = None
+    depth = span = fwhm = None
+    if need_ccf:
+        print("Calcul des vitesses par CCF classique...")
+        v_apparent, depth, span, fwhm = get_vapparent(dataset, CCF_params)
+        print("Calcul des vitesses de référence...")
+        v_ref, depth_ref, span_ref, fwhm_ref = get_vref(dataset, CCF_params)
+        print("Calcul des vitesses corrigées par méthode traditionnelle...")
+        v_traditionnal = get_vtraditionnal(v_apparent, depth, span, fwhm)
 
     # Plot overlay: v_apparent vs v_correct (AESTRA)
-    try:
-        overlay_path = os.path.join(fig_timeseries, "v_apparent_vs_v_correct.png")
-        plt.figure(figsize=(10, 5))
-        plt.plot(
-            times_values,
-            v_apparent - v_apparent[0],
-            alpha=0.8,
-            label="v_apparent (CCF)",
-        )
-        plt.plot(
-            times_values,
-            v_correct - v_correct[0],
-            alpha=0.9,
-            label="v_correct (AESTRA)",
-        )
-        plt.plot(
-            times_values,
-            v_traditionnal - v_traditionnal[0],
-            alpha=0.9,
-            label="v_traditionnal (AESTRA)",
-        )
-        plt.xlabel("Time (days)")
-        plt.ylabel("Radial Velocity (m/s)")
-        plt.title(
-            "RV time series: CCF vs AESTRA (v_apparent, v_correct, v_traditionnal)"
-        )
-        plt.legend()
-        plt.grid(alpha=0.2)
-        plt.tight_layout()
-        plt.savefig(overlay_path, dpi=200)
-        plt.close()
-        print(f"Saved RV overlay plot: {overlay_path}")
-    except Exception as e:
-        print(f"Erreur lors du plot v_apparent vs v_correct: {e}")
+    if need_overlay:
+        try:
+            if v_apparent is None or v_traditionnal is None:
+                # Ensure CCF is computed if overlay is requested
+                v_apparent, depth, span, fwhm = get_vapparent(dataset, CCF_params)
+                v_ref, depth_ref, span_ref, fwhm_ref = get_vref(dataset, CCF_params)
+                v_traditionnal = get_vtraditionnal(v_apparent, depth, span, fwhm)
+            if v_correct is None or s_latent is None:
+                # Ensure v_correct is available
+                if not _exists(detrending_npz_path):
+                    if prediction_results is None:
+                        prediction_results = predict(
+                            model=model,
+                            dataset=dataset,
+                            batch_size=batch_size,
+                            perturbation_value=perturbation_value,
+                        )
+                    v_encode = prediction_results["all_vobs"].astype(np.float32)
+                    s_latent = prediction_results["all_s"].astype(np.float32)
+                    v_correct, v0_avg, sigma_R = detrend_vencode_with_latent(
+                        v_encode, s_latent, knn=10
+                    )
+                else:
+                    cache = np.load(detrending_npz_path)
+                    v_correct = cache.get("v_correct")
+            # Ensure v_encode is available for plotting the overlay
+            v_encode = None
+            try:
+                if "v_encode" in locals() and v_encode is None:
+                    # prefer local variable if already present
+                    v_encode = locals().get("v_encode")
+            except Exception:
+                v_encode = None
+            if v_encode is None:
+                if _exists(detrending_npz_path):
+                    try:
+                        cache = np.load(detrending_npz_path)
+                        v_encode = cache.get("v_encode")
+                    except Exception:
+                        v_encode = None
+            if v_encode is None:
+                if prediction_results is None:
+                    prediction_results = predict(
+                        model=model,
+                        dataset=dataset,
+                        batch_size=batch_size,
+                        perturbation_value=perturbation_value,
+                    )
+                v_encode = prediction_results.get("all_vobs")
+            if v_encode is None:
+                v_encode = np.full_like(times_values, np.nan, dtype=float)
+            plt.figure(figsize=(10, 5))
+            plt.plot(
+                times_values,
+                v_apparent - v_apparent[0],
+                alpha=0.8,
+                label="v_apparent (CCF)",
+            )
+            # Plot v_encode as a dashed line (AESTRA encoded RV)
+            try:
+                plt.plot(
+                    times_values,
+                    v_encode - v_encode[0],
+                    alpha=0.85,
+                    label="v_encode (AESTRA)",
+                    linestyle="--",
+                )
+            except Exception:
+                # if v_encode contains NaNs or mismatched length, skip it
+                pass
+            plt.plot(
+                times_values,
+                v_correct - v_correct[0],
+                alpha=0.9,
+                label="v_correct (AESTRA)",
+            )
+            plt.plot(
+                times_values,
+                v_traditionnal - v_traditionnal[0],
+                alpha=0.9,
+                label="v_traditionnal (AESTRA)",
+            )
+            plt.xlabel("Time (days)")
+            plt.ylabel("Radial Velocity (m/s)")
+            plt.title(
+                "RV time series: CCF vs AESTRA (v_apparent, v_correct, v_traditionnal)"
+            )
+            plt.legend()
+            plt.grid(alpha=0.2)
+            plt.tight_layout()
+            plt.savefig(overlay_path, dpi=200)
+            plt.close()
+            print(f"Saved RV overlay plot: {overlay_path}")
+        except Exception as e:
+            print(f"Erreur lors du plot v_apparent vs v_correct: {e}")
 
     # --- CCF comparison: try to obtain RVs on dataset without injected signal
-    v_no_signal = None
-    try:
-        # Prefer computing from dataset if spectra_no_activity exists
-        v_no_signal, depth_ns, span_ns, fwhm_ns = get_vref(dataset, CCF_params)
-        print("RVs sans signal obtenues via get_vref(dataset)")
-    except Exception as e:
-        print(
-            f"get_vref(dataset) a échoué: {e}, tentative de chargement du NPZ de fallback..."
-        )
+    if need_ccf_compare:
+        v_no_signal = None
+        try:
+            # Prefer computing from dataset if spectra_no_activity exists
+            v_no_signal, depth_ns, span_ns, fwhm_ns = get_vref(dataset, CCF_params)
+            print("RVs sans signal obtenues via get_vref(dataset)")
+        except Exception as e:
+            print(
+                f"get_vref(dataset) a échoué: {e}, tentative de chargement du NPZ de fallback..."
+            )
 
-    # Fallback: load precomputed CCF results NPZ if shapes don't match or v_no_signal is None
-    if v_no_signal is None or len(v_no_signal) != len(times_values):
-        fallback_npz = "/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/ccf_results/ccf_analysis_results.npz"
-        if os.path.exists(fallback_npz):
-            try:
-                npz = np.load(fallback_npz)
-                # Heuristique: pick the first array with matching length to times_values
-                chosen = None
-                for k in npz.files:
-                    arr = npz[k]
-                    try:
-                        if hasattr(arr, "shape") and arr.shape[0] == len(times_values):
-                            chosen = arr
-                            print(
-                                f"Chargé '{k}' depuis NPZ comme série RV sans signal (shape match)"
-                            )
-                            break
-                    except Exception:
-                        continue
-                if chosen is not None:
-                    v_no_signal = chosen
-                else:
-                    print(
-                        f"Aucun tableau dans {fallback_npz} ne correspond à la longueur attendue ({len(times_values)})"
-                    )
-            except Exception as e:
-                print(f"Erreur en chargeant {fallback_npz}: {e}")
-        else:
-            print(f"Fallback NPZ introuvable: {fallback_npz}")
+        # Fallback: load precomputed CCF results NPZ if shapes don't match or v_no_signal is None
+        if v_no_signal is None or len(v_no_signal) != len(times_values):
+            fallback_npz = "/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/ccf_results/ccf_analysis_results.npz"
+            if os.path.exists(fallback_npz):
+                try:
+                    npz = np.load(fallback_npz)
+                    # Heuristique: pick the first array with matching length to times_values
+                    chosen = None
+                    for k in npz.files:
+                        arr = npz[k]
+                        try:
+                            if hasattr(arr, "shape") and arr.shape[0] == len(
+                                times_values
+                            ):
+                                chosen = arr
+                                print(
+                                    f"Chargé '{k}' depuis NPZ comme série RV sans signal (shape match)"
+                                )
+                                break
+                        except Exception:
+                            continue
+                    if chosen is not None:
+                        v_no_signal = chosen
+                    else:
+                        print(
+                            f"Aucun tableau dans {fallback_npz} ne correspond à la longueur attendue ({len(times_values)})"
+                        )
+                except Exception as e:
+                    print(f"Erreur en chargeant {fallback_npz}: {e}")
+            else:
+                print(f"Fallback NPZ introuvable: {fallback_npz}")
 
-    # If we still don't have a v_no_signal array, create a NaN array to avoid crashes
-    if v_no_signal is None:
-        v_no_signal = np.full_like(times_values, np.nan, dtype=float)
+        # If we still don't have a v_no_signal array, create a NaN array to avoid crashes
+        if v_no_signal is None:
+            v_no_signal = np.full_like(times_values, np.nan, dtype=float)
 
-    # Plot comparison: CCF RVs (with signal) vs CCF RVs (no injected signal)
-    try:
-        ccf_compare_path = os.path.join(
-            fig_ccf_compare, "ccf_rv_with_vs_without_signal.png"
-        )
-        plt.figure(figsize=(10, 5))
-        plt.plot(
-            times_values,
-            v_apparent,
-            marker="o",
-            linestyle="-",
-            alpha=0.8,
-            label="v_apparent (CCF on spectra)",
-        )
-        plt.plot(
-            times_values,
-            v_no_signal,
-            marker="x",
-            linestyle="--",
-            alpha=0.8,
-            label="v_no_signal (CCF on no-inj dataset)",
-        )
-        plt.xlabel("Time (days)")
-        plt.ylabel("Radial Velocity (m/s)")
-        plt.title("CCF RVs: with injected signal vs activity-only (no injected signal)")
-        plt.legend()
-        plt.grid(alpha=0.2)
-        plt.savefig(ccf_compare_path, dpi=200, bbox_inches="tight")
-        plt.close()
-        print(f"Saved CCF comparison plot: {ccf_compare_path}")
-    except Exception as e:
-        print(f"Erreur lors du plot CCF comparaison: {e}")
+        # Plot comparison: CCF RVs (with signal) vs CCF RVs (no injected signal)
+        try:
+            plt.figure(figsize=(10, 5))
+            plt.plot(
+                times_values,
+                v_apparent,
+                linewidth=1,
+                color="black",
+                alpha=0.8,
+                label="v_apparent (CCF on spectra)",
+            )
+            plt.plot(
+                times_values,
+                v_no_signal,
+                alpha=0.8,
+                label="v_no_signal (CCF on no-inj dataset)",
+            )
+            plt.xlabel("Time (days)")
+            plt.ylabel("Radial Velocity (m/s)")
+            plt.title(
+                "CCF RVs: with injected signal vs activity-only (no injected signal)"
+            )
+            plt.legend()
+            plt.grid(alpha=0.2)
+            plt.savefig(ccf_compare_path, dpi=200, bbox_inches="tight")
+            plt.close()
+            print(f"Saved CCF comparison plot: {ccf_compare_path}")
+        except Exception as e:
+            print(f"Erreur lors du plot CCF comparaison: {e}")
 
     # Prepare series
     v_series = {
         "v_apparent": v_apparent,
+        "v_encode": None,
         "v_correct": v_correct,
         "v_traditionnal": v_traditionnal,
         "v_ref": v_ref,
@@ -982,13 +1208,22 @@ def main(
     csv_rows = []
 
     def add_metric(row_type, series, component, metric, value, P_inj=None):
+        # Normalize missing numeric values to np.nan so CSV contains NaN (not Python None)
+        if value is None:
+            out_val = np.nan
+        else:
+            try:
+                out_val = value if np.isscalar(value) else float(value)
+            except Exception:
+                out_val = np.nan
+
         csv_rows.append(
             {
                 "row_type": row_type,
                 "series": series,
                 "component": component,
                 "metric": metric,
-                "value": value if value is None or np.isscalar(value) else float(value),
+                "value": out_val,
                 "P_inj": P_inj,
             }
         )
@@ -1021,7 +1256,56 @@ def main(
 
     # === Periodograms for RV series ===
     for name, y in v_series.items():
+        # Skip if this RV series plot already exists
+        if not missing_rv_periodos.get(name, False):
+            continue
         print(f"Périodogramme: {name}")
+        # Ensure the series is available
+        if y is None:
+            if name in ("v_apparent", "v_ref", "v_traditionnal"):
+                # Compute CCF on-demand
+                v_apparent, depth, span, fwhm = get_vapparent(dataset, CCF_params)
+                v_ref, depth_ref, span_ref, fwhm_ref = get_vref(dataset, CCF_params)
+                v_traditionnal = get_vtraditionnal(v_apparent, depth, span, fwhm)
+                y = {
+                    "v_apparent": v_apparent,
+                    "v_ref": v_ref,
+                    "v_traditionnal": v_traditionnal,
+                }[name]
+            elif name == "v_correct":
+                if v_correct is None:
+                    if not _exists(detrending_npz_path):
+                        if prediction_results is None:
+                            prediction_results = predict(
+                                model=model,
+                                dataset=dataset,
+                                batch_size=batch_size,
+                                perturbation_value=perturbation_value,
+                            )
+                        v_encode = prediction_results["all_vobs"].astype(np.float32)
+                        s_latent = prediction_results["all_s"].astype(np.float32)
+                        v_correct, _, _ = detrend_vencode_with_latent(
+                            v_encode, s_latent, knn=10
+                        )
+                    else:
+                        cache = np.load(detrending_npz_path)
+                        v_correct = cache.get("v_correct")
+                y = v_correct
+            elif name == "v_encode":
+                # v_encode comes from model predictions
+                if prediction_results is None:
+                    prediction_results = predict(
+                        model=model,
+                        dataset=dataset,
+                        batch_size=batch_size,
+                        perturbation_value=perturbation_value,
+                    )
+                v_encode = prediction_results.get("all_vobs")
+                if v_encode is None:
+                    # Fallback: create NaNs to avoid crashes
+                    y = np.full_like(times_values, np.nan, dtype=float)
+                else:
+                    y = v_encode.astype(np.float32)
         periods = _calculate_period_grid(
             times_values, min_period, max_period, n_periods
         )
@@ -1078,7 +1362,12 @@ def main(
             for i, P_val in enumerate(dataset.planet_periods):
                 m = metrics_list[i] if i < len(metrics_list) else {}
                 add_metric(
-                    "periodogram", name, "rv", "fap_at_PNj", m.get("fap_at_PNj"), P_val
+                    "periodogram",
+                    name,
+                    "rv",
+                    "fap_at_Pinj",
+                    m.get("fap_at_Pinj"),
+                    P_val,
                 )
                 add_metric(
                     "periodogram",
@@ -1101,200 +1390,401 @@ def main(
                 )
 
     # === Periodograms for latent coordinates ===
-    all_s = prediction_results["all_s"]
-    n_latent = all_s.shape[1]
-    for i in range(n_latent):
-        name = f"s_{i + 1}"
-        y = all_s[:, i]
-        print(f"Périodogramme: {name}")
-        periods = _calculate_period_grid(
-            times_values, min_period, max_period, n_periods
-        )
-        ls, power = _compute_lomb_scargle(
-            times_values, y, periods, fit_mean=True, center_data=True
-        )
-        periodo_store[f"{name}_periods"] = periods
-        periodo_store[f"{name}_power"] = power
-
-        metrics_list = (
-            compute_metrics_multi(
-                periods,
-                power,
-                ls,
-                dataset.planet_periods or [],
-                exclude_width_frac,
-                fap_threshold,
+    # Latent periodograms (compute only missing s_i plots)
+    if needs_vcorrect_or_latent:
+        if s_latent is None:
+            if _exists(detrending_npz_path):
+                try:
+                    cache = np.load(detrending_npz_path)
+                    s_latent = cache.get("s")
+                except Exception:
+                    s_latent = None
+        if s_latent is None:
+            # Fall back to prediction
+            if prediction_results is None:
+                prediction_results = predict(
+                    model=model,
+                    dataset=dataset,
+                    batch_size=batch_size,
+                    perturbation_value=perturbation_value,
+                )
+            s_latent = prediction_results["all_s"]
+        n_latent = s_latent.shape[1]
+        for i in range(n_latent):
+            name = f"s_{i + 1}"
+            save_path_i = os.path.join(fig_periodo_latent, f"{name}.png")
+            if _exists(save_path_i):
+                continue
+            y = s_latent[:, i]
+            print(f"Périodogramme: {name}")
+            periods = _calculate_period_grid(
+                times_values, min_period, max_period, n_periods
             )
-            if ls is not None
-            else []
-        )
-
-        # Calcul du seuil FAP empirique (bootstrap)
-        try:
-            fap_level_bootstrap = ls.false_alarm_level(
-                fap_threshold,
-                method="bootstrap",
-                minimum_frequency=1.0 / periods.max(),
-                maximum_frequency=1.0 / periods.min(),
-                samples_per_peak=10,
-                method_kwds={"n_bootstraps": 1000},
+            ls, power = _compute_lomb_scargle(
+                times_values, y, periods, fit_mean=True, center_data=True
             )
-            print(
-                f"Niveau de puissance pour FAP={fap_threshold} (bootstrap): {fap_level_bootstrap}"
+            periodo_store[f"{name}_periods"] = periods
+            periodo_store[f"{name}_power"] = power
+
+            metrics_list = (
+                compute_metrics_multi(
+                    periods,
+                    power,
+                    ls,
+                    dataset.planet_periods or [],
+                    exclude_width_frac,
+                    fap_threshold,
+                )
+                if ls is not None
+                else []
             )
-        except Exception as e:
-            fap_level_bootstrap = None
-            print(f"Erreur calcul FAP bootstrap: {e}")
 
-        plot_periodogram(
-            periods=periods,
-            power=power,
-            metrics=metrics_list if metrics_list else None,
-            P_inj=None,
-            fap_threshold=fap_threshold,
-            exclude_width_frac=exclude_width_frac,
-            title=f"LS Periodogram - {name}",
-            save_path=os.path.join(fig_periodo_latent, f"{name}.png"),
-            show_plot=False,
-            fap_level_bootstrap=fap_level_bootstrap,
-        )
+            # Calcul du seuil FAP empirique (bootstrap)
+            try:
+                fap_level_bootstrap = ls.false_alarm_level(
+                    fap_threshold,
+                    method="bootstrap",
+                    minimum_frequency=1.0 / periods.max(),
+                    maximum_frequency=1.0 / periods.min(),
+                    samples_per_peak=10,
+                    method_kwds={"n_bootstraps": 1000},
+                )
+                print(
+                    f"Niveau de puissance pour FAP={fap_threshold} (bootstrap): {fap_level_bootstrap}"
+                )
+            except Exception as e:
+                fap_level_bootstrap = None
+                print(f"Erreur calcul FAP bootstrap: {e}")
 
-        if dataset.planet_periods:
-            for j, P_val in enumerate(dataset.planet_periods):
-                m = metrics_list[j] if j < len(metrics_list) else {}
-                add_metric(
-                    "periodogram",
-                    name,
-                    "latent",
-                    "fap_at_PNj",
-                    m.get("fap_at_PNj"),
-                    P_val,
-                )
-                add_metric(
-                    "periodogram",
-                    name,
-                    "latent",
-                    "power_ratio",
-                    m.get("power_ratio"),
-                    P_val,
-                )
-                add_metric(
-                    "periodogram",
-                    name,
-                    "latent",
-                    "n_sig_peaks_outside",
-                    m.get("n_sig_peaks_outside"),
-                    P_val,
-                )
-                add_metric(
-                    "periodogram", name, "latent", "delta_P", m.get("delta_P"), P_val
-                )
+            plot_periodogram(
+                periods=periods,
+                power=power,
+                metrics=metrics_list if metrics_list else None,
+                P_inj=None,
+                fap_threshold=fap_threshold,
+                exclude_width_frac=exclude_width_frac,
+                title=f"LS Periodogram - {name}",
+                save_path=save_path_i,
+                show_plot=False,
+                fap_level_bootstrap=fap_level_bootstrap,
+            )
+
+            if dataset.planet_periods:
+                for j, P_val in enumerate(dataset.planet_periods):
+                    m = metrics_list[j] if j < len(metrics_list) else {}
+                    add_metric(
+                        "periodogram",
+                        name,
+                        "latent",
+                        "fap_at_Pinj",
+                        m.get("fap_at_Pinj"),
+                        P_val,
+                    )
+                    add_metric(
+                        "periodogram",
+                        name,
+                        "latent",
+                        "power_ratio",
+                        m.get("power_ratio"),
+                        P_val,
+                    )
+                    add_metric(
+                        "periodogram",
+                        name,
+                        "latent",
+                        "n_sig_peaks_outside",
+                        m.get("n_sig_peaks_outside"),
+                        P_val,
+                    )
+                    add_metric(
+                        "periodogram",
+                        name,
+                        "latent",
+                        "delta_P",
+                        m.get("delta_P"),
+                        P_val,
+                    )
 
     # Save NPZ with periodograms
-    np.savez(os.path.join(data_dir, "periodograms.npz"), **periodo_store)
+    # Save periodograms only if we computed some and file doesn't already exist
+    if periodo_store and not _exists(periodograms_npz_path):
+        np.savez(periodograms_npz_path, **periodo_store)
+
+    # Combined overlay of periodograms: v_apparent, v_encode, v_traditionnal, v_correct
+    combined_path = os.path.join(fig_periodo_rv, "all_series.png")
+    if not _exists(combined_path):
+        try:
+            series_names = ["v_apparent", "v_encode", "v_traditionnal", "v_correct"]
+            # Use a common period grid
+            periods_common = _calculate_period_grid(
+                times_values, min_period, max_period, n_periods
+            )
+            plt.figure(figsize=(10, 6))
+            plotted = 0
+            colors = {
+                "v_apparent": "C0",
+                "v_encode": "C1",
+                "v_traditionnal": "C2",
+                "v_correct": "C3",
+            }
+            linestyles = {
+                "v_apparent": "-",
+                "v_encode": "--",
+                "v_traditionnal": ":",
+                "v_correct": "-.",
+            }
+            for sname in series_names:
+                sval = None
+                if sname == "v_apparent":
+                    sval = v_apparent
+                elif sname == "v_encode":
+                    # Prefer an existing local v_encode, then prediction_results, then cache; finally run predict
+                    sval = None
+                    try:
+                        if (
+                            "v_encode" in locals()
+                            and locals().get("v_encode") is not None
+                        ):
+                            sval = locals().get("v_encode")
+                    except Exception:
+                        sval = None
+
+                    if sval is None and prediction_results is not None:
+                        sval = prediction_results.get("all_vobs")
+
+                    if sval is None and _exists(detrending_npz_path):
+                        try:
+                            cache = np.load(detrending_npz_path)
+                            sval = cache.get("v_encode")
+                        except Exception:
+                            sval = None
+
+                    if sval is None:
+                        # last resort: run a prediction to obtain v_encode
+                        prediction_results = predict(
+                            model=model,
+                            dataset=dataset,
+                            batch_size=batch_size,
+                            perturbation_value=perturbation_value,
+                        )
+                        sval = prediction_results.get("all_vobs")
+
+                    # validate length
+                    if hasattr(sval, "shape"):
+                        try:
+                            if sval.shape[0] != times_values.shape[0]:
+                                sval = None
+                        except Exception:
+                            sval = None
+                elif sname == "v_traditionnal":
+                    sval = v_traditionnal
+                elif sname == "v_correct":
+                    sval = v_correct
+
+                if sval is None:
+                    continue
+                try:
+                    ls_tmp, power_tmp = _compute_lomb_scargle(
+                        times_values,
+                        sval,
+                        periods_common,
+                        fit_mean=True,
+                        center_data=True,
+                    )
+                    if ls_tmp is None or np.all(np.isnan(power_tmp)):
+                        continue
+                    plt.semilogx(
+                        periods_common,
+                        power_tmp,
+                        label=sname,
+                        color=colors.get(sname, None),
+                        linestyle=linestyles.get(sname, "-"),
+                        linewidth=1.5,
+                    )
+                    plotted += 1
+                except Exception:
+                    continue
+
+            if plotted > 0:
+                plt.xlabel("Period (days)")
+                plt.ylabel("Lomb-Scargle power")
+                plt.title("Periodograms: overlay of RV series (excl. v_ref)")
+                plt.legend()
+                plt.grid(alpha=0.2)
+                plt.tight_layout()
+                plt.savefig(combined_path, dpi=200)
+                plt.close()
+                print(f"Saved combined periodogram overlay: {combined_path}")
+            else:
+                plt.close()
+        except Exception as e:
+            print(f"Erreur lors du plot combiné des périodogrammes: {e}")
 
     # Latent distance distribution
-    delta_s_rand, delta_s_aug = compute_latent_distances(
-        prediction_results["all_s"], prediction_results["all_saug"], seed=42
-    )
-
-    plot_latent_distance_distribution(
-        delta_s_rand=delta_s_rand,
-        delta_s_aug=delta_s_aug,
-        save_path=os.path.join(fig_latent, "distance_distribution.png"),
-        show_plot=False,
-    )
-
-    plot_latent_marginal_distributions(
-        prediction_results["all_s"],
-        save_path=os.path.join(fig_latent, "marginal_distributions.png"),
-        show_plot=False,
-    )
-
-    np.savez(
-        os.path.join(data_dir, "latent_distances.npz"),
-        delta_s_rand=delta_s_rand,
-        delta_s_aug=delta_s_aug,
-    )
-
-    add_metric(
-        "latent_distance",
-        "latent",
-        "delta_s",
-        "delta_s_rand_mean",
-        float(np.mean(delta_s_rand)),
-    )
-    add_metric(
-        "latent_distance",
-        "latent",
-        "delta_s",
-        "delta_s_rand_std",
-        float(np.std(delta_s_rand)),
-    )
-    add_metric(
-        "latent_distance",
-        "latent",
-        "delta_s",
-        "delta_s_rand_median",
-        float(np.median(delta_s_rand)),
-    )
-    add_metric(
-        "latent_distance",
-        "latent",
-        "delta_s",
-        "delta_s_aug_mean",
-        float(np.mean(delta_s_aug)),
-    )
-    add_metric(
-        "latent_distance",
-        "latent",
-        "delta_s",
-        "delta_s_aug_std",
-        float(np.std(delta_s_aug)),
-    )
-    add_metric(
-        "latent_distance",
-        "latent",
-        "delta_s",
-        "delta_s_aug_median",
-        float(np.median(delta_s_aug)),
-    )
+    # Latent distance distribution and marginals (only if missing)
+    if need_latent_distplot or need_latent_marginals:
+        if prediction_results is None:
+            # Need full prediction to access s and s_aug
+            prediction_results = predict(
+                model=model,
+                dataset=dataset,
+                batch_size=batch_size,
+                perturbation_value=perturbation_value,
+            )
+        if need_latent_distplot:
+            delta_s_rand, delta_s_aug = compute_latent_distances(
+                prediction_results["all_s"], prediction_results["all_saug"], seed=42
+            )
+            plot_latent_distance_distribution(
+                delta_s_rand=delta_s_rand,
+                delta_s_aug=delta_s_aug,
+                save_path=latent_distplot_path,
+                show_plot=False,
+            )
+            if not _exists(latent_distances_npz_path):
+                np.savez(
+                    latent_distances_npz_path,
+                    delta_s_rand=delta_s_rand,
+                    delta_s_aug=delta_s_aug,
+                )
+            add_metric(
+                "latent_distance",
+                "latent",
+                "delta_s",
+                "delta_s_rand_mean",
+                float(np.mean(delta_s_rand)),
+            )
+            add_metric(
+                "latent_distance",
+                "latent",
+                "delta_s",
+                "delta_s_rand_std",
+                float(np.std(delta_s_rand)),
+            )
+            add_metric(
+                "latent_distance",
+                "latent",
+                "delta_s",
+                "delta_s_rand_median",
+                float(np.median(delta_s_rand)),
+            )
+            add_metric(
+                "latent_distance",
+                "latent",
+                "delta_s",
+                "delta_s_aug_mean",
+                float(np.mean(delta_s_aug)),
+            )
+            add_metric(
+                "latent_distance",
+                "latent",
+                "delta_s",
+                "delta_s_aug_std",
+                float(np.std(delta_s_aug)),
+            )
+            add_metric(
+                "latent_distance",
+                "latent",
+                "delta_s",
+                "delta_s_aug_median",
+                float(np.median(delta_s_aug)),
+            )
+        if need_latent_marginals:
+            s_for_marg = (
+                prediction_results["all_s"]
+                if prediction_results is not None
+                else s_latent
+            )
+            if s_for_marg is None and _exists(detrending_npz_path):
+                cache = np.load(detrending_npz_path)
+                s_for_marg = cache.get("s")
+            if s_for_marg is not None:
+                plot_latent_marginal_distributions(
+                    s_for_marg,
+                    save_path=latent_marginals_path,
+                    show_plot=False,
+                )
 
     # Activity perturbations
-    y_act_original = prediction_results["all_yact"][0]
-    latent_dim = prediction_results["all_yact_perturbed"].shape[0]
-    y_act_perturbed_list = [
-        prediction_results["all_yact_perturbed"][dim][0] for dim in range(latent_dim)
-    ]
-    wave = dataset.wavegrid.cpu().detach().numpy()
+    if need_act_perturb:
+        if prediction_results is None:
+            prediction_results = predict(
+                model=model,
+                dataset=dataset,
+                batch_size=batch_size,
+                perturbation_value=perturbation_value,
+            )
+        y_act_original = prediction_results["all_yact"][0]
+        latent_dim = prediction_results["all_yact_perturbed"].shape[0]
+        y_act_perturbed_list = [
+            prediction_results["all_yact_perturbed"][dim][0]
+            for dim in range(latent_dim)
+        ]
+        wave = dataset.wavegrid.cpu().detach().numpy()
 
-    plot_activity_perturbation(
-        y_act_original=y_act_original,
-        y_act_perturbed_list=y_act_perturbed_list,
-        wavelength=wave,
-        save_path=os.path.join(fig_latent, "activity_perturbations.png"),
-        show_plot=False,
-        wave_range=(5000, 5010),
-    )
+        plot_activity_perturbation(
+            y_act_original=y_act_original,
+            y_act_perturbed_list=y_act_perturbed_list,
+            wavelength=wave,
+            save_path=act_perturb_path,
+            show_plot=False,
+            wave_range=(5000, 5010),
+        )
 
     # Correlation matrix
-    plot_correlation_matrix(
-        v_apparent=v_apparent,
-        v_correct=v_correct,
-        v_traditionnal=v_traditionnal,
-        v_ref=v_ref,
-        depth=depth,
-        span=span,
-        fwhm=fwhm,
-        latent_vectors=prediction_results["all_s"],
-        save_path=os.path.join(fig_corr, "correlation_matrix.png"),
-        show_plot=False,
-    )
+    if need_corr:
+        # Ensure required inputs
+        if v_apparent is None or v_traditionnal is None or v_ref is None:
+            v_apparent, depth, span, fwhm = get_vapparent(dataset, CCF_params)
+            v_ref, depth_ref, span_ref, fwhm_ref = get_vref(dataset, CCF_params)
+            v_traditionnal = get_vtraditionnal(v_apparent, depth, span, fwhm)
+        latent_vectors = s_latent
+        if latent_vectors is None:
+            if prediction_results is not None:
+                latent_vectors = prediction_results["all_s"]
+            elif _exists(detrending_npz_path):
+                cache = np.load(detrending_npz_path)
+                latent_vectors = cache.get("s")
+        # Ensure v_encode is available for correlations
+        v_encode = None
+        if prediction_results is not None:
+            v_encode = prediction_results.get("all_vobs")
+        if v_encode is None and _exists(detrending_npz_path):
+            try:
+                cache = np.load(detrending_npz_path)
+                v_encode = cache.get("v_encode")
+            except Exception:
+                v_encode = None
+        if v_encode is None:
+            # best-effort prediction
+            prediction_results = predict(
+                model=model,
+                dataset=dataset,
+                batch_size=batch_size,
+                perturbation_value=perturbation_value,
+            )
+            v_encode = prediction_results.get("all_vobs")
+
+        plot_correlation_matrix(
+            v_apparent=v_apparent,
+            v_encode=v_encode,
+            v_correct=v_correct,
+            v_traditionnal=v_traditionnal,
+            v_ref=v_ref,
+            depth=depth,
+            span=span,
+            fwhm=fwhm,
+            latent_vectors=latent_vectors,
+            save_path=corr_path,
+            show_plot=False,
+        )
 
     # Export correlations to CSV
     x_vars = {"FWHM": fwhm, "Span": span, "Depth": depth}
-    for i in range(n_latent):
-        x_vars[f"s_{i + 1}"] = prediction_results["all_s"][:, i]
+    if s_latent is not None:
+        n_latent = s_latent.shape[1]
+        for i in range(n_latent):
+            x_vars[f"s_{i + 1}"] = s_latent[:, i]
     y_vars = {
         "v_apparent": v_apparent,
         "v_correct": v_correct,
@@ -1303,63 +1793,98 @@ def main(
     }
     for y_name, y_vals in y_vars.items():
         for x_name, x_vals in x_vars.items():
-            corr = float(np.corrcoef(y_vals, x_vals)[0, 1])
+            # Validate inputs for correlation: must be array-like, same length,
+            # finite and with non-zero variance. Otherwise record NaN.
+            try:
+                ya = np.asarray(y_vals, dtype=float)
+                xa = np.asarray(x_vals, dtype=float)
+                if ya.ndim != 1 or xa.ndim != 1 or ya.size != xa.size:
+                    corr = np.nan
+                elif ya.size < 2:
+                    corr = np.nan
+                elif not (np.isfinite(ya).all() and np.isfinite(xa).all()):
+                    corr = np.nan
+                elif np.isclose(ya.std(), 0.0) or np.isclose(xa.std(), 0.0):
+                    corr = np.nan
+                else:
+                    corr = float(np.corrcoef(ya, xa)[0, 1])
+            except Exception:
+                corr = np.nan
+
             add_metric("correlation", y_name, x_name, "pearson_r", corr)
 
     # Optional latent 3D plot
-    if prediction_results["all_s"].shape[1] >= 3:
-        try:
-            plot_latent_space_3d(
-                latent_s=prediction_results["all_s"],
-                rv_values=v_correct,
-                save_path=os.path.join(fig_latent, "latent_space_3d.png"),
-                show_plot=False,
-            )
-        except Exception as e:
-            print(f"Erreur lors du plot 3D de l'espace latent: {e}")
+    if need_latent3d:
+        latent_vectors = s_latent
+        if latent_vectors is None:
+            if prediction_results is not None:
+                latent_vectors = prediction_results["all_s"]
+            elif _exists(detrending_npz_path):
+                cache = np.load(detrending_npz_path)
+                latent_vectors = cache.get("s")
+        if latent_vectors is not None and latent_vectors.shape[1] >= 3:
+            try:
+                plot_latent_space_3d(
+                    latent_s=latent_vectors,
+                    rv_values=v_correct,
+                    save_path=latent3d_path,
+                    show_plot=False,
+                )
+            except Exception as e:
+                print(f"Erreur lors du plot 3D de l'espace latent: {e}")
 
     # MCMC orbital fit for v_correct
-    print("\nMCMC orbital fit...")
-    try:
-        truths = (
-            {"P": dataset.planet_periods[0], "K": 5.0, "phi_deg": 0.0, "gamma": 0.0}
-            if dataset.planet_periods
-            else None
-        )
-        samples, summary = run_mcmc_for_fig9(
-            times=times_values,
-            rv=v_correct,
-            truths=truths,
-            out_path=os.path.join(fig_dir, "mcmc_orbital_fit.png"),
-        )
-        # Add MCMC metrics to CSV
-        for param in ["P", "K", "phi", "gamma"]:
-            add_metric(
-                "mcmc",
-                "v_correct",
-                "orbital",
-                f"{param}_median",
-                summary[param]["median"],
+    if need_mcmc:
+        print("\nMCMC orbital fit...")
+        try:
+            truths = (
+                {"P": dataset.planet_periods[0], "K": 5.0, "phi_deg": 0.0, "gamma": 0.0}
+                if dataset.planet_periods
+                else None
             )
-            add_metric(
-                "mcmc",
-                "v_correct",
-                "orbital",
-                f"{param}_err",
-                (summary[param]["plus_err"] + summary[param]["minus_err"]) / 2,
+            samples, summary = run_mcmc_for_fig9(
+                times=times_values,
+                rv=v_correct,
+                truths=truths,
+                out_path=mcmc_path,
             )
-    except Exception as e:
-        print(f"Erreur MCMC: {e}")
+            # Add MCMC metrics to CSV
+            for param in ["P", "K", "phi", "gamma"]:
+                add_metric(
+                    "mcmc",
+                    "v_correct",
+                    "orbital",
+                    f"{param}_median",
+                    summary[param]["median"],
+                )
+                add_metric(
+                    "mcmc",
+                    "v_correct",
+                    "orbital",
+                    f"{param}_err",
+                    (summary[param]["plus_err"] + summary[param]["minus_err"]) / 2,
+                )
+        except Exception as e:
+            print(f"Erreur MCMC: {e}")
 
     # Write metrics CSV
-    with open(os.path.join(data_dir, "metrics.csv"), mode="w", newline="") as f:
-        writer = csv.DictWriter(
-            f,
-            fieldnames=["row_type", "series", "component", "metric", "value", "P_inj"],
-        )
-        writer.writeheader()
-        for row in csv_rows:
-            writer.writerow(row)
+    # Write metrics only if not already present and if we computed some
+    if csv_rows and not _exists(metrics_csv_path):
+        with open(metrics_csv_path, mode="w", newline="") as f:
+            writer = csv.DictWriter(
+                f,
+                fieldnames=[
+                    "row_type",
+                    "series",
+                    "component",
+                    "metric",
+                    "value",
+                    "P_inj",
+                ],
+            )
+            writer.writeheader()
+            for row in csv_rows:
+                writer.writerow(row)
 
     print(f"Tous les résultats ont été enregistrés dans: {out_root}")
 
@@ -1416,12 +1941,54 @@ if __name__ == "__main__":
     #             # batch_size=64,
     #             perturbation_value=0.1,
     #         )
-    main(
-        experiment_dir="experiments/soapgpu_ns1000_5000-5010_dx2_sm3_p50_k0p1_phi0",
-        # fap_threshold=0.01,
-        # exclude_width_frac=0.05,
-        # n_periods=5000,
-        # zoom_frac=0.15,
-        # batch_size=64,
-        perturbation_value=0.01,
-    )
+
+    # parent_dir = "experiments"
+
+    # # Liste uniquement les sous-dossiers
+    # subfolders = [
+    #     os.path.join(parent_dir, d)
+    #     for d in os.listdir(parent_dir)
+    #     if os.path.isdir(os.path.join(parent_dir, d))
+    # ]
+
+    # for path in subfolders:
+    #     if not os.path.exists(os.path.join(path, "postprocessing/data/metrics.csv")):
+    #         print(path)
+    #         experiment_dir_name = os.path.basename(path)
+    #         # Path convention: data/npz_datasets/exps_rapport/<experiment_name>.npz
+    #         experiment_datasets_path = os.path.join(
+    #             "data/npz_datasets", "exps_rapport", experiment_dir_name + ".npz"
+    #         )
+    #         main(
+    #             experiment_dir=path,
+    #             dataset_filepath=experiment_datasets_path,
+    #             # fap_threshold=0.01,
+    #             # exclude_width_frac=0.05,
+    #             # n_periods=5000,
+    #             # zoom_frac=0.15,
+    #             # batch_size=64,
+    #             perturbation_value=0.01,
+    #         )
+    parent_dir = "/home/tliopis/Codes/exoplanets_llopis_mary_2025/experiments"
+
+    # Liste uniquement les sous-dossiers
+    subfolders = [
+        os.path.join(parent_dir, d)
+        for d in os.listdir(parent_dir)
+        if os.path.isdir(os.path.join(parent_dir, d))
+    ]
+
+    for path in subfolders:
+        # if not os.path.exists/(os.path.join(path, "postprocessing/data/metrics.csv")):
+        # si le nom de fichier ne contient pas 5000-5500
+        if "5000-5500" not in os.path.basename(path):
+            dataset_filepath = os.path.join(
+                "data/npz_datasets", "exps_rapport", os.path.basename(path) + ".npz"
+            )
+            clear_gpu_memory()
+            main(
+                experiment_dir=path,
+                dataset_filepath=dataset_filepath,
+                perturbation_value=0.001,
+                batch_size=32,
+            )

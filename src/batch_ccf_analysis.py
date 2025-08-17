@@ -3,37 +3,33 @@ import numpy as np
 import os
 import gc
 from src.ccf import get_full_ccf_analysis
-from src.dataset import _normalize_spectrum_with_rassine
+
+# from src.dataset import _normalize_spectrum_with_rassine  # unused; removed
 from src.utils import clear_gpu_memory
 
 
 def process_spectra_batch_ccf(
-    spectra_filepath="data/soap_gpu_paper/spec_cube_tot.h5",
-    spec_filepath="data/soap_gpu_paper/spec_master.npz",
+    spectra_filepath="data/soap_gpu_paper/spec_cube_tot_filtered_normalized_float32.h5",
+    wavegrid_filepath="data/soap_gpu_paper/wavegrid.npy",
     output_dir="data/ccf_results",
     batch_size=100,
     v_grid_range=(-20000, 20000),
-    v_grid_points=200,
+    v_grid_step=250,
     window_size_velocity=820.0,
     mask_type="G2",
     use_rassine=True,
-    wavemin=5000,
-    wavemax=5050,
-    specs_to_remove=[246, 249, 1196, 1453, 2176],
+    wavemin=4500,
+    wavemax=6000,
 ):
     # Chargement du template et wavegrid
-    spec_master = np.load(spec_filepath)
-    wavegrid_full = spec_master["wavelength"]
+    wavegrid_full = np.load(wavegrid_filepath)
 
     # Masque de longueurs d'onde
     wave_mask = (wavegrid_full >= wavemin) & (wavegrid_full <= wavemax)
     wavegrid = wavegrid_full[wave_mask]
 
     # Grille de vitesses
-    v_grid = np.linspace(v_grid_range[0], v_grid_range[1], v_grid_points)
-
-    # Configuration Rassine basique
-    rassine_config = {"column_wave": "wave", "column_flux": "flux"}
+    v_grid = np.arange(v_grid_range[0], v_grid_range[1] + v_grid_step, v_grid_step)
 
     os.makedirs(output_dir, exist_ok=True)
 
@@ -51,25 +47,16 @@ def process_spectra_batch_ccf(
         n_total_spectra = dset.shape[0]
         n_pixels = wave_mask.sum()
 
-        # Créer un masque pour les spectres à conserver
-        valid_indices = np.ones(n_total_spectra, dtype=bool)
-        if specs_to_remove:
-            specs_to_remove = np.array(specs_to_remove)
-            specs_to_remove = specs_to_remove[specs_to_remove < n_total_spectra]
-            valid_indices[specs_to_remove] = False
-
-        # Obtenir les indices des spectres valides
-        valid_spec_indices = np.where(valid_indices)[0]
-        n_valid_spectra = len(valid_spec_indices)
+        # Traiter tous les spectres
+        valid_spec_indices = np.arange(n_total_spectra)
+        n_valid_spectra = n_total_spectra
 
         print(f"Traitement de {n_valid_spectra} spectres par lots de {batch_size}")
-        if specs_to_remove is not None and len(specs_to_remove) > 0:
-            print(f"Spectres exclus: {specs_to_remove}")
         print(f"Domaine spectral: {wavemin}-{wavemax} Å ({n_pixels} pixels)")
 
         for batch_start in range(0, n_valid_spectra, batch_size):
             batch_end = min(batch_start + batch_size, n_valid_spectra)
-            current_batch_size = batch_end - batch_start
+            # current_batch_size not used; computed if needed in future
 
             print(
                 f"Lot {batch_start // batch_size + 1}: spectres {batch_start}-{batch_end - 1}"
@@ -81,22 +68,9 @@ def process_spectra_batch_ccf(
             # Chargement du lot avec crop spectral
             batch_spectra = dset[batch_indices][:, wave_mask]
 
-            # Normalisation avec Rassine si demandée
-            if use_rassine:
-                normalized_spectra = np.zeros_like(batch_spectra)
-                for i in range(current_batch_size):
-                    normalized_spectra[i] = _normalize_spectrum_with_rassine(
-                        wavegrid, batch_spectra[i], rassine_config
-                    )
-            else:
-                # Normalisation simple par la médiane
-                normalized_spectra = batch_spectra / np.median(
-                    batch_spectra, axis=1, keepdims=True
-                )
-
             # Calcul des CCFs et analyse
             ccf_results, raw_ccfs = get_full_ccf_analysis(
-                spectra=normalized_spectra,
+                spectra=batch_spectra,
                 wavegrid=wavegrid,
                 v_grid=v_grid,
                 window_size_velocity=window_size_velocity,
@@ -116,7 +90,7 @@ def process_spectra_batch_ccf(
             all_ccfs.append(raw_ccfs)
 
             # Nettoyage mémoire
-            del batch_spectra, normalized_spectra, raw_ccfs
+            del batch_spectra, raw_ccfs
             clear_gpu_memory()
             gc.collect()
 
@@ -140,7 +114,6 @@ def process_spectra_batch_ccf(
             "window_size_velocity": window_size_velocity,
             "mask_type": mask_type,
             "use_rassine": use_rassine,
-            "specs_to_remove": specs_to_remove,
         },
     }
 

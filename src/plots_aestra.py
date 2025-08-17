@@ -592,9 +592,7 @@ def plot_aestra_analysis(
     del batch_robs, batch_raug, batch_yact, batch_yact_aug, batch_s, batch_s_aug
     del batch_yrest, batch_vencode, batch_yobsprime
 
-    # Force le garbage collection
-    import gc
-
+    # Force the garbage collection
     gc.collect()
 
     # Libère le cache GPU si disponible
@@ -1259,6 +1257,17 @@ def plot_activity_perturbation(
     wave_filtered = wavelength[wave_mask]
     y_original_filtered = y_act_original[wave_mask]
 
+    # Defensive checks: if the selected wavelength window yields no points,
+    # avoid reductions that raise ValueError and skip plotting this figure.
+    if (
+        getattr(wave_filtered, "size", None) == 0
+        or getattr(y_original_filtered, "size", None) == 0
+    ):
+        print(
+            f"plot_activity_perturbation: empty wavelength selection for range={wave_range}, skipping."
+        )
+        return
+
     # Création de la figure avec subplots pour chaque perturbation
     fig, axes = plt.subplots(n_dims, 1, figsize=(10, max(6, 2 * n_dims)), sharex=True)
     if n_dims == 1:
@@ -1276,6 +1285,14 @@ def plot_activity_perturbation(
         label = f"Perturb s_{i + 1}"
 
         y_perturbed_filtered = y_perturbed[wave_mask]
+
+        # Skip empty perturbed arrays
+        if getattr(y_perturbed_filtered, "size", None) == 0:
+            print(
+                f"plot_activity_perturbation: perturbation {i} empty after masking, skipping subplot."
+            )
+            ax.set_visible(False)
+            continue
 
         # Plot du spectre original (courbe noire)
         ax.plot(wave_filtered, y_original_filtered, "k-", linewidth=1.2, alpha=0.8)
@@ -1310,6 +1327,8 @@ def plot_activity_perturbation(
         os.makedirs(os.path.dirname(save_path), exist_ok=True)
         plt.savefig(save_path, dpi=300, bbox_inches="tight")
         print(f"Figure sauvegardée: {save_path}")
+    else:
+        print("plot_activity_perturbation: no save_path provided, not saving figure.")
 
     if show_plot:
         plt.show()
@@ -1499,6 +1518,7 @@ def plot_latent_space_3d(
 
 def plot_correlation_matrix(
     v_apparent,
+    v_encode,
     v_correct,
     v_traditionnal,
     v_ref,
@@ -1509,10 +1529,14 @@ def plot_correlation_matrix(
     save_path=None,
     show_plot=False,
 ):
-    """Plot correlation matrix between RV methods and activity indicators/latent dimensions."""
+    """Plot correlation matrix between RV methods and activity indicators/latent dimensions.
+
+    Now includes `v_encode` in the RV methods and adds latent dimensions `s_i` as
+    rows on the y-axis in addition to being available on the x-axis.
+    """
 
     # Prepare data
-    n_latent = latent_vectors.shape[1]
+    n_latent = 0 if latent_vectors is None else latent_vectors.shape[1]
 
     # X-axis variables (indicators + latent dims)
     x_vars = {
@@ -1520,16 +1544,23 @@ def plot_correlation_matrix(
         "Span": span,
         "Depth": depth,
     }
-    for i in range(n_latent):
-        x_vars[f"s_{i + 1}"] = latent_vectors[:, i]
+    # keep latent dims on x-axis as before
+    if latent_vectors is not None:
+        for i in range(n_latent):
+            x_vars[f"s_{i + 1}"] = latent_vectors[:, i]
 
-    # Y-axis variables (RV methods)
+    # Y-axis variables (RV methods + latent dims)
     y_vars = {
         "v_apparent": v_apparent,
+        "v_encode": v_encode,
         "v_correct": v_correct,
         "v_traditionnal": v_traditionnal,
         "v_ref": v_ref,
     }
+    # append latent dims as additional rows on the y-axis
+    if latent_vectors is not None:
+        for i in range(n_latent):
+            y_vars[f"s_{i + 1}"] = latent_vectors[:, i]
 
     # Compute correlations
     x_names = list(x_vars.keys())
@@ -1538,7 +1569,21 @@ def plot_correlation_matrix(
 
     for i, y_name in enumerate(y_names):
         for j, x_name in enumerate(x_names):
-            corr_matrix[i, j] = np.corrcoef(y_vars[y_name], x_vars[x_name])[0, 1]
+            try:
+                ya = np.asarray(y_vars[y_name], dtype=float)
+                xa = np.asarray(x_vars[x_name], dtype=float)
+                if ya.ndim != 1 or xa.ndim != 1 or ya.size != xa.size:
+                    corr_matrix[i, j] = np.nan
+                elif ya.size < 2:
+                    corr_matrix[i, j] = np.nan
+                elif not (np.isfinite(ya).all() and np.isfinite(xa).all()):
+                    corr_matrix[i, j] = np.nan
+                elif np.isclose(ya.std(), 0.0) or np.isclose(xa.std(), 0.0):
+                    corr_matrix[i, j] = np.nan
+                else:
+                    corr_matrix[i, j] = np.corrcoef(ya, xa)[0, 1]
+            except Exception:
+                corr_matrix[i, j] = np.nan
 
     # Plot
     fig, ax = plt.subplots(figsize=(max(8, len(x_names) * 0.8), 6))
