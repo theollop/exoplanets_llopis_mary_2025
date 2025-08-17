@@ -63,7 +63,7 @@ loss_activity: True
 alpha_act: 1.0 # Poids pour la perte d'activité
 
 # Loss sur b_rest (targetté)
-loss_b_rest: True
+loss_b_rest: False
 beta_brest: 1.0 # Poids pour la perte de b_rest
 
 # Loss fid
@@ -103,9 +103,9 @@ plot_every: 50             # Plot des losses tous les X epochs (0 = désactivé)
 plot_rv_every: 50         # Plot des prédictions RV tous les X epochs (0 = désactivé)
 
 
-b_obs_init : mean
-b_rest_init : mean
-b_rest_equal_b_obs: true  
+b_obs_init : true_template
+b_rest_init : true_template
+b_rest_equal_b_obs: false  
 # --------------------------------------------------------------------------
 # Phases d'entraînement
 # --------------------------------------------------------------------------
@@ -140,8 +140,8 @@ phases:
     n_epochs: 200
     
     trainable_params:
-      b_obs: true
-      b_rest: true
+      b_obs: false
+      b_rest: false
       rvestimator: true
       spender: true
 

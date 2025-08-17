@@ -238,14 +238,18 @@ def load_experiment_checkpoint(path, device="cuda", dataset_filepath=None):
     config = ckpt["config"]
     model = AESTRA(
         n_pixels=dataset.n_pixels,
-        S=config["latent_dim"],
-        sigma_v=config["sigma_v"],
-        sigma_s=config["sigma_s"],
-        sigma_y=config["sigma_y"],
-        k_reg_init=config["k_reg_init"],
-        cycle_length=config["cycle_length"],
         b_obs=dataset.spectra.mean(dim=0),
         b_rest=dataset.spectra.mean(dim=0),
+        b_rest_equal_b_obs=config.get("b_rest_equal_b_obs", False),
+        b_rest_true=dataset.template if config.get("loss_b_rest", False) else None,
+        loss_activity=config.get("loss_activity", False),
+        S=config.get("latent_dim", 3),
+        sigma_v=config.get("sigma_v", 1.0),
+        sigma_s=config.get("sigma_s", 1.0),
+        sigma_y=config.get("sigma_y", 1.0),
+        k_reg_init=config.get("k_reg_init", 1.0),
+        cycle_length=config.get("cycle_length", 1000),
+        dropout=config.get("dropout", 0.0),
         device=device,
         dtype=getattr(torch, config.get("model_dtype", "float32")),
         smooth_alpha=config.get("smooth_alpha", 0.0),
@@ -253,6 +257,12 @@ def load_experiment_checkpoint(path, device="cuda", dataset_filepath=None):
         sigma_l=config.get("sigma_l", 0.0),
         sigma_corr=config.get("sigma_corr", 0.0),
         include_activity_proxies=config.get("include_activity_proxies", False),
+        activity_proxies_dim=config.get("activity_proxies_dim", 0),
+        proxies_proj_dim=config.get("proxies_proj_dim", 32),
+        conditioning_mode=config.get("conditioning_mode", "concat"),
+        alpha_act=config.get("alpha_act", 1.0),
+        beta_brest=config.get("beta_brest", 1.0),
+        consistency_mode=config.get("consistency_mode", "mse"),
     )
 
     # Load state dict with compatibility handling
@@ -699,9 +709,6 @@ def train_phase(
     model.set_phase(phase_name)
     model.train()
 
-    # Diagnostic flag: log detailed tensor stats for the very first batch
-    first_batch_logged = False
-
     # Préparation device & transferts CPU->GPU par batch
     model_device = next(model.parameters()).device
     move_batches_to_device = bool(config.get("move_batches_to_device", True))
@@ -741,70 +748,6 @@ def train_phase(
                         )
                     except Exception as e:
                         console.log(f"⚠️  Batch to({model_device}) failed: {e}")
-
-                # First-batch diagnostics: print tensor/device/dtype/summary to help debug stagnant losses
-                if not first_batch_logged:
-                    try:
-                        # Unpack optionals
-                        batch_yact_true = batch[6] if len(batch) > 6 else None
-
-                        def stats(t):
-                            if t is None:
-                                return "None"
-                            try:
-                                return (
-                                    f"shape={tuple(t.shape)}, dtype={t.dtype}, device={t.device}, "
-                                    f"mean={float(t.mean()):.4e}, std={float(t.std()):.4e}, min={float(t.min()):.4e}, max={float(t.max()):.4e}"
-                                )
-                            except Exception:
-                                return f"shape={tuple(t.shape)}, dtype={getattr(t, 'dtype', None)}, device={getattr(t, 'device', None)}"
-
-                        console.log("🔍 First-batch diagnostic:")
-                        console.log(
-                            f" - model.b_rest_equal_b_obs = {model.b_rest_equal_b_obs}"
-                        )
-                        console.log(f" - model.loss_activity = {model.loss_activity}")
-
-                        # b_rest_true (buffer)
-                        try:
-                            brt = getattr(model, "b_rest_true", None)
-                            console.log(f" - b_rest_true: {stats(brt)}")
-                        except Exception as e:
-                            console.log(f" - b_rest_true: error reading ({e})")
-
-                        # b_rest parameter
-                        try:
-                            console.log(
-                                f" - b_rest (param): requires_grad={model.b_rest.requires_grad}, {stats(model.b_rest.data)}"
-                            )
-                        except Exception as e:
-                            console.log(f" - b_rest: error reading ({e})")
-
-                        # Check if b_rest is present in optimizer
-                        try:
-                            in_opt = any(
-                                any(p is model.b_rest for p in g.get("params", []))
-                                for g in optimizer.param_groups
-                            )
-                            console.log(
-                                f" - b_rest in optimizer param_groups: {in_opt}"
-                            )
-                            console.log(
-                                f" - optimizer lr(s): {[float(g.get('lr', 0)) for g in optimizer.param_groups]}"
-                            )
-                        except Exception as e:
-                            console.log(f" - optimizer introspect error: {e}")
-
-                        # batch_yact_true stats
-                        try:
-                            console.log(f" - batch_yact_true: {stats(batch_yact_true)}")
-                        except Exception as e:
-                            console.log(f" - batch_yact_true: error reading ({e})")
-
-                    except Exception as e:
-                        console.log(f"⚠️  First-batch diagnostic failed: {e}")
-                    finally:
-                        first_batch_logged = True
 
                 B = batch[0].shape[0]
 
