@@ -51,7 +51,7 @@ cycle_length: 0        # Nombre d'itérations pour le cycle de régularisation
 
 # Loss consistency
 get_aug_data: True         # Si True, calcule les données augmentées dans le forward pass et permet de calculer la loss de consistency
-sigma_s: 0.0001              # Poids dans la loss de consistency
+sigma_s: 1              # Poids dans la loss de consistency
 consistency_mode: "mse" # Mode de perte de consistance ("mse" ou "sigmoid")
 
 # Loss de smooth de l'activité
