@@ -575,6 +575,7 @@ def predict(model, dataset, batch_size=64, perturbation_value=1.0):
                     batch_yaug=batch_yaug,
                     batch_wavegrid=batch_wavegrid,
                     batch_vobs_pred=batch_vobs_pred,
+                    batch_vaug_pred=batch_vaug_pred,
                     get_aug_data=True,
                     batch_activity_proxies_norm=batch_activity_proxies_norm,
                     include_activity_proxies=model.include_activity_proxies,
