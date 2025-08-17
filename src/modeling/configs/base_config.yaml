@@ -54,8 +54,14 @@ get_aug_data: True         # Si True, calcule les données augmentées dans le f
 sigma_s: 0.0001              # Poids dans la loss de consistency
 
 # Loss de smooth de l'activité
-smooth_alpha: 1
+smooth_alpha: 0
 smooth_order: 2
+
+# Loss sur l'activité (targetté)
+loss_activity: True
+
+# Loss sur b_rest (targetté)
+loss_b_rest: True
 
 # Loss fid
 sigma_l: 1.0
@@ -89,8 +95,8 @@ plot_every: 50             # Plot des losses tous les X epochs (0 = désactivé)
 plot_rv_every: 50         # Plot des prédictions RV tous les X epochs (0 = désactivé)
 
 
-b_obs_init : true_template
-b_rest_init : true_template
+b_obs_init : mean
+b_rest_init : mean
 # --------------------------------------------------------------------------
 # Phases d'entraînement
 # --------------------------------------------------------------------------
@@ -126,7 +132,7 @@ phases:
     
     trainable_params:
       b_obs: false
-      b_rest: false
+      b_rest: true
       rvestimator: true
       spender: true
 

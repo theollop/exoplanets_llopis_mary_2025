@@ -536,6 +536,7 @@ def create_soap_gpu_paper_dataset(
     use_rassine=False,
     storage_dtype=np.float64,
     ccf_npz_path: Optional[str] = None,
+    new_wavegrid_filepath: str = None,
 ):
     print("🔄 Création du dataset SOAP GPU Paper...")
 
@@ -550,14 +551,18 @@ def create_soap_gpu_paper_dataset(
     mask = build_mask(wavegrid, wavemin, wavemax)
     template_masked = template[mask]
     wavegrid_masked = wavegrid[mask]
+    if new_wavegrid_filepath is not None:
+        new_wavegrid = np.load(new_wavegrid_filepath)
+        new_wavegrid_mask = build_mask(new_wavegrid, wavemin, wavemax)
+        new_wavegrid_masked = new_wavegrid[new_wavegrid_mask]
 
     # ---- Split config
     split = IndexSplit(idx_start, idx_end)
 
     # ---- Load spectra selection (+ time)
     with h5py.File(spectra_filepath, "r") as f:
-        n_file_total = f["spec_cube"].shape[0]
-        spectra = f["spec_cube"][split.start : split.end, :][:, mask]
+        n_file_total = f["spec_sel"].shape[0]
+        spectra = f["spec_sel"][split.start : split.end, :][:, mask]
         time_values = time_values[split.start : split.end]
 
     n_spectra = spectra.shape[0]
@@ -576,6 +581,49 @@ def create_soap_gpu_paper_dataset(
 
     # ---- Downscaling
     Npix = wavegrid_masked.size
+    # If a new_wavegrid was supplied, interpolate template and spectra on it
+    if new_wavegrid_filepath is not None:
+        try:
+            from scipy.interpolate import interp1d
+
+            # interpolate template
+            try:
+                ftmp = interp1d(
+                    wavegrid_masked,
+                    template_masked,
+                    kind="linear",
+                    bounds_error=False,
+                    fill_value="extrapolate",
+                )
+                template_masked = ftmp(new_wavegrid_masked)
+            except Exception:
+                # fallback to numpy interp for template
+                template_masked = np.interp(
+                    new_wavegrid_masked, wavegrid_masked, template_masked
+                )
+
+            # interpolate each spectrum onto new grid
+            spect_interp = np.empty(
+                (spectra.shape[0], new_wavegrid_masked.size), dtype=spectra.dtype
+            )
+            for i in range(spectra.shape[0]):
+                try:
+                    spect_interp[i] = np.interp(
+                        new_wavegrid_masked, wavegrid_masked, spectra[i]
+                    )
+                except Exception:
+                    # if interpolation fails for a spectrum, fill with NaNs
+                    spect_interp[i] = np.full(new_wavegrid_masked.size, np.nan)
+
+            spectra = spect_interp
+            # replace the masked wavegrid with the new one for downstream ops
+            wavegrid_masked = new_wavegrid_masked
+            print(
+                f"Interpolated spectra and template on new grid (n_pix={wavegrid_masked.size})"
+            )
+        except Exception as e:
+            print(f"⚠️  Interpolation sur new_wavegrid_masked a échoué: {e}")
+
     wavegrid_ds = downscale_mean_1d(wavegrid_masked, downscaling_factor)
     template_ds = downscale_mean_1d(template_masked, downscaling_factor)
     spectra_ds, n_bins = downscale_mean_2d(spectra, downscaling_factor)
@@ -1071,23 +1119,24 @@ if __name__ == "__main__":
     # )
 
     create_soap_gpu_paper_dataset(
-        spectra_filepath="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/soap_gpu_paper/spec_cube_tot_filtered_normalized_float32.h5",
+        spectra_filepath="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/soap_gpu_paper/soap_equiv_for_harps.h5",
         template_filepath="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/soap_gpu_paper/template.npy",
         wavegrid_filepath="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/soap_gpu_paper/wavegrid.npy",
-        time_values_filepath="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/soap_gpu_paper/time_values.npy",
+        new_wavegrid_filepath="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/soap_gpu_paper/new_wavegrid.npy",
+        time_values_filepath="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/soap_gpu_paper/time_values_soap_equiv_for_harps.npy",
         output_dir="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/npz_datasets",
         idx_start=0,
-        idx_end=1000,
-        wavemin=5000,
-        wavemax=5010,
-        downscaling_factor=2,
-        smooth_after_downscaling=True,
-        smooth_kernel_size=3,
+        idx_end=1275,
+        wavemin=4000,
+        wavemax=4050,
+        downscaling_factor=1,
+        smooth_after_downscaling=False,
+        smooth_kernel_size=1,
         add_photon_noise=False,
         snr_target=300.0,
         noise_seed=42,
         planets_amplitudes=[0.1],
-        planets_periods=[50],
+        planets_periods=[100],
         planets_phases=[0.0],
         batch_size=100,
         use_rassine=False,

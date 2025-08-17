@@ -351,6 +351,8 @@ def save_losses_to_csv(losses_history, exp_name, phase_name, epoch, csv_dir, con
             "reg_loss",
             "smooth_loss",
             "corr_loss",
+            "template_loss",
+            "activity_loss",
             "total_loss",
         ]
         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
@@ -376,6 +378,8 @@ def save_losses_to_csv(losses_history, exp_name, phase_name, epoch, csv_dir, con
                     "reg_loss": losses_history["reg"][-1],
                     "smooth_loss": losses_history.get("smooth", [0])[-1],
                     "corr_loss": losses_history.get("corr", [0])[-1],
+                    "template_loss": losses_history.get("template", [0])[-1],
+                    "activity_loss": losses_history.get("activity", [0])[-1],
                     "total_loss": losses_history["total"][-1],
                 }
             )
@@ -685,6 +689,8 @@ def train_phase(
     table.add_column("C", justify="right")
     table.add_column("Reg", justify="right")
     table.add_column("Smooth", justify="right")
+    table.add_column("Template", justify="right")
+    table.add_column("Activity", justify="right")
     table.add_column("Corr", justify="right")
     table.add_column("Total Loss", justify="right")
 
@@ -713,6 +719,8 @@ def train_phase(
                 "c": 0.0,
                 "reg": 0.0,
                 "smooth": 0.0,
+                "template": 0.0,
+                "activity": 0.0,
                 "corr": 0.0,
             }
 
@@ -798,6 +806,8 @@ def train_phase(
             losses_history["reg"].append(epoch_losses["reg"])
             losses_history.setdefault("smooth", []).append(epoch_losses["smooth"])
             losses_history.setdefault("corr", []).append(epoch_losses["corr"])
+            losses_history.setdefault("template", []).append(epoch_losses["template"])
+            losses_history.setdefault("activity", []).append(epoch_losses["activity"])
             losses_history["total"].append(total_loss)
             losses_history["lr"].append(float(optimizer.param_groups[0]["lr"]))
 
@@ -810,6 +820,8 @@ def train_phase(
                 f"{epoch_losses['reg']:.4e}",
                 f"{epoch_losses['smooth']:.4e}",
                 f"{epoch_losses['corr']:.4e}",
+                f"{epoch_losses['template']:.4e}",
+                f"{epoch_losses['activity']:.4e}",
                 f"{total_loss:.4e}",
             )
 
@@ -1129,6 +1141,12 @@ def main(
         console.log(
             f"✅ Initialisation b_obs : {config.get('b_obs_init', 'true_template')} b_rest : {config.get('b_rest_init', 'mean')}"
         )
+
+        if config.get("loss_b_rest", False):
+            console.log("🔄 loss_brest is enabled, using dataset template for b_rest")
+        if config.get("loss_activity", False):
+            console.log("🔄 loss_activity is enabled")
+
         model = AESTRA(
             n_pixels=dataset.n_pixels,
             S=config["latent_dim"],
@@ -1139,6 +1157,10 @@ def main(
             cycle_length=config["cycle_length"],
             b_obs=b_obs_init,
             b_rest=b_rest_init,
+            b_rest_true=dataset.template if config.get("loss_b_rest", False) else None,
+            losses_activity=config.get("losses_activity", False)
+            if config.get("loss_activity", False)
+            else None,
             device=device,
             dtype=getattr(torch, config.get("model_dtype", "float32")),
             smooth_alpha=config.get("smooth_alpha", 0.0),
@@ -1337,6 +1359,6 @@ def main(
 if __name__ == "__main__":
     main(
         config_path="src/modeling/configs/base_config.yaml",
-        dataset_filepath="data/npz_datasets/soapgpu_ns1000_5000-5010_dx2_sm3_p50_k0p1_phi0.npz",
+        dataset_filepath="data/npz_datasets/soapgpu_equiv_for_harps_ns1275_4000-4050_p100_k0p1_phi0.npz",
         output_root_dir="experiments",
     )

@@ -293,6 +293,8 @@ class AESTRA(nn.Module):
         n_pixels,
         b_obs,
         b_rest,
+        b_rest_true=None,
+        losses_activity=False,
         S=3,
         sigma_v=1.0,
         sigma_s=1.0,
@@ -351,6 +353,9 @@ class AESTRA(nn.Module):
         self.sigma_corr = sigma_corr
 
         self.include_activity_proxies = include_activity_proxies
+
+        self.b_rest_true = b_rest_true.cuda()
+        self.losses_activity = losses_activity
 
     def set_phase(self, phase: str):
         self.phase = phase
@@ -436,6 +441,8 @@ class AESTRA(nn.Module):
             "rv": torch.tensor(0),
             "smooth": torch.tensor(0),
             "corr": torch.tensor(0),
+            "activity": torch.tensor(0),
+            "template": torch.tensor(0),
         }
         if self.rvestimator_trainable:
             batch_vobs_pred, batch_vaug_pred = self.get_rvestimator_pred(
@@ -488,8 +495,19 @@ class AESTRA(nn.Module):
                 losses["smooth"] = loss_smooth(
                     batch_yact, alpha=self.smooth_alpha, order=self.smooth_order
                 )
-            else:
-                losses["smooth"] = torch.tensor(0)
+
+            if self.b_rest_true is not None:
+                losses["template"] = loss_b_rest(
+                    b_rest_true=self.b_rest_true,
+                    b_rest_pred=self.b_rest,
+                )
+
+            if batch_yact_true is not None and self.losses_activity:
+                # Perte d'activité (si batch_yact_true est fourni)
+                losses["activity"] = loss_activity(
+                    batch_yact=batch_yact,
+                    batch_yact_true=batch_yact_true,
+                )
 
         if (
             self.sigma_corr > 0.0
@@ -705,6 +723,31 @@ def corr_loss_pairs(
     dv = v_aug - v_obs - v_offset
     S = 0.5 * (S_obs + S_aug) if use_avg_S else S_obs
     return corr_loss_v_vs_S(dv, S, stopgrad_S=stopgrad_S, eps=eps)
+
+
+def loss_activity(batch_yact, batch_yact_true, alpha=1.0):
+    """
+    Activity loss: L2 between the original and augmented spectra.
+
+    Args:
+        batch_yact: tensor shape [M*B, P]
+        batch_yaug: tensor shape [M*B, P]
+        alpha: multiplicative weight
+
+    Returns:
+        scalar tensor
+    """
+    if batch_yact is None or batch_yact_true is None:
+        return batch_yact.new_tensor(0.0)
+
+    return alpha * torch.mean((batch_yact - batch_yact_true) ** 2)
+
+
+def loss_b_rest(b_rest_true, b_rest_pred):
+    if b_rest_true is None:
+        return b_rest_true.new_tensor(0.0)
+
+    return torch.mean((b_rest_true - b_rest_pred) ** 2)
 
 
 def save_checkpoint(
