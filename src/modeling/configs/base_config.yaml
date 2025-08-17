@@ -29,7 +29,7 @@ non_blocking_transfer: true   # Utilise le transfert non bloquant CPU→GPU
 # --------------------------------------------------------------------------
 # Augmentation
 # --------------------------------------------------------------------------
-M_aug: 1                  # Combien de versions augmentées par spectre
+M_aug: 2                  # Combien de versions augmentées par spectre
 vmin: -3                  # Vitesse min (m/s) pour décalage Doppler
 vmax: +3                  # Vitesse max (m/s)
 interpolate: "linear"     # Méthode d'interpolation
@@ -111,7 +111,7 @@ b_rest_equal_b_obs: false
 # --------------------------------------------------------------------------
 phases:
   - name: rvonly
-    n_epochs: 0
+    n_epochs: 200
 
     trainable_params:
       b_obs: false
