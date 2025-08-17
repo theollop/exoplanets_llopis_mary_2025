@@ -101,19 +101,41 @@ class ConvBlock(nn.Module):
 
 class SPENDER(nn.Module):
     """
+    SPENDER avec conditionnement par proxies d'activité au niveau latent.
 
-    * self.n_pixels_in              -> Nb de pixel du spectre en entrée           dtype=int
+    Args:
+        n_pixels_in (int): taille du spectre en entrée/sortie.
+        S (int): dimension de l'espace latent.
+        proxies_dim (int): nb de proxies d'activité fournis (ex: 3 pour FWHM, depth, BIS).
+        proxies_proj_dim (int): dimension de projection des proxies en mode 'concat'.
+        conditioning (str): 'concat' (concaténation sur e) ou 'film' (FiLM γ, β sur e).
 
-    * self.wave_block          -> tensor de taille [B, n_pixels_in]           dtype=float32
-
+    Notes:
+        - On ne concatène PAS les proxies aux pixels d'entrée; ils conditionnent le goulot latent.
+        - e ∈ R^{256} (attention); en 'concat', e devient [256 + proxies_proj_dim].
+        - En 'film', on applique e' = (1+γ)*e + β, avec γ, β prédit depuis les proxies.
     """
 
-    def __init__(self, n_pixels_in, S=3):
+    def __init__(
+        self,
+        n_pixels_in: int,
+        S: int = 3,
+        proxies_dim: int = 0,
+        proxies_proj_dim: int = 32,
+        conditioning: str = "concat",  # "concat" ou "film"
+    ):
         super(SPENDER, self).__init__()
 
-        # ---------- Encoder ----------
+        assert conditioning in ("concat", "film"), (
+            "conditioning must be 'concat' or 'film'"
+        )
 
-        # ConvBlock n°1
+        self.S = int(S)
+        self.proxies_dim = int(proxies_dim)
+        self.proxies_proj_dim = int(proxies_proj_dim)
+        self.conditioning = conditioning
+
+        # ---------- Encoder (identique à ta version) ----------
         self.convblock1 = ConvBlock(
             in_channels=1,
             out_channels=128,
@@ -127,8 +149,6 @@ class SPENDER(nn.Module):
             act=nn.PReLU(num_parameters=128),
             dropout=0,
         )
-
-        # ConvBlock n°2
         self.convblock2 = ConvBlock(
             in_channels=128,
             out_channels=256,
@@ -142,8 +162,6 @@ class SPENDER(nn.Module):
             act=nn.PReLU(num_parameters=256),
             dropout=0,
         )
-
-        # ConvBlock n°3
         self.convblock3 = ConvBlock(
             in_channels=256,
             out_channels=512,
@@ -158,58 +176,117 @@ class SPENDER(nn.Module):
             dropout=0,
         )
 
-        # Softmax du bloc d'attention
+        # Softmax du bloc d'attention (sur la dimension longueur d'onde)
         self.softmax = nn.Softmax(dim=-1)
 
-        # MLP pour convertir la sortie de l'attention block en vecteur de l'espace latent
+        # ---------- Conditioning sur e ----------
+        latent_in = 256  # e est de taille 256 (après split h/k et attention)
+
+        # (a) Mode CONCAT : projeter les proxies puis concaténer à e
+        if self.proxies_dim > 0 and self.conditioning == "concat":
+            self.proj_proxies = nn.Sequential(
+                nn.LayerNorm(self.proxies_dim),
+                nn.Linear(self.proxies_dim, self.proxies_proj_dim),
+                nn.PReLU(self.proxies_proj_dim),
+            )
+            latent_in = 256 + self.proxies_proj_dim
+        else:
+            self.proj_proxies = None
+
+        # (b) Mode FiLM : prédire (γ, β) de taille 256 depuis les proxies
+        if self.proxies_dim > 0 and self.conditioning == "film":
+            self.film_gamma = nn.Sequential(
+                nn.LayerNorm(self.proxies_dim),
+                nn.Linear(self.proxies_dim, 256),
+                nn.Tanh(),  # borne γ ∈ (-1,1)
+            )
+            self.film_beta = nn.Sequential(
+                nn.LayerNorm(self.proxies_dim),
+                nn.Linear(self.proxies_dim, 256),
+            )
+        else:
+            self.film_gamma, self.film_beta = None, None
+
+        # ---------- MLP latent ----------
         self.latentMLP = MLP(
-            n_in=256,
-            n_out=S,
+            n_in=latent_in,
+            n_out=self.S,
             n_hidden=(128, 64, 32),
-            act=(nn.PReLU(128), nn.PReLU(64), nn.PReLU(32), nn.PReLU(S)),
+            act=(nn.PReLU(128), nn.PReLU(64), nn.PReLU(32), nn.PReLU(self.S)),
             dropout=0,
         )
 
         # ---------- Decoder ----------
         self.decoder = MLP(
-            n_in=S,
+            n_in=self.S,
             n_out=n_pixels_in,
             n_hidden=(64, 256, 1024),
             act=(nn.PReLU(64), nn.PReLU(256), nn.PReLU(1024), nn.PReLU(n_pixels_in)),
             dropout=0,
         )
 
-        # self.LSF = nn.Conv1d(1, 1, 5, bias=False, padding='same')
+        self.current_latent = None  # pour debug/visualisation
 
-        self.current_latent = None
+    def _prepare_proxies(
+        self, proxies: torch.Tensor, B: int, device, dtype
+    ) -> torch.Tensor:
+        """Met en forme les proxies pour correspondre au batch (B, P)."""
+        if proxies is None or self.proxies_dim == 0:
+            return None
+        if proxies.ndim == 1:
+            proxies = proxies.unsqueeze(0).expand(B, -1)
+        elif proxies.size(0) == 1 and B > 1:
+            proxies = proxies.expand(B, -1)
+        assert proxies.size(0) == B and proxies.size(1) == self.proxies_dim, (
+            f"Proxies doivent être de forme [B, {self.proxies_dim}]"
+        )
+        return proxies.to(device=device, dtype=dtype)
 
-    def forward(self, x):
-        x = x.unsqueeze(1)
-
-        # Encoding
+    def forward(self, x: torch.Tensor, proxies: torch.Tensor = None):
+        """
+        Args:
+            x: [B, P] spectre (résiduel) en entrée.
+            proxies: [B, proxies_dim] ou [proxies_dim], facultatif.
+        Returns:
+            yact: [B, P] activité reconstruite (rest-frame)
+            s:    [B, S] latent d'activité
+        """
+        # Encoder
+        x = x.unsqueeze(1)  # [B,1,P]
         x = self.convblock1(x)
         x = self.convblock2(x)
-        x = self.convblock3(x)
+        x = self.convblock3(x)  # [B,512,L']
 
-        C = x.shape[1] // 2  # Nombre de canaux
-        h, k = torch.split(x, [C, C], dim=1)  # On divise en deux
-        a = self.softmax(k)
-        e = torch.sum(
-            h * a, dim=-1
-        )  # On somme selon les longueurs d'ondes -> sortie [B, C]
-        s = self.latentMLP(e)  # Vecteur latent
+        # Attention: split en (h, k), softmax sur k puis pondération de h
+        C = x.shape[1] // 2  # 256
+        h, k = torch.split(x, [C, C], dim=1)  # [B,256,L'], [B,256,L']
+        a = self.softmax(k)  # poids sur L'
+        e = torch.sum(h * a, dim=-1)  # [B,256]
 
-        # Decoding
-        x = self.decoder(s)
+        # Préparer proxies
+        B = e.size(0)
+        proxies = self._prepare_proxies(proxies, B, device=e.device, dtype=e.dtype)
 
-        x = x.unsqueeze(1)
+        # Conditioning sur e
+        if self.proxies_dim > 0 and proxies is not None:
+            if self.conditioning == "concat":
+                p = (
+                    self.proj_proxies(proxies)
+                    if self.proj_proxies is not None
+                    else proxies
+                )
+                e = torch.cat([e, p], dim=1)  # [B, 256 + proj]
+            elif self.conditioning == "film":
+                gamma = self.film_gamma(proxies)  # [B,256]
+                beta = self.film_beta(proxies)  # [B,256]
+                e = (1.0 + gamma) * e + beta
 
-        # Convolve
-        # x = self.LSF(x)
+        # Latent + Décoder
+        s = self.latentMLP(e)  # [B,S]
+        yact = self.decoder(s)  # [B,P]
 
-        x = x.squeeze(1)
-
-        return x, s
+        self.current_latent = s
+        return yact, s
 
 
 class RVEstimator(nn.Module):
@@ -293,8 +370,9 @@ class AESTRA(nn.Module):
         n_pixels,
         b_obs,
         b_rest,
+        b_rest_equal_b_obs=False,
         b_rest_true=None,
-        losses_activity=False,
+        loss_activity=False,
         S=3,
         sigma_v=1.0,
         sigma_s=1.0,
@@ -307,16 +385,22 @@ class AESTRA(nn.Module):
         smooth_alpha: float = 0.0,  # Poids pour la perte de lissage (L2 sur dérivée)
         smooth_order: int = 1,  # 1 = pente, 2 = courbure
         sigma_l: float = 1.0,  # Poids pour la perte de fidélité
-        sigma_corr: float = 1.0,  # Poids pour la perte de corrélation
+        sigma_corr: float = 0.0,  # Poids pour la perte de corrélation
         include_activity_proxies: bool = False,  # Inclure les proxies d'activité
+        activity_proxies_dim: int = 0,
+        proxies_proj_dim: int = 32,
+        conditioning_mode: str = "concat",
+        alpha_act: float = 1.0,
+        beta_brest: float = 1.0,
+        consistency_mode: str = "mse",
     ):
         """
         Args:
             n_pixels (int): Nombre de pixels du spectre d'entrée.
             S (int): Dimension de l'espace latent pour SPENDER.
             dropout (float): Taux de dropout pour les couches MLP.
-            b_obs (torch.Tensor): Spectre b_obs de référence pour les observations (b_obs dans l'article). [n_pixels] (tensor non pas un paramètre celui-ci est converti ensuite en paramètre)
-            b_rest (torch.Tensor): Spectre b_rest de référence pour les observations (b_rest dans l'article). [n_pixels] (tensor non pas un paramètre celui-ci est converti ensuite en paramètre)
+            b_obs (torch.Tensor): Spectre b_obs de référence pour les observations (b_obs dans l'article). [n_pixels]
+            b_rest (torch.Tensor): Spectre b_rest de référence pour les observations (b_rest dans l'article). [n_pixels]
             device (str): Device à utiliser ("cuda" ou "cpu")
             dtype (torch.dtype): Type de données pour les poids du modèle (torch.float16, torch.float32, torch.float64)
         """
@@ -324,8 +408,48 @@ class AESTRA(nn.Module):
 
         self.device = device
         self.dtype = dtype
-        self.spender = SPENDER(n_pixels, S=S)
+
+        # phase par défaut et hyperparamètres
+        self.phase = "joint"
+        self.sigma_v = sigma_v
+        self.sigma_s = sigma_s
+        self.sigma_y = sigma_y
+        self.k_reg_init = k_reg_init
+        self.cycle_length = cycle_length
+        self.smooth_alpha = float(smooth_alpha)
+        self.smooth_order = int(smooth_order)
+        self.sigma_l = sigma_l
+        self.sigma_corr = sigma_corr
+        self.include_activity_proxies = include_activity_proxies
+        self.activity_proxies_dim = int(activity_proxies_dim)
+        self.proxies_proj_dim = int(proxies_proj_dim)
+        self.conditioning_mode = conditioning_mode
+
+        self.loss_activity = bool(loss_activity)
+
+        self.alpha_act = alpha_act
+        self.beta_brest = beta_brest
+        self.consistency_mode = consistency_mode
+
+        self.spender = SPENDER(
+            n_pixels_in=n_pixels,
+            S=S,
+            proxies_dim=(
+                self.activity_proxies_dim if self.include_activity_proxies else 0
+            ),
+            proxies_proj_dim=self.proxies_proj_dim,
+            conditioning=self.conditioning_mode,
+        )
         self.rvestimator = RVEstimator(n_pixels, dropout=dropout)
+        self.b_rest_equal_b_obs = bool(b_rest_equal_b_obs)
+
+        self.b_obs = nn.Parameter(b_obs.to(dtype=dtype), requires_grad=False)
+        self.b_rest = nn.Parameter(b_rest.to(dtype=dtype), requires_grad=True)
+        self.b_rest_true = b_rest_true
+        if self.b_rest_true is not None:
+            self.b_rest_true = self.b_rest_true.to(dtype=dtype, device=device)
+        if self.b_rest_equal_b_obs:
+            self.b_rest = self.b_obs
 
         # Déplacement vers le device approprié seulement si CUDA est disponible
         if device == "cuda" and torch.cuda.is_available():
@@ -335,27 +459,6 @@ class AESTRA(nn.Module):
         # Conversion vers le dtype spécifié
         self.spender = self.spender.to(dtype=dtype)
         self.rvestimator = self.rvestimator.to(dtype=dtype)
-
-        self.b_obs = nn.Parameter(b_obs.to(dtype=dtype), requires_grad=False)
-        self.b_rest = nn.Parameter(b_rest.to(dtype=dtype), requires_grad=True)
-        # phase par défaut
-        self.phase = "joint"
-        self.sigma_v = sigma_v
-        self.sigma_s = sigma_s
-        self.sigma_y = sigma_y
-        self.k_reg_init = k_reg_init
-        self.cycle_length = cycle_length
-        # Poids de lissage pour y_act (L2 sur la 1ère dérivée)
-        self.smooth_alpha = float(smooth_alpha)
-        self.smooth_order = int(smooth_order)
-
-        self.sigma_l = sigma_l
-        self.sigma_corr = sigma_corr
-
-        self.include_activity_proxies = include_activity_proxies
-
-        self.b_rest_true = b_rest_true.cuda()
-        self.losses_activity = losses_activity
 
     def set_phase(self, phase: str):
         self.phase = phase
@@ -416,14 +519,6 @@ class AESTRA(nn.Module):
         iteration_count=None,
         get_aug_data=True,
     ):
-        """
-        Calcule les pertes en fonction de la phase du modèle.
-
-        Args:
-            batch: tuple contenant (batch_yobs, batch_yaug, batch_voffset_true, batch_wavegrid, batch_weights_fid, batch_indices, batch_yact_true, batch_activity_proxies_norm)
-            extrapolate: méthode d'extrapolation pour le shift Doppler
-            batch_weights: poids pour la perte FID (facultatif)
-        """
         (
             batch_yobs,
             batch_yaug,
@@ -434,30 +529,35 @@ class AESTRA(nn.Module):
             batch_yact_true,
             batch_activity_proxies_norm,
         ) = batch
+
+        device, dtype = batch_yobs.device, batch_yobs.dtype
+        zeros = lambda: torch.zeros((), device=device, dtype=dtype)
+
         losses = {
-            "fid": torch.tensor(0),
-            "c": torch.tensor(0),
-            "reg": torch.tensor(0),
-            "rv": torch.tensor(0),
-            "smooth": torch.tensor(0),
-            "corr": torch.tensor(0),
-            "activity": torch.tensor(0),
-            "template": torch.tensor(0),
+            k: zeros()
+            for k in ["fid", "c", "reg", "rv", "smooth", "corr", "activity", "template"]
         }
+
+        # --- RV head ---
+        batch_vobs_pred = None
+        batch_vaug_pred = None
         if self.rvestimator_trainable:
             batch_vobs_pred, batch_vaug_pred = self.get_rvestimator_pred(
                 batch_yobs=batch_yobs,
                 batch_yaug=batch_yaug,
             )
-
             batch_voffset_pred = batch_vaug_pred - batch_vobs_pred
-
             losses["rv"] = loss_rv(
                 batch_voffset_true=batch_voffset_true,
                 batch_voffset_pred=batch_voffset_pred,
                 sigma_v=self.sigma_v,
             )
+        else:
+            # sécurité si la tête RV est gelée
+            B = batch_yobs.size(0)
+            batch_vobs_pred = torch.zeros(B, device=device, dtype=dtype)
 
+        # --- SPENDER / reconstruction ---
         if self.spender_trainable:
             batch_yobs_prime, batch_yact, _, s, s_aug = self.get_spender_pred(
                 batch_yobs=batch_yobs,
@@ -477,11 +577,15 @@ class AESTRA(nn.Module):
                 sigma_l=self.sigma_l,
             )
 
-            if get_aug_data:
-                losses["c"] = loss_c(s, s_aug, sigma_s=self.sigma_s)
-            else:
-                losses["c"] = torch.tensor(0)
+            # Consistency sur les latents (dépend de get_aug_data)
+            if get_aug_data and s is not None and s_aug is not None:
+                if self.consistency_mode == "mse":
+                    losses["c"] = loss_c_mse(s, s_aug, sigma_s=self.sigma_s)
+                elif self.consistency_mode == "sigmoid":
+                    losses["c"] = loss_c(s, s_aug, sigma_s=self.sigma_s)
 
+            # --- Ces pertes DOIVENT être calculées indépendamment de get_aug_data ---
+            # Régularisation L2 sur y_act
             losses["reg"] = loss_reg(
                 batch_yact,
                 k_reg_init=self.k_reg_init,
@@ -490,29 +594,36 @@ class AESTRA(nn.Module):
                 cycle_length=self.cycle_length,
             )
 
-            # Smoothness regularization on decoder activity (L2 on first derivative)
+            # Lissage éventuel de y_act
             if self.smooth_alpha is not None and float(self.smooth_alpha) > 0.0:
                 losses["smooth"] = loss_smooth(
                     batch_yact, alpha=self.smooth_alpha, order=self.smooth_order
                 )
 
+            # Supervision b_rest (template)
             if self.b_rest_true is not None:
                 losses["template"] = loss_b_rest(
                     b_rest_true=self.b_rest_true,
                     b_rest_pred=self.b_rest,
+                    beta_brest=self.beta_brest,
                 )
 
-            if batch_yact_true is not None and self.losses_activity:
-                # Perte d'activité (si batch_yact_true est fourni)
+            # Supervision activité y_act (si GT dispo)
+            if batch_yact_true is not None and self.loss_activity:
                 losses["activity"] = loss_activity(
                     batch_yact=batch_yact,
                     batch_yact_true=batch_yact_true,
+                    alpha_act=self.alpha_act,
                 )
 
+        # Corrélation latents / RV (optionnelle)
         if (
             self.sigma_corr > 0.0
             and self.rvestimator_trainable
             and self.spender_trainable
+            and get_aug_data
+            and s is not None
+            and s_aug is not None
         ):
             losses["corr"] = self.sigma_corr * corr_loss_pairs(
                 v_obs=batch_vobs_pred,
@@ -549,29 +660,22 @@ class AESTRA(nn.Module):
     ):
         batch_robs = batch_yobs - self.b_obs.unsqueeze(0)
 
-        # Optionally concatenate activity proxies (ensure proper shape/device/dtype)
+        proxies_obs = None
         if include_activity_proxies and batch_activity_proxies_norm is not None:
-            if batch_activity_proxies_norm.dim() == 1:
-                batch_activity_proxies_norm = batch_activity_proxies_norm.unsqueeze(
-                    0
-                ).expand(batch_robs.size(0), -1)
-            if batch_activity_proxies_norm.size(0) != batch_robs.size(0):
-                # Try to expand a single-row tensor; otherwise, skip to avoid crash
-                if batch_activity_proxies_norm.size(0) == 1:
-                    batch_activity_proxies_norm = batch_activity_proxies_norm.expand(
-                        batch_robs.size(0), -1
-                    )
-                else:
-                    batch_activity_proxies_norm = None
-            if batch_activity_proxies_norm is not None:
-                batch_activity_proxies_norm = batch_activity_proxies_norm.to(
-                    device=batch_robs.device, dtype=batch_robs.dtype
+            if batch_activity_proxies_norm.ndim == 1:
+                proxies_obs = batch_activity_proxies_norm.unsqueeze(0).expand(
+                    batch_robs.size(0), -1
                 )
-                batch_robs = torch.cat([batch_robs, batch_activity_proxies_norm], dim=1)
+            else:
+                proxies_obs = batch_activity_proxies_norm
+            proxies_obs = proxies_obs.to(
+                device=batch_robs.device, dtype=batch_robs.dtype
+            )
 
-        batch_yact, s = self.spender(batch_robs)
+        batch_yact, s = self.spender(batch_robs, proxies=proxies_obs)
 
-        batch_yrest = self.b_rest.unsqueeze(0) + batch_yact
+        base_rest = self.b_obs if self.b_rest_equal_b_obs else self.b_rest
+        batch_yrest = base_rest.unsqueeze(0) + batch_yact
 
         batch_yobs_prime = shift_spectra_linear(
             spectra=batch_yrest,
@@ -582,23 +686,19 @@ class AESTRA(nn.Module):
 
         if get_aug_data:
             batch_raug = batch_yaug - self.b_obs.unsqueeze(0)
+            proxies_aug = None
             if include_activity_proxies and batch_activity_proxies_norm is not None:
-                if batch_activity_proxies_norm.dim() == 1:
-                    batch_activity_proxies_norm = batch_activity_proxies_norm.unsqueeze(
-                        0
-                    ).expand(batch_raug.size(0), -1)
-                if batch_activity_proxies_norm.size(0) == 1:
-                    batch_activity_proxies_norm = batch_activity_proxies_norm.expand(
+                if batch_activity_proxies_norm.ndim == 1:
+                    proxies_aug = batch_activity_proxies_norm.unsqueeze(0).expand(
                         batch_raug.size(0), -1
                     )
-                if batch_activity_proxies_norm.size(0) == batch_raug.size(0):
-                    batch_activity_proxies_norm = batch_activity_proxies_norm.to(
-                        device=batch_raug.device, dtype=batch_raug.dtype
-                    )
-                    batch_raug = torch.cat(
-                        [batch_raug, batch_activity_proxies_norm], dim=1
-                    )
-            batch_yact_aug, s_aug = self.spender(batch_raug)
+                else:
+                    proxies_aug = batch_activity_proxies_norm
+                proxies_aug = proxies_aug.to(
+                    device=batch_raug.device, dtype=batch_raug.dtype
+                )
+
+            batch_yact_aug, s_aug = self.spender(batch_raug, proxies=proxies_aug)
         else:
             batch_yact_aug, s_aug = None, None
 
@@ -620,6 +720,12 @@ def loss_c(s, s_aug, sigma_s=1.0):
     S = s.shape[1]
 
     return torch.mean(torch.sigmoid((s - s_aug) ** 2 / (S * sigma_s**2)) - 0.5)
+
+
+def loss_c_mse(s, s_aug, sigma_s=1.0):
+    # s, s_aug: [B, S]
+    S = s.shape[1]
+    return torch.mean(((s - s_aug) ** 2) / (S * (sigma_s**2)))
 
 
 def loss_smooth(batch_yact, alpha=1.0, order=1, weight=None):
@@ -662,7 +768,7 @@ def get_k_reg(k_reg_init: float, iteration_count: int = None, cycle_length: int 
     if iteration_count is None or cycle_length == 0:
         return k_reg_init
 
-    k_reg = (iteration_count % cycle_length) / cycle_length
+    k_reg = k_reg_init + (iteration_count % cycle_length) / cycle_length
     return k_reg
 
 
@@ -725,7 +831,7 @@ def corr_loss_pairs(
     return corr_loss_v_vs_S(dv, S, stopgrad_S=stopgrad_S, eps=eps)
 
 
-def loss_activity(batch_yact, batch_yact_true, alpha=1.0):
+def loss_activity(batch_yact, batch_yact_true, alpha_act=1.0):
     """
     Activity loss: L2 between the original and augmented spectra.
 
@@ -740,14 +846,14 @@ def loss_activity(batch_yact, batch_yact_true, alpha=1.0):
     if batch_yact is None or batch_yact_true is None:
         return batch_yact.new_tensor(0.0)
 
-    return alpha * torch.mean((batch_yact - batch_yact_true) ** 2)
+    return alpha_act * torch.mean((batch_yact - batch_yact_true) ** 2)
 
 
-def loss_b_rest(b_rest_true, b_rest_pred):
+def loss_b_rest(b_rest_true, b_rest_pred, beta_brest=1.0):
     if b_rest_true is None:
         return b_rest_true.new_tensor(0.0)
 
-    return torch.mean((b_rest_true - b_rest_pred) ** 2)
+    return beta_brest * torch.mean((b_rest_true - b_rest_pred) ** 2)
 
 
 def save_checkpoint(

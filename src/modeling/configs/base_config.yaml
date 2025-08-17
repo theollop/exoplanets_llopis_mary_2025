@@ -52,6 +52,7 @@ cycle_length: 0        # Nombre d'itérations pour le cycle de régularisation
 # Loss consistency
 get_aug_data: True         # Si True, calcule les données augmentées dans le forward pass et permet de calculer la loss de consistency
 sigma_s: 0.0001              # Poids dans la loss de consistency
+consistency_mode: "mse" # Mode de perte de consistance ("mse" ou "sigmoid")
 
 # Loss de smooth de l'activité
 smooth_alpha: 0
@@ -59,9 +60,11 @@ smooth_order: 2
 
 # Loss sur l'activité (targetté)
 loss_activity: True
+alpha_act: 1.0 # Poids pour la perte d'activité
 
 # Loss sur b_rest (targetté)
 loss_b_rest: True
+beta_brest: 1.0 # Poids pour la perte de b_rest
 
 # Loss fid
 sigma_l: 1.0
@@ -69,7 +72,12 @@ sigma_l: 1.0
 # Loss corr
 sigma_corr: 0.0 #! <-------------- NECESSITE get_aug_data == TRUE !!!!!!!
 
-include_activity_proxies: true
+include_activity_proxies: false
+activity_proxies_dim: 0 # Dimension des proxies d'activité (0 = désactivé) (3 = FWHM, bis span et depth des ccfs)
+proxies_proj_dim: 32 # Dimension de projection des proxies
+conditioning_mode: "concat" # Mode de conditionnement ("concat" ou "add")
+
+
 
 model_dtype: float32      # Type de données pour les poids du modèle (float16/float32/float64)
 
@@ -97,12 +105,13 @@ plot_rv_every: 50         # Plot des prédictions RV tous les X epochs (0 = dés
 
 b_obs_init : mean
 b_rest_init : mean
+b_rest_equal_b_obs: true  
 # --------------------------------------------------------------------------
 # Phases d'entraînement
 # --------------------------------------------------------------------------
 phases:
   - name: rvonly
-    n_epochs: 200
+    n_epochs: 0
 
     trainable_params:
       b_obs: false
@@ -131,7 +140,7 @@ phases:
     n_epochs: 200
     
     trainable_params:
-      b_obs: false
+      b_obs: true
       b_rest: true
       rvestimator: true
       spender: true

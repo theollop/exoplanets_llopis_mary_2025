@@ -391,7 +391,9 @@ def create_optimizer_and_scheduler(model, phase_config):
     """Crée l'optimiseur et le scheduler depuis la config d'une phase."""
     # Création de l'optimiseur
     optimizer_class = get_class(phase_config["optimizer"])
-    optimizer = optimizer_class(model.parameters(), **phase_config["optimizer_kwargs"])
+    # N'inclure que les paramètres entraînables (requires_grad=True)
+    trainable_params = [p for p in model.parameters() if p.requires_grad]
+    optimizer = optimizer_class(trainable_params, **phase_config["optimizer_kwargs"])
 
     # Création du scheduler (optionnel)
     scheduler = None
@@ -683,19 +685,22 @@ def train_phase(
 
     # Table pour les losses
     table = Table(expand=True)
-    table.add_column("Epoch", justify="right")
-    table.add_column("RV", justify="right")
-    table.add_column("FID", justify="right")
-    table.add_column("C", justify="right")
-    table.add_column("Reg", justify="right")
-    table.add_column("Smooth", justify="right")
-    table.add_column("Template", justify="right")
-    table.add_column("Activity", justify="right")
-    table.add_column("Corr", justify="right")
-    table.add_column("Total Loss", justify="right")
+    table.add_column("Epoch")
+    table.add_column("RV")
+    table.add_column("FID")
+    table.add_column("C")
+    table.add_column("Reg")
+    table.add_column("Smooth")
+    table.add_column("Template")
+    table.add_column("Activity")
+    table.add_column("Corr")
+    table.add_column("Total Loss")
 
     model.set_phase(phase_name)
     model.train()
+
+    # Diagnostic flag: log detailed tensor stats for the very first batch
+    first_batch_logged = False
 
     # Préparation device & transferts CPU->GPU par batch
     model_device = next(model.parameters()).device
@@ -736,6 +741,70 @@ def train_phase(
                         )
                     except Exception as e:
                         console.log(f"⚠️  Batch to({model_device}) failed: {e}")
+
+                # First-batch diagnostics: print tensor/device/dtype/summary to help debug stagnant losses
+                if not first_batch_logged:
+                    try:
+                        # Unpack optionals
+                        batch_yact_true = batch[6] if len(batch) > 6 else None
+
+                        def stats(t):
+                            if t is None:
+                                return "None"
+                            try:
+                                return (
+                                    f"shape={tuple(t.shape)}, dtype={t.dtype}, device={t.device}, "
+                                    f"mean={float(t.mean()):.4e}, std={float(t.std()):.4e}, min={float(t.min()):.4e}, max={float(t.max()):.4e}"
+                                )
+                            except Exception:
+                                return f"shape={tuple(t.shape)}, dtype={getattr(t, 'dtype', None)}, device={getattr(t, 'device', None)}"
+
+                        console.log("🔍 First-batch diagnostic:")
+                        console.log(
+                            f" - model.b_rest_equal_b_obs = {model.b_rest_equal_b_obs}"
+                        )
+                        console.log(f" - model.loss_activity = {model.loss_activity}")
+
+                        # b_rest_true (buffer)
+                        try:
+                            brt = getattr(model, "b_rest_true", None)
+                            console.log(f" - b_rest_true: {stats(brt)}")
+                        except Exception as e:
+                            console.log(f" - b_rest_true: error reading ({e})")
+
+                        # b_rest parameter
+                        try:
+                            console.log(
+                                f" - b_rest (param): requires_grad={model.b_rest.requires_grad}, {stats(model.b_rest.data)}"
+                            )
+                        except Exception as e:
+                            console.log(f" - b_rest: error reading ({e})")
+
+                        # Check if b_rest is present in optimizer
+                        try:
+                            in_opt = any(
+                                any(p is model.b_rest for p in g.get("params", []))
+                                for g in optimizer.param_groups
+                            )
+                            console.log(
+                                f" - b_rest in optimizer param_groups: {in_opt}"
+                            )
+                            console.log(
+                                f" - optimizer lr(s): {[float(g.get('lr', 0)) for g in optimizer.param_groups]}"
+                            )
+                        except Exception as e:
+                            console.log(f" - optimizer introspect error: {e}")
+
+                        # batch_yact_true stats
+                        try:
+                            console.log(f" - batch_yact_true: {stats(batch_yact_true)}")
+                        except Exception as e:
+                            console.log(f" - batch_yact_true: error reading ({e})")
+
+                    except Exception as e:
+                        console.log(f"⚠️  First-batch diagnostic failed: {e}")
+                    finally:
+                        first_batch_logged = True
 
                 B = batch[0].shape[0]
 
@@ -811,20 +880,26 @@ def train_phase(
             losses_history["total"].append(total_loss)
             losses_history["lr"].append(float(optimizer.param_groups[0]["lr"]))
 
-            # Ajout d'une ligne dans la table
+            # Ajout d'une ligne dans la table (n'affiche que les losses > 0)
+            def fmt(v):
+                try:
+                    vv = float(v)
+                except Exception:
+                    return ""
+                return f"{vv:.4e}" if vv > 0.0 else ""
+
             table.add_row(
                 f"{epoch + 1}/{n_epochs}",
-                f"{epoch_losses['rv']:.4e}",
-                f"{epoch_losses['fid']:.4e}",
-                f"{epoch_losses['c']:.4e}",
-                f"{epoch_losses['reg']:.4e}",
-                f"{epoch_losses['smooth']:.4e}",
-                f"{epoch_losses['corr']:.4e}",
-                f"{epoch_losses['template']:.4e}",
-                f"{epoch_losses['activity']:.4e}",
-                f"{total_loss:.4e}",
+                fmt(epoch_losses["rv"]),
+                fmt(epoch_losses["fid"]),
+                fmt(epoch_losses["c"]),
+                fmt(epoch_losses["reg"]),
+                fmt(epoch_losses["smooth"]),
+                fmt(epoch_losses["template"]),  # OK
+                fmt(epoch_losses["activity"]),  # OK
+                fmt(epoch_losses["corr"]),  # OK
+                fmt(total_loss),
             )
-
             # Affichage
             console.clear()
             console.print(table)
@@ -1146,6 +1221,8 @@ def main(
             console.log("🔄 loss_brest is enabled, using dataset template for b_rest")
         if config.get("loss_activity", False):
             console.log("🔄 loss_activity is enabled")
+        if config.get("b_rest_equal_b_obs", False):
+            console.log("🔄 b_rest_equal_b_obs is enabled")
 
         model = AESTRA(
             n_pixels=dataset.n_pixels,
@@ -1158,9 +1235,8 @@ def main(
             b_obs=b_obs_init,
             b_rest=b_rest_init,
             b_rest_true=dataset.template if config.get("loss_b_rest", False) else None,
-            losses_activity=config.get("losses_activity", False)
-            if config.get("loss_activity", False)
-            else None,
+            b_rest_equal_b_obs=config.get("b_rest_equal_b_obs", False),
+            loss_activity=config.get("loss_activity", False),
             device=device,
             dtype=getattr(torch, config.get("model_dtype", "float32")),
             smooth_alpha=config.get("smooth_alpha", 0.0),
@@ -1168,6 +1244,12 @@ def main(
             sigma_l=config.get("sigma_l", 1.0),
             sigma_corr=config.get("sigma_corr", 0.0),
             include_activity_proxies=config.get("include_activity_proxies", False),
+            activity_proxies_dim=config.get("activity_proxies_dim", 0),
+            proxies_proj_dim=config.get("proxies_proj_dim", 32),
+            conditioning_mode=config.get("conditioning_mode", "concat"),
+            alpha_act=config.get("alpha_act", 1.0),
+            beta_brest=config.get("beta_brest", 1.0),
+            consistency_mode=config.get("consistency_mode", "mse"),
         )
         console.log(
             f"✅ Modèle créé avec succès (include_activity_proxies={model.include_activity_proxies})"
