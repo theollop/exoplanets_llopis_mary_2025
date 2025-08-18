@@ -440,24 +440,63 @@ def inject_with_velocities(
     wavegrid: torch.Tensor,
     velocities: torch.Tensor,
     batch_size: Optional[int] = None,
+    gpu_optimized: bool = False,
+    replicate_input: bool = False,
+    verbose: bool = False,
+    device: Any = "cpu",
 ) -> torch.Tensor:
+    """
+    Inject velocities into spectra.
+    - gpu_optimized=True: offload des sorties sur CPU et nettoyage du cache GPU pour limiter l'utilisation mémoire.
+    - replicate_input=True: si `spectra` est 1D (ex: un template), on le réplique à la volée par batch au lieu de l'expanser en entier.
+    """
+    dev = torch.device(device) if not isinstance(device, torch.device) else device
     if batch_size is None:
+        spectra = spectra.to(dev)
+        wave_b = wavegrid.unsqueeze(0).expand(spectra.shape[0], -1)
         injected = shift_spectra_linear(
             spectra=spectra,
-            wavegrid=wavegrid.unsqueeze(0).expand(spectra.shape[0], -1).contiguous(),
+            wavegrid=wave_b,
             velocities=velocities,
         )
+        if gpu_optimized and torch.cuda.is_available():
+            out_cpu = injected.detach().cpu()
+            del injected, spectra, wave_b
+            torch.cuda.empty_cache()
+            return out_cpu
         return injected
+        if replicate_input:
+            raise ValueError("batch_size must be provided when replicate_input=True")
 
     out_chunks = []
-    for i in range(0, spectra.shape[0], batch_size):
-        end = min(i + batch_size, spectra.shape[0])
+    total = int(velocities.shape[0] if replicate_input else spectra.shape[0])
+    for i in range(0, total, batch_size):
+        if verbose:
+            print(f"Processing batch {i // batch_size + 1}")
+        end = min(i + batch_size, total)
+        if replicate_input:
+            spectra_b = spectra.unsqueeze(0).expand(end - i, -1)
+        else:
+            spectra_b = spectra[i:end]
+        wave_b = wavegrid.unsqueeze(0).expand(end - i, -1)
+        v_b = velocities[i:end]
+
         injected = shift_spectra_linear(
-            spectra=spectra[i:end],
-            wavegrid=wavegrid.unsqueeze(0).expand(end - i, -1).contiguous(),
-            velocities=velocities[i:end],
+            spectra=spectra_b.to(dev),
+            wavegrid=wave_b.to(dev),
+            velocities=v_b.to(dev),
         )
-        out_chunks.append(injected)
+        if gpu_optimized and torch.cuda.is_available():
+            out_chunks.append(injected.detach().cpu())
+            del injected, spectra_b, wave_b, v_b
+            torch.cuda.empty_cache()
+        else:
+            out_chunks.append(injected)
+    if gpu_optimized and torch.cuda.is_available():
+        if not replicate_input:
+            del spectra
+        del wavegrid, velocities
+        torch.cuda.empty_cache()
     return torch.cat(out_chunks, dim=0)
 
 
@@ -667,23 +706,37 @@ def create_soap_gpu_paper_dataset(
         v_np = compute_velocities(time_values, planets)
         v_true_tot = v_np.astype(float, copy=False)
 
-        # tensors
-        dtype = torch.float64
-        spectra_t = torch.tensor(spectra_ds, device=device, dtype=dtype)
-        wave_t = torch.tensor(wavegrid_ds, device=device, dtype=dtype)
-        v_t = torch.tensor(v_np, device=device, dtype=dtype)
+        # tensors (use float32 to halve memory)
+        dtype = torch.float32
+        dev = device
+        spectra_t = torch.tensor(spectra_ds, device="cpu", dtype=dtype)
+        wave_t = torch.tensor(wavegrid_ds, device=dev, dtype=dtype)
+        v_t = torch.tensor(v_np, device=dev, dtype=dtype)
 
-        # inject on dataset with activity+noise
+        # inject on dataset with activity+noise (batch stream to GPU, offload to CPU)
         spectra_inj = inject_with_velocities(
-            spectra_t, wave_t, v_t, batch_size=batch_size
+            spectra_t,
+            wave_t,
+            v_t,
+            batch_size=batch_size,
+            gpu_optimized=True,
+            replicate_input=False,
+            verbose=False,
+            device=dev,
         )
         spectra_ds = spectra_inj.detach().cpu().numpy()
 
-        # inject template only (no activity)
-        tmpl_t = torch.tensor(template_ds, device=device, dtype=dtype)
-        tmpl_batch = tmpl_t.unsqueeze(0).expand(spectra_ds.shape[0], -1).contiguous()
+        # inject template only (no activity) using replicate_input to avoid pre-expansion
+        tmpl_t = torch.tensor(template_ds, device="cpu", dtype=dtype)
         spectra_noact_inj = inject_with_velocities(
-            tmpl_batch, wave_t, v_t, batch_size=batch_size
+            tmpl_t,
+            wave_t,
+            v_t,
+            batch_size=batch_size,
+            gpu_optimized=True,
+            replicate_input=True,
+            verbose=False,
+            device=dev,
         )
         spectra_ds_no_activity = spectra_noact_inj.detach().cpu().numpy()
 
@@ -1118,6 +1171,10 @@ if __name__ == "__main__":
     #     output_dir="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/npz_datasets",
     # )
 
+    # create_soap_gpu_paper_dataset(
+
+    # )
+
     create_soap_gpu_paper_dataset(
         spectra_filepath="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/soap_gpu_paper/soap_equiv_for_harps.h5",
         template_filepath="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/soap_gpu_paper/template.npy",
@@ -1127,8 +1184,8 @@ if __name__ == "__main__":
         output_dir="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/npz_datasets",
         idx_start=0,
         idx_end=1275,
-        wavemin=4000,
-        wavemax=4050,
+        wavemin=4500,
+        wavemax=5500,
         downscaling_factor=1,
         smooth_after_downscaling=False,
         smooth_kernel_size=1,
@@ -1138,7 +1195,7 @@ if __name__ == "__main__":
         planets_amplitudes=[0.1],
         planets_periods=[100],
         planets_phases=[0.0],
-        batch_size=100,
+        batch_size=2,
         use_rassine=False,
         storage_dtype=np.float32,
         ccf_npz_path="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/ccf_results/ccf_analysis_results.npz",
