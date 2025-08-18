@@ -108,8 +108,7 @@ def shift_spectra_linear(
         ...     extrapolate="linear",
         ... )
     """
-    # Constantes
-    c = 299_792_458.0
+    # Constantes (handled in float64 downstream)
 
     # Vérifications de base
     assert spectra.shape == wavegrid.shape, (
@@ -122,16 +121,23 @@ def shift_spectra_linear(
         "Extrapolation doit être l'une des valeurs suivantes : 'constant', 'zero', 'one', 'linear'"
     )
 
-    velocities = velocities.view(-1, 1)
+    # Ensure shapes and contiguity for best performance
+    spectra = spectra.contiguous()
+    wavegrid = wavegrid.contiguous()
+    velocities = velocities.view(-1, 1).contiguous()
 
-    # Facteur Doppler
-    doppler = torch.sqrt((1 + velocities / c) / (1 - velocities / c))
+    # Compute Doppler factor with high precision to preserve tiny shifts
+    # Use float64 math regardless of input dtypes, then cast back at the end
+    c64 = torch.tensor(299_792_458.0, dtype=torch.float64, device=velocities.device)
+    vel64 = velocities.to(torch.float64)
+    doppler64 = torch.sqrt((1 + vel64 / c64) / (1 - vel64 / c64))
 
-    # Grille décalée
-    shifted = wavegrid * doppler
+    # Shifted wavelength grid (float64 for accuracy)
+    wave64 = wavegrid.to(torch.float64)
+    shifted = (wave64 * doppler64).contiguous()
 
     # Interpolation via searchsorted
-    idx = torch.searchsorted(shifted, wavegrid)
+    idx = torch.searchsorted(shifted, wave64)
 
     # On récupère les indices pour les bords qui vont être extrapolés
     # idx == 0 signifie que la valeur de wavegrid est inférieure à la première valeur de shifted
@@ -148,11 +154,12 @@ def shift_spectra_linear(
 
     λ_left = shifted.gather(-1, left_idx)
     λ_right = shifted.gather(-1, right_idx)
-    f_left = spectra.gather(-1, left_idx)
-    f_right = spectra.gather(-1, right_idx)
+    # Work in float64 during interpolation, then cast back
+    f_left = spectra.gather(-1, left_idx).to(torch.float64)
+    f_right = spectra.gather(-1, right_idx).to(torch.float64)
 
     # Linear interpolation
-    t = (wavegrid - λ_left) / (λ_right - λ_left + 1e-12)
+    t = (wave64 - λ_left) / (λ_right - λ_left + 1e-12)
     result = f_left + t * (f_right - f_left)
 
     # Extrapolation si demandé
@@ -164,6 +171,9 @@ def shift_spectra_linear(
         # pour constant, on utilise f_left et f_right sur ce même mask
         result = torch.where(mask_low, f_left, result)
         result = torch.where(mask_high, f_right, result)
+
+    # Cast result back to original dtype to preserve memory/perf characteristics
+    result = result.to(spectra.dtype)
 
     if return_mask:
         return result, extrap_mask

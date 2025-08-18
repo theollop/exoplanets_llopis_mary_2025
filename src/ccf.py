@@ -6,7 +6,10 @@ from scipy.optimize import curve_fit
 from typing import Optional, Dict, Any
 from numpy.typing import NDArray
 
-from src.utils import get_mask
+from src.utils import get_mask, get_free_memory, get_max_nv
+import torch
+import time
+from src.interpolate import shift_spectra_linear
 
 __all__ = [
     "compute_CCFs",
@@ -16,6 +19,7 @@ __all__ = [
     "compute_bisector_span",
     "build_CCF_masks_sparse",
     "get_full_ccf_analysis",
+    "get_full_ccf_analysis_template",
 ]
 
 # =============================================================
@@ -65,6 +69,57 @@ def get_full_ccf_analysis(
         return analyze_ccfs(CCFs, v_grid), CCFs
     else:
         return analyze_ccfs(CCFs, v_grid)
+
+
+def get_full_ccf_analysis_template(
+    spectra: NDArray[np.floating],
+    template: NDArray[np.floating],
+    wavegrid: NDArray[np.floating],
+    v_grid: NDArray[np.floating],
+    dtype: torch.dtype = torch.float32,
+    verbose: bool = False,
+    batch_size_specs: Optional[int] = None,
+    normalize: bool = True,
+    return_raw_ccfs: bool = False,
+) -> Dict[str, NDArray[np.floating]]:
+    """
+    Calcule les CCFs via un template décalé (méthode rapide) puis réalise l'analyse.
+
+    Args:
+        spectra: Tableau 2D des spectres, de forme (n_spectra, n_wavelengths), continuum ~ 1.
+        template: Profil 1D (longueur = n_wavelengths) servant de template.
+        wavegrid: Grille de longueurs d'onde (pas constant, triée).
+        v_grid: Grille de vitesses radiales en m/s.
+        dtype: Type torch utilisé pour les produits matriciels.
+        verbose: Affiche des informations de progression.
+        batch_size_specs: Taille des lots pour les spectres (None = auto).
+        normalize: Normaliser les CCFs par leur amplitude max absolue.
+        return_raw_ccfs: Si True, retourne aussi la matrice des CCFs.
+
+    Returns:
+        Dictionnaire contenant les mesures pour chaque spectre:
+        {"rv", "depth", "fwhm", "span", "continuum", "amplitude", "popt"}.
+        Si return_raw_ccfs=True, retourne un tuple (dict, CCFs).
+    """
+    CCFs = compute_CCFs_template(
+        specs=spectra,
+        template=template,
+        wavegrid=wavegrid,
+        v_grid=v_grid,
+        dtype=dtype,
+        verbose=verbose,
+        batch_size_specs=batch_size_specs,
+    )
+
+    # Décalage à 0 par CCF, pour cohérence avec compute_CCFs
+    CCFs -= np.min(CCFs, axis=1, keepdims=True)
+    if normalize:
+        CCFs = normalize_CCFs(CCFs)
+
+    if return_raw_ccfs:
+        return analyze_ccfs(CCFs, v_grid, template=True), CCFs
+    else:
+        return analyze_ccfs(CCFs, v_grid, template=True)
 
 
 def compute_CCFs(
@@ -326,7 +381,9 @@ def compute_bisector_span(
 
 
 def analyze_ccfs(
-    CCFs: NDArray[np.floating], v_grid: NDArray[np.floating]
+    CCFs: NDArray[np.floating],
+    v_grid: NDArray[np.floating],
+    template: bool = False,
 ) -> Dict[str, NDArray[np.floating]]:
     """
     Analyse un ensemble de CCFs pour extraire RV, profondeur, FWHM et bisector span.
@@ -340,25 +397,57 @@ def analyze_ccfs(
     """
     n_spectra = CCFs.shape[0]
 
-    results: Dict[str, NDArray[np.floating]] = {
-        "rv": np.full(n_spectra, np.nan, dtype=float),
-        "depth": np.full(n_spectra, np.nan, dtype=float),
-        "fwhm": np.full(n_spectra, np.nan, dtype=float),
-        "span": np.full(n_spectra, np.nan, dtype=float),
-        "continuum": np.full(n_spectra, np.nan, dtype=float),
-        "amplitude": np.full(n_spectra, np.nan, dtype=float),
-        "popt": np.full((n_spectra, 4), np.nan, dtype=float),
+    # Use plain np.ndarray typing for runtime simplicity and explicit float dtype
+    results: Dict[str, np.ndarray] = {
+        "rv": np.full(n_spectra, np.nan, dtype=np.float64),
+        "depth": np.full(n_spectra, np.nan, dtype=np.float64),
+        "fwhm": np.full(n_spectra, np.nan, dtype=np.float64),
+        "span": np.full(n_spectra, np.nan, dtype=np.float64),
+        "continuum": np.full(n_spectra, np.nan, dtype=np.float64),
+        "amplitude": np.full(n_spectra, np.nan, dtype=np.float64),
+        # Compatibility keys often expected by notebooks / older code
+        "amp": np.full(n_spectra, np.nan, dtype=np.float64),
+        "mu": np.full(n_spectra, np.nan, dtype=np.float64),
+        "sigma": np.full(n_spectra, np.nan, dtype=np.float64),
+        # popt stores the fitted parameters [c, k, x0, fwhm] per spectrum
+        "popt": np.full((n_spectra, 4), np.nan, dtype=np.float64),
     }
 
     for i in range(n_spectra):
-        params = fit_gaussian_ccf(v_grid, CCFs[i])
+        ccf_i = CCFs[i]
+        if template:
+            # Si la CCF est majoritairement une "cuvette", on la renverse pour fitter une gaussienne vers le haut
+            if np.isfinite(ccf_i).any():
+                c_init = float((ccf_i[0] + ccf_i[-1]) / 2)
+                up_span = float(np.nanmax(ccf_i) - c_init)
+                down_span = float(c_init - np.nanmin(ccf_i))
+                if down_span > up_span:
+                    # Renversement autour de c_init: c' = 2*c_init - c
+                    ccf_i = 2 * c_init - ccf_i
+        params = fit_gaussian_ccf(v_grid, ccf_i)
         results["rv"][i] = params["rv"]
         results["depth"][i] = params["depth"]
         results["fwhm"][i] = params["fwhm"]
         results["span"][i] = params["span"]
-        results["continuum"][i] = params["continuum"]
-        results["amplitude"][i] = params["amplitude"]
-        results["popt"][i, :] = params["popt"]
+        results["continuum"][i] = params.get("continuum", np.nan)
+        results["amplitude"][i] = params.get("amplitude", np.nan)
+        # compatibility: shorter names used in some notebooks
+        results["amp"][i] = params.get("amplitude", np.nan)
+        results["mu"][i] = params.get("x0", params.get("rv", np.nan))
+        # convert fwhm -> sigma (std dev) for convenience
+        fwhm_val = params.get("fwhm", np.nan)
+        try:
+            sigma_val = (
+                float(fwhm_val) / (2 * np.sqrt(2 * np.log(2)))
+                if np.isfinite(fwhm_val)
+                else np.nan
+            )
+        except Exception:
+            sigma_val = np.nan
+        results["sigma"][i] = sigma_val
+        results["popt"][i, :] = params.get(
+            "popt", np.array([np.nan, np.nan, np.nan, np.nan], dtype=float)
+        )
 
     return results
 
@@ -557,6 +646,245 @@ def build_CCF_masks_sparse(
     s = len(wave_before)
     e = s + len(wavegrid)
     return CCF[:, s:e]
+
+
+def compute_CCFs_template(
+    specs: np.ndarray,
+    template: np.ndarray,
+    wavegrid: np.ndarray,
+    v_grid: np.ndarray,
+    dtype: torch.dtype = torch.float32,
+    verbose: bool = False,
+    batch_size_specs: int = None,
+) -> np.ndarray:
+    """
+    Version optimisée : pré-calcule les templates décalés une seule fois,
+    puis traite les spectres par batches avec calculs vectorisés.
+
+    OPTIMISATIONS CLÉS :
+    1. Pré-calcul des templates décalés (évite la recomputation)
+    2. Traitement par batches de spectres
+    3. Utilisation de torch.mm pour les produits matriciels
+    4. Gestion optimale de la mémoire GPU
+    """
+    # Sélection du device et libération de la mémoire GPU si dispo
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+    n_specs = specs.shape[0]
+    L = wavegrid.shape[0]
+    n_v = len(v_grid)
+
+    # Gère le cas d'un template par spectre ([N, L]) vs un seul template ([L])
+    def _ndim(arr):
+        if isinstance(arr, np.ndarray):
+            return arr.ndim
+        if isinstance(arr, torch.Tensor):
+            return arr.dim()
+        return 1
+
+    template_ndim = _ndim(template)
+    is_batched_template = template_ndim == 2
+    if is_batched_template:
+        t_shape = (
+            template.shape
+            if isinstance(template, np.ndarray)
+            else tuple(template.size())
+        )
+        assert t_shape[0] == n_specs, (
+            f"Template batched doit avoir N identique à spectra: {t_shape[0]} != {n_specs}"
+        )
+        assert t_shape[1] == L, (
+            f"Template batched doit avoir la même longueur que wavegrid: {t_shape[1]} != {L}"
+        )
+
+    # Calcul de la mémoire GPU utilisable
+    safety_factor = 0.85
+    if torch.cuda.is_available():
+        free_mem = get_free_memory() * safety_factor
+    else:
+        # Sur CPU, on ne se base pas sur la VRAM. On traitera toutes les vitesses d'un coup par défaut.
+        free_mem = float("inf")
+
+    if verbose:
+        print(f"Mémoire GPU libre : {free_mem / 1e9:.2f} GB")
+        print(f"Traitement de {n_specs} spectres avec {n_v} vitesses")
+
+    # Détermination de la taille de batch pour les vitesses
+    nv_max = (
+        get_max_nv(L, free_mem, dtype) if torch.cuda.is_available() else len(v_grid)
+    )
+    if verbose:
+        print(f"Taille max de vitesses par batch : {nv_max}")
+
+    # Détermination de la taille de batch pour les spectres
+    if batch_size_specs is None:
+        # Estimation basée sur la mémoire disponible
+        if dtype == torch.float16:
+            bytes_per_element = 2
+        elif dtype == torch.float32:
+            bytes_per_element = 4
+        else:
+            bytes_per_element = 8
+        memory_per_spec = L * bytes_per_element
+        memory_per_vbatch = nv_max * L * bytes_per_element  # pour les templates décalés
+        if torch.cuda.is_available():
+            remaining_memory = max(0.0, free_mem - memory_per_vbatch)
+            batch_size_specs = max(
+                1, int(remaining_memory // memory_per_spec // 2)
+            )  # facteur 2 de sécurité
+        else:
+            # Sur CPU, batch raisonnable par défaut si non fourni
+            batch_size_specs = min(256, specs.shape[0])
+
+    batch_size_specs = min(batch_size_specs, n_specs)
+
+    if verbose:
+        print(f"Taille de batch pour les spectres : {batch_size_specs}")
+
+    # Découpage en batches pour les vitesses
+    v_batches = [v_grid[i : i + nv_max] for i in range(0, len(v_grid), nv_max)]
+
+    # Découpage en batches pour les spectres
+    spec_batches = [
+        specs[i : i + batch_size_specs] for i in range(0, n_specs, batch_size_specs)
+    ]
+
+    CCFs = np.zeros(
+        (n_specs, n_v), dtype=np.float32 if dtype == torch.float32 else np.float64
+    )
+
+    total_start = time.time()
+
+    # Boucle sur les batches de vitesses
+    for v_idx, v_batch in enumerate(v_batches):
+        if verbose:
+            print(
+                f"Traitement du batch de vitesses {v_idx + 1}/{len(v_batches)} ({len(v_batch)} vitesses)"
+            )
+
+        # Préparation des constantes du batch de vitesses
+        v_start_time = time.time()
+        Bv = len(v_batch)
+        wave_t = (
+            torch.as_tensor(wavegrid, dtype=dtype).to(device)
+            if not isinstance(wavegrid, torch.Tensor)
+            else wavegrid.to(dtype=dtype, device=device)
+        )  # (L,)
+        v_batch_t = (
+            torch.as_tensor(v_batch, dtype=dtype).to(device)
+            if not isinstance(v_batch, torch.Tensor)
+            else v_batch.to(dtype=dtype, device=device)
+        )  # (Bv,)
+
+        # Si template unique (1D), pré-calcul des templates décalés pour tout ce batch de vitesses
+        if not is_batched_template:
+            template_t = (
+                torch.as_tensor(template, dtype=dtype).to(device)
+                if not isinstance(template, torch.Tensor)
+                else template.to(dtype=dtype, device=device)
+            )  # (L,)
+            wave_batch = wave_t.unsqueeze(0).expand(Bv, -1).contiguous()  # (Bv, L)
+            template_batch = (
+                template_t.unsqueeze(0).expand(Bv, -1).contiguous()
+            )  # (Bv, L)
+            shifted_templates = shift_spectra_linear(
+                spectra=template_batch,
+                wavegrid=wave_batch,
+                velocities=v_batch_t,
+                extrapolate="constant",
+                return_mask=False,
+            )  # (Bv, L)
+            templates_gpu = shifted_templates
+            template_time = time.time() - v_start_time
+            if verbose:
+                print(f"  Temps de calcul des templates décalés : {template_time:.3f}s")
+
+        # Boucle sur les batches de spectres
+        for s_idx, spec_batch in enumerate(spec_batches):
+            if verbose and len(spec_batches) > 1:
+                print(
+                    f"    Batch de spectres {s_idx + 1}/{len(spec_batches)} ({len(spec_batch)} spectres)"
+                )
+
+            # Transfert des spectres vers GPU
+            if isinstance(spec_batch, torch.Tensor):
+                specs_gpu = spec_batch.to(dtype=dtype, device=device)
+            else:
+                specs_gpu = torch.as_tensor(spec_batch, dtype=dtype).to(device)
+            # (n_batch, L)
+            specs_centered = specs_gpu - 1.0  # cohérent avec compute_CCFs
+
+            if is_batched_template:
+                # Sélection des templates correspondant à ce batch de spectres
+                s_start = s_idx * batch_size_specs
+                s_end = s_start + len(spec_batch)
+                temp_slice = template[s_start:s_end]
+                temp_batch = (
+                    temp_slice.to(dtype=dtype, device=device)
+                    if isinstance(temp_slice, torch.Tensor)
+                    else torch.as_tensor(temp_slice, dtype=dtype).to(device)
+                )  # (S, L)
+
+                # Méthode mémoire-sûre: on décale par vitesse (colonne par colonne)
+                S = temp_batch.shape[0]
+                wave_batch_S = wave_t.unsqueeze(0).expand(S, -1).contiguous()  # (S, L)
+                cols = []
+                for j in range(Bv):
+                    vS = v_batch_t[j].repeat(S)
+                    shifted_S = shift_spectra_linear(
+                        spectra=temp_batch,
+                        wavegrid=wave_batch_S,
+                        velocities=vS,
+                        extrapolate="constant",
+                        return_mask=False,
+                    )  # (S, L)
+                    col = torch.sum(shifted_S * specs_centered, dim=1)  # (S,)
+                    cols.append(col)
+                    del shifted_S, vS, col
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                ccf_batch = torch.stack(cols, dim=1)  # (S, Bv)
+                del temp_batch, wave_batch_S, cols
+            else:
+                # Calcul vectorisé de la CCF: (nv_batch, L) @ (n_batch, L).T = (nv_batch, n_batch)
+                ccf_batch = torch.mm(
+                    templates_gpu, specs_centered.T
+                )  # (nv_batch, n_batch)
+
+            # Stockage des résultats
+            v_start = v_idx * nv_max
+            v_end = v_start + len(v_batch)
+            s_start = s_idx * batch_size_specs
+            s_end = s_start + len(spec_batch)
+
+            # Pour template batched, ccf_batch est (S, Bv) -> assigner directement.
+            if is_batched_template:
+                CCFs[s_start:s_end, v_start:v_end] = ccf_batch.cpu().numpy()
+            else:
+                # Pour template unique, ccf_batch est (nv_batch, n_batch) -> transpose
+                CCFs[s_start:s_end, v_start:v_end] = ccf_batch.T.cpu().numpy()
+
+            # Nettoyage
+            del specs_gpu, specs_centered, ccf_batch
+
+        # Nettoyage des templates décalés
+        if not is_batched_template:
+            del shifted_templates, templates_gpu, template_batch, wave_batch, template_t
+        del v_batch_t, wave_t
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+    total_time = time.time() - total_start
+    if verbose:
+        print(
+            f"Temps total optimisé : {total_time:.2f}s pour {n_specs} spectres et {n_v} vitesses"
+        )
+        speedup_estimate = (n_specs * n_v * L) / (total_time * 1e9)  # GFLOPS estimate
+        print(f"Performance estimée : {speedup_estimate:.1f} GFLOPS")
+
+    return CCFs
 
 
 if __name__ == "__main__":

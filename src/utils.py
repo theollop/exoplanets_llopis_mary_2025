@@ -4,6 +4,7 @@ import torch
 import gc
 import numpy as np
 import os
+from math import floor
 
 ##############################################################################
 ##############################################################################
@@ -105,3 +106,37 @@ def get_mask(mask_type: str = "G2") -> np.ndarray:
     """
     mask_path = get_mask_path(f"{mask_type}_mask.txt")
     return np.loadtxt(mask_path)
+
+
+def get_max_nv(
+    L: int,
+    free_memory_bytes: float,
+    dtype: torch.dtype = torch.float64,
+) -> int:
+    """
+    Estime le nombre maximal de vitesses (Nv) compatibles avec la mémoire GPU.
+
+    Args:
+        L: Nombre de longueurs d'onde.
+        free_memory_bytes: Mémoire GPU disponible en octets.
+        dtype: torch.float32 ou torch.float64.
+
+    Returns:
+        Nombre entier maximal de vitesses (Nv).
+    """
+    # Modèle mémoire : wave_shift & output, idx, m_sel+b_sel, overhead
+    if dtype == torch.float64:
+        nv = (free_memory_bytes - 56 * L + 8) / (8 + 36 * L)
+
+    elif dtype == torch.float32:
+        nv = (free_memory_bytes - 28 * L + 4) / (4 + 28 * L)
+
+    elif dtype == torch.float16:
+        nv = (free_memory_bytes - 14 * L + 2) / (2 + 20 * L)
+
+    else:
+        raise ValueError(
+            "dtype doit être torch.float32 ou torch.float64 ou torch.float16"
+        )
+
+    return floor(nv)
