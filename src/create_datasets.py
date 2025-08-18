@@ -600,8 +600,8 @@ def create_soap_gpu_paper_dataset(
 
     # ---- Load spectra selection (+ time)
     with h5py.File(spectra_filepath, "r") as f:
-        n_file_total = f["spec_sel"].shape[0]
-        spectra = f["spec_sel"][split.start : split.end, :][:, mask]
+        n_file_total = f["spec_cube"].shape[0]
+        spectra = f["spec_cube"][split.start : split.end, :][:, mask]
         time_values = time_values[split.start : split.end]
 
     n_spectra = spectra.shape[0]
@@ -1175,19 +1175,44 @@ if __name__ == "__main__":
 
     # )
 
+    # create_soap_gpu_paper_dataset(
+    #     spectra_filepath="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/soap_gpu_paper/soap_equiv_for_harps.h5",
+    #     template_filepath="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/soap_gpu_paper/template.npy",
+    #     wavegrid_filepath="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/soap_gpu_paper/wavegrid.npy",
+    #     new_wavegrid_filepath="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/soap_gpu_paper/new_wavegrid.npy",
+    #     time_values_filepath="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/soap_gpu_paper/time_values_soap_equiv_for_harps.npy",
+    #     output_dir="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/npz_datasets",
+    #     idx_start=0,
+    #     idx_end=1275,
+    #     wavemin=4500,
+    #     wavemax=5500,
+    #     downscaling_factor=1,
+    #     smooth_after_downscaling=False,
+    #     smooth_kernel_size=1,
+    #     add_photon_noise=False,
+    #     snr_target=300.0,
+    #     noise_seed=42,
+    #     planets_amplitudes=[0.1],
+    #     planets_periods=[100],
+    #     planets_phases=[0.0],
+    #     batch_size=2,
+    #     use_rassine=False,
+    #     storage_dtype=np.float32,
+    #     ccf_npz_path="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/ccf_results/ccf_analysis_results.npz",
+    # )
+
     create_soap_gpu_paper_dataset(
-        spectra_filepath="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/soap_gpu_paper/soap_equiv_for_harps.h5",
+        spectra_filepath="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/soap_gpu_paper/spec_cube_tot_filtered_normalized_float32.h5",
         template_filepath="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/soap_gpu_paper/template.npy",
         wavegrid_filepath="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/soap_gpu_paper/wavegrid.npy",
-        new_wavegrid_filepath="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/soap_gpu_paper/new_wavegrid.npy",
-        time_values_filepath="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/soap_gpu_paper/time_values_soap_equiv_for_harps.npy",
+        time_values_filepath="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/soap_gpu_paper/time_values.npy",
         output_dir="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/npz_datasets",
         idx_start=0,
-        idx_end=1275,
-        wavemin=4500,
+        idx_end=1000,
+        wavemin=5000,
         wavemax=5500,
-        downscaling_factor=1,
-        smooth_after_downscaling=False,
+        downscaling_factor=2,
+        smooth_after_downscaling=True,
         smooth_kernel_size=1,
         add_photon_noise=False,
         snr_target=300.0,
@@ -1195,7 +1220,7 @@ if __name__ == "__main__":
         planets_amplitudes=[0.1],
         planets_periods=[100],
         planets_phases=[0.0],
-        batch_size=2,
+        batch_size=10,
         use_rassine=False,
         storage_dtype=np.float32,
         ccf_npz_path="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/ccf_results/ccf_analysis_results.npz",
