@@ -379,9 +379,31 @@ def plot_aestra_analysis(
         batch_robs = batch_yobs - model.b_obs.unsqueeze(0)
         batch_raug = batch_yaug - model.b_obs.unsqueeze(0)
 
+        # Préparer les proxies d'activité si le modèle les attend
+        proxies_obs = None
+        proxies_aug = None
+        if getattr(model, "include_activity_proxies", False) and (
+            batch_activity_proxies_norm is not None
+        ):
+            # Mettre en forme pour correspondre à la taille du batch
+            if batch_activity_proxies_norm.ndim == 1:
+                proxies_obs = batch_activity_proxies_norm.unsqueeze(0).expand(
+                    batch_robs.size(0), -1
+                )
+                proxies_aug = proxies_obs
+            else:
+                proxies_obs = batch_activity_proxies_norm
+                proxies_aug = batch_activity_proxies_norm
+            proxies_obs = proxies_obs.to(
+                device=batch_robs.device, dtype=batch_robs.dtype
+            )
+            proxies_aug = proxies_aug.to(
+                device=batch_raug.device, dtype=batch_raug.dtype
+            )
+
         # Encodage + Décodage pour obtenir les paramètres d'activité et le spectre d'activité
-        batch_yact, batch_s = model.spender(batch_robs)
-        batch_yact_aug, batch_s_aug = model.spender(batch_raug)
+        batch_yact, batch_s = model.spender(batch_robs, proxies=proxies_obs)
+        batch_yact_aug, batch_s_aug = model.spender(batch_raug, proxies=proxies_aug)
 
         batch_yrest = batch_yact + model.b_rest.unsqueeze(0)
 
@@ -1013,8 +1035,7 @@ def plot_activity(
         sample_idx: Index de l'échantillon (None pour aléatoire)
         data_root_dir: Répertoire racine des données (par défaut "data")
     """
-    # Créer le sous-dossier organisé par type pour la phase
-    typed_plot_dir = create_typed_plot_dir(plot_dir, phase_name, "activity")
+    # Préparation du sous-dossier (créé plus bas juste avant la sauvegarde)
 
     # Unpack batch (we expect batch_yact_true to be present)
     (
@@ -1052,7 +1073,23 @@ def plot_activity(
     model.eval()
     with torch.no_grad():
         batch_robs = batch_yobs - model.b_obs.unsqueeze(0)
-        batch_yact_pred, _ = model.spender(batch_robs)
+
+        # Préparer les proxies d'activité si utilisés
+        proxies_obs = None
+        if getattr(model, "include_activity_proxies", False) and (
+            batch_activity_proxies_norm is not None
+        ):
+            if batch_activity_proxies_norm.ndim == 1:
+                proxies_obs = batch_activity_proxies_norm.unsqueeze(0).expand(
+                    batch_robs.size(0), -1
+                )
+            else:
+                proxies_obs = batch_activity_proxies_norm
+            proxies_obs = proxies_obs.to(
+                device=batch_robs.device, dtype=batch_robs.dtype
+            )
+
+        batch_yact_pred, _ = model.spender(batch_robs, proxies=proxies_obs)
     y_act_pred = to_numpy(batch_yact_pred[flat_idx])
 
     # Build requested composite: y_act_pred_vs_template = b_rest + y_act_pred - b_obs
