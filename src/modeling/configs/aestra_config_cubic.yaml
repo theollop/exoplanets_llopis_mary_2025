@@ -10,7 +10,7 @@
 # --------------------------------------------------------------------------
 data_dtype: float32       # Type numpy/torch du tableau des spectres (float16/float32/float64)
 
-checkpoint_every: 100       # Fréquence de sauvegarde des checkpoints (en epochs)
+checkpoint_every: 10       # Fréquence de sauvegarde des checkpoints (en epochs)
 
 
 # --------------------------------------------------------------------------
@@ -88,7 +88,7 @@ model_dtype: float32      # Type de données pour les poids du modèle (float16/
 # --------------------------------------------------------------------------
 # Mixed Precision Settings
 # --------------------------------------------------------------------------
-use_mixed_precision: false        # Activer la mixed precision
+use_mixed_precision: true        # Activer la mixed precision
 mixed_precision_dtype: float16   # Type de données pour les forward passes (float16)
 autocast_enabled: true          # Utiliser autocast pour le forward pass
 grad_scaler_enabled: true       # Utiliser GradScaler pour éviter les underflows
@@ -142,7 +142,7 @@ phases:
     #   restore_best_weights: true
 
   - name: joint
-    n_epochs: 100
+    n_epochs: 80
     
     trainable_params:
       b_obs: false
@@ -161,6 +161,6 @@ phases:
       gamma: 0.7
       step_size: 50
     
-    plot_activity_every: 10
-    plot_latent_distance_every: 10  # Distribution des distances latentes (0 = désactivé)
-    plot_latent_space_every: 10     # Visualisation espace latent (0 = désactivé)
+    plot_activity_every: 20
+    plot_latent_distance_every: 20  # Distribution des distances latentes (0 = désactivé)
+    plot_latent_space_every: 20     # Visualisation espace latent (0 = désactivé)
