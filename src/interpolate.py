@@ -34,6 +34,7 @@ def shift_spectra_cubic(
     spectra: torch.Tensor,  # (B, n_pixel)
     wavegrid: torch.Tensor,  # (B, n_pixel)
     velocities: torch.Tensor,  # (B,)
+    extrapolate: Literal["constant", "zero", "one", "linear"] = "constant",
     return_mask: bool = False,
 ):
     """
@@ -46,25 +47,59 @@ def shift_spectra_cubic(
     extrap_mask : torch.BoolTensor, shape (B, n_pixel), optional
         True là où shifted est hors de [wavegrid.min(), wavegrid.max()].
     """
-    c = 299_792_458.0
+    # Assure calculs en float64 (comme la version linéaire) pour préserver la précision de gamma
     B, N = spectra.shape
+    spec_dtype = spectra.dtype
 
-    # 1) Calcul du shifted (B, n_pixel)
-    vel = velocities.view(-1, 1)
-    doppler = torch.sqrt((1 + vel / c) / (1 - vel / c))
-    shifted = wavegrid * doppler  # broadcast → (B, N)
+    # 1) Calcul du shifted (B, n_pixel) en float64
+    vel64 = velocities.view(-1, 1).to(torch.float64)
+    c64 = torch.tensor(299_792_458.0, dtype=torch.float64, device=vel64.device)
+    doppler64 = torch.sqrt((1 - vel64 / c64) / (1 + vel64 / c64))
+    wave64 = wavegrid.to(torch.float64)
+    shifted64 = (wave64 * doppler64).contiguous()  # (B, N)
 
-    # 2) Construction du masque d'extrapolation
-    #    on compare shifted (B,N) avec les bornes de wavegrid (scalaire)
-    low = shifted < wavegrid[:, :1]  # (B,1) broadcasté
-    high = shifted > wavegrid[:, -1:]  # (B,1) broadcasté
-    extrap_mask = low | high  # True si extrapolé
+    # 2) Masque d'extrapolation basé sur les bornes de wavegrid
+    low = shifted64 < wave64[:, :1]
+    high = shifted64 > wave64[:, -1:]
+    extrap_mask = low | high
 
-    # 3) Calcul des coefficients de la spline cubique (naturelle)
-    coeffs = natural_cubic_spline_coeffs(wavegrid[0], spectra.unsqueeze(-1))
+    # 3) Coefficients de spline cubique en float64
+    #    x: (N,), y: (B,N,1) pour rester compatible avec cubic_evaluate ci-dessous
+    coeffs = natural_cubic_spline_coeffs(
+        wave64[0], spectra.to(torch.float64).unsqueeze(-1)
+    )
 
-    # 4) Évaluation cubique
-    out = cubic_evaluate(coeffs, shifted)
+    # 4) Évaluation cubique en float64
+    out64 = cubic_evaluate(coeffs, shifted64)
+
+    # Extrapolation handling (match linear variant semantics)
+    if extrapolate == "zero":
+        out64 = torch.where(
+            extrap_mask,
+            torch.tensor(0.0, dtype=out64.dtype, device=out64.device),
+            out64,
+        )
+    elif extrapolate == "one":
+        out64 = torch.where(
+            extrap_mask,
+            torch.tensor(1.0, dtype=out64.dtype, device=out64.device),
+            out64,
+        )
+    elif extrapolate == "constant":
+        # Use edge values per spectrum: left = spectra[:,0], right = spectra[:,-1]
+        left_vals = spectra[:, :1].to(torch.float64).expand_as(out64)
+        right_vals = spectra[:, -1:].to(torch.float64).expand_as(out64)
+        out64 = torch.where(low, left_vals, out64)
+        out64 = torch.where(high, right_vals, out64)
+    # 'linear' isn't well-defined for cubic without neighbor samples; fall back to 'constant'
+    elif extrapolate == "linear":
+        left_vals = spectra[:, :1].to(torch.float64).expand_as(out64)
+        right_vals = spectra[:, -1:].to(torch.float64).expand_as(out64)
+        out64 = torch.where(low, left_vals, out64)
+        out64 = torch.where(high, right_vals, out64)
+
+    # Cast back to original dtype for output parity with linear path
+    out = out64.to(spec_dtype)
 
     if return_mask:
         return out, extrap_mask

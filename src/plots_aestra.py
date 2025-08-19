@@ -1055,19 +1055,17 @@ def plot_activity(
         batch_yact_pred, _ = model.spender(batch_robs)
     y_act_pred = to_numpy(batch_yact_pred[flat_idx])
 
-    # If dataset.template exists, compute template-referenced prediction for direct comparison
-    template_np = (
-        to_numpy(dataset.template)
-        if hasattr(dataset, "template") and dataset.template is not None
-        else np.zeros_like(y_act_pred)
-    )
+    # Build requested composite: y_act_pred_vs_template = b_rest + y_act_pred - b_obs
     b_rest_np = (
         to_numpy(model.b_rest)
         if hasattr(model, "b_rest")
         else np.zeros_like(y_act_pred)
     )
+    b_obs_np = (
+        to_numpy(model.b_obs) if hasattr(model, "b_obs") else np.zeros_like(y_act_pred)
+    )
     y_rest_pred = b_rest_np + y_act_pred
-    y_act_pred_vs_template = y_rest_pred - template_np
+    y_act_pred_vs_template = y_rest_pred - b_obs_np
 
     # Simple safe correlation
     def safe_corr(a, b):
@@ -1104,13 +1102,23 @@ def plot_activity(
     # Full spectrum
     ax = axes[0]
     ax.plot(wavegrid, y_act_true, color="k", lw=1.5, label="True activity")
+    # Plot decoded predicted activity (y_act_pred)
+    ax.plot(
+        wavegrid,
+        y_act_pred,
+        color="#2ca02c",
+        lw=1.0,
+        alpha=0.9,
+        label="Predicted activity (y_act_pred)",
+    )
+    # Plot requested composite b_rest + y_act_pred - b_obs
     ax.plot(
         wavegrid,
         y_act_pred_vs_template,
         color="#1f77b4",
         lw=1.2,
         alpha=0.9,
-        label=f"Predicted (template frame)  r={corr_pred:.2f}",
+        label=f"b_rest + y_act_pred - b_obs  r={corr_pred:.2f}",
     )
     ax.axhline(0.0, color="gray", ls="--", alpha=0.5)
     ax.set_xlabel("Wavelength (Å)")
@@ -1130,6 +1138,7 @@ def plot_activity(
             halfwin = 0.18
             mask = (wavegrid >= lp - halfwin) & (wavegrid <= lp + halfwin)
             axz.plot(wavegrid[mask], y_act_true[mask], "k-", lw=1.2)
+            axz.plot(wavegrid[mask], y_act_pred[mask], color="#2ca02c", lw=1.0)
             axz.plot(
                 wavegrid[mask], y_act_pred_vs_template[mask], color="#1f77b4", lw=1.0
             )

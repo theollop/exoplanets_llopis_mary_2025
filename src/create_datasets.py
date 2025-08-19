@@ -8,7 +8,7 @@ import sys
 import tempfile
 import unicodedata
 from dataclasses import dataclass
-from typing import Any, Dict, Optional, Sequence, Tuple
+from typing import Any, Dict, Literal, Optional, Sequence, Tuple
 
 import pandas as pd
 import h5py
@@ -16,18 +16,12 @@ import numpy as np
 import torch
 from scipy.ndimage import uniform_filter1d
 
-from src.interpolate import shift_spectra_linear
+from src.interpolate import shift_spectra_linear, shift_spectra_cubic
 from src.rassine import normalize_batch_with_rassine, normalize_with_rassine
 from src.utils import clear_gpu_memory
 # ============================================================
 # ---------------------- Config types ------------------------
 # ============================================================
-
-
-@dataclass
-class IndexSplit:
-    start: int
-    end: int
 
 
 @dataclass
@@ -444,6 +438,7 @@ def inject_with_velocities(
     replicate_input: bool = False,
     verbose: bool = False,
     device: Any = "cpu",
+    interpolate_method: Literal["linear", "cubic"] = "linear",
 ) -> torch.Tensor:
     """
     Inject velocities into spectra.
@@ -454,19 +449,24 @@ def inject_with_velocities(
     if batch_size is None:
         spectra = spectra.to(dev)
         wave_b = wavegrid.unsqueeze(0).expand(spectra.shape[0], -1)
-        injected = shift_spectra_linear(
-            spectra=spectra,
-            wavegrid=wave_b,
-            velocities=velocities,
-        )
+        if interpolate_method == "cubic":
+            injected = shift_spectra_cubic(
+                spectra=spectra,
+                wavegrid=wave_b,
+                velocities=velocities,
+            )
+        else:
+            injected = shift_spectra_linear(
+                spectra=spectra,
+                wavegrid=wave_b,
+                velocities=velocities,
+            )
         if gpu_optimized and torch.cuda.is_available():
             out_cpu = injected.detach().cpu()
             del injected, spectra, wave_b
             torch.cuda.empty_cache()
             return out_cpu
         return injected
-        if replicate_input:
-            raise ValueError("batch_size must be provided when replicate_input=True")
 
     out_chunks = []
     total = int(velocities.shape[0] if replicate_input else spectra.shape[0])
@@ -480,12 +480,18 @@ def inject_with_velocities(
             spectra_b = spectra[i:end]
         wave_b = wavegrid.unsqueeze(0).expand(end - i, -1)
         v_b = velocities[i:end]
-
-        injected = shift_spectra_linear(
-            spectra=spectra_b.to(dev),
-            wavegrid=wave_b.to(dev),
-            velocities=v_b.to(dev),
-        )
+        if interpolate_method == "cubic":
+            injected = shift_spectra_cubic(
+                spectra=spectra_b.to(dev),
+                wavegrid=wave_b.to(dev),
+                velocities=v_b.to(dev),
+            )
+        else:
+            injected = shift_spectra_linear(
+                spectra=spectra_b.to(dev),
+                wavegrid=wave_b.to(dev),
+                velocities=v_b.to(dev),
+            )
         if gpu_optimized and torch.cuda.is_available():
             out_chunks.append(injected.detach().cpu())
             del injected, spectra_b, wave_b, v_b
@@ -576,6 +582,7 @@ def create_soap_gpu_paper_dataset(
     storage_dtype=np.float64,
     ccf_npz_path: Optional[str] = None,
     new_wavegrid_filepath: str = None,
+    interpolate_method="linear",
 ):
     print("🔄 Création du dataset SOAP GPU Paper...")
 
@@ -595,14 +602,15 @@ def create_soap_gpu_paper_dataset(
         new_wavegrid_mask = build_mask(new_wavegrid, wavemin, wavemax)
         new_wavegrid_masked = new_wavegrid[new_wavegrid_mask]
 
-    # ---- Split config
-    split = IndexSplit(idx_start, idx_end)
-
     # ---- Load spectra selection (+ time)
     with h5py.File(spectra_filepath, "r") as f:
         n_file_total = f["spec_cube"].shape[0]
-        spectra = f["spec_cube"][split.start : split.end, :][:, mask]
-        time_values = time_values[split.start : split.end]
+        if idx_start < 0 or idx_end > n_file_total:
+            raise ValueError(
+                f"Index range [{idx_start}:{idx_end}] out of bounds for file with {n_file_total} spectra."
+            )
+        spectra = f["spec_cube"][idx_start:idx_end, :][:, mask]
+        time_values = time_values[idx_start:idx_end]
 
     n_spectra = spectra.shape[0]
     print(f"Données chargées: fichier={n_file_total} | sélection={n_spectra} spectra")
@@ -701,7 +709,9 @@ def create_soap_gpu_paper_dataset(
         and len(planets_periods)
         and len(planets_phases)
     ):
-        print("🌌 Injection du signal planétaire...")
+        print(
+            f"🌌 Injection du signal planétaire... méthode d'interpolation : {interpolate_method}"
+        )
         planets = PlanetParams(planets_amplitudes, planets_periods, planets_phases)
         v_np = compute_velocities(time_values, planets)
         v_true_tot = v_np.astype(float, copy=False)
@@ -723,6 +733,7 @@ def create_soap_gpu_paper_dataset(
             replicate_input=False,
             verbose=False,
             device=dev,
+            interpolate_method=interpolate_method,
         )
         spectra_ds = spectra_inj.detach().cpu().numpy()
 
@@ -737,6 +748,7 @@ def create_soap_gpu_paper_dataset(
             replicate_input=True,
             verbose=False,
             device=dev,
+            interpolate_method=interpolate_method,
         )
         spectra_ds_no_activity = spectra_noact_inj.detach().cpu().numpy()
 
@@ -786,7 +798,7 @@ def create_soap_gpu_paper_dataset(
         "template": template_ds.astype(storage_dtype, copy=False),
         "spectra": spectra_out.astype(storage_dtype, copy=False),
         "activity": activity_out.astype(storage_dtype, copy=False),
-        "time_values": time_values[:n_spectra].astype(storage_dtype, copy=False),
+        "time_values": time_values.astype(storage_dtype, copy=False),
         "v_true": v_true_out.astype(storage_dtype, copy=False),
         "metadata": metadata,
     }
@@ -798,7 +810,7 @@ def create_soap_gpu_paper_dataset(
                 raise ValueError(
                     f"CCF proxies length ({proxies.shape[0]}) < n_spectra ({n_spectra})"
                 )
-            proxies = proxies[split.start : split.end, :]  # (n_spectra, 3)
+            proxies = proxies[idx_start:idx_end, :]  # (n_spectra, 3)
             # Compute robust zscore med/mad on training set (here whole set used as train)
             med, mad = robust_zscore_train_only(proxies)
             proxies_norm = apply_robust_zscore(proxies, med, mad)
@@ -1205,14 +1217,15 @@ if __name__ == "__main__":
         spectra_filepath="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/soap_gpu_paper/spec_cube_tot_filtered_normalized_float32.h5",
         template_filepath="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/soap_gpu_paper/template.npy",
         wavegrid_filepath="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/soap_gpu_paper/wavegrid.npy",
+        new_wavegrid_filepath="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/soap_gpu_paper/wavegrid_2000.npy",
         time_values_filepath="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/soap_gpu_paper/time_values.npy",
         output_dir="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/npz_datasets",
         idx_start=0,
-        idx_end=1000,
+        idx_end=3292,
         wavemin=5000,
-        wavemax=5200,
-        downscaling_factor=2,
-        smooth_after_downscaling=True,
+        wavemax=5050,
+        downscaling_factor=1,
+        smooth_after_downscaling=False,
         smooth_kernel_size=1,
         add_photon_noise=False,
         snr_target=300.0,
@@ -1224,4 +1237,5 @@ if __name__ == "__main__":
         use_rassine=False,
         storage_dtype=np.float32,
         ccf_npz_path="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/ccf_results/ccf_analysis_results.npz",
+        interpolate_method="linear",
     )

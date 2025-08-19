@@ -9,7 +9,7 @@ from numpy.typing import NDArray
 from src.utils import get_mask, get_free_memory, get_max_nv
 import torch
 import time
-from src.interpolate import shift_spectra_linear
+from src.interpolate import shift_spectra_linear, shift_spectra_cubic
 
 __all__ = [
     "compute_CCFs",
@@ -37,6 +37,8 @@ def get_full_ccf_analysis(
     batch_size: Optional[int] = None,
     normalize: bool = True,
     return_raw_ccfs: bool = False,
+    interp: Optional[str] = None,
+    dtype: torch.dtype = torch.float32,
 ) -> Dict[str, NDArray[np.floating]]:
     """
     Calcule les CCFs puis réalise l'analyse (RV, profondeur, FWHM, span).
@@ -55,16 +57,34 @@ def get_full_ccf_analysis(
         Dictionnaire contenant les mesures pour chaque spectre:
         {"rv", "depth", "fwhm", "span", "continuum", "amplitude", "popt"}.
     """
-    CCFs = compute_CCFs(
-        spectra=spectra,
-        wavegrid=wavegrid,
-        v_grid=v_grid,
-        window_size_velocity=window_size_velocity,
-        mask_type=mask_type,
-        verbose=verbose,
-        batch_size=batch_size,
-        normalize=normalize,
-    )
+    # If interp is specified ("linear" or "cubic"), use the shifting-based masked CCF
+    if interp in {"linear", "cubic"}:
+        CCFs = compute_CCFs_mask_interp(
+            spectra=spectra,
+            wavegrid=wavegrid,
+            v_grid=v_grid,
+            window_size_velocity=window_size_velocity,
+            mask_type=mask_type,
+            interp=interp,
+            dtype=dtype,
+            verbose=verbose,
+            batch_size_specs=batch_size,
+        )
+        # Décalage à 0 par CCF, cohérent avec la voie sparse
+        CCFs -= np.min(CCFs, axis=1, keepdims=True)
+        if normalize:
+            CCFs = normalize_CCFs(CCFs)
+    else:
+        CCFs = compute_CCFs(
+            spectra=spectra,
+            wavegrid=wavegrid,
+            v_grid=v_grid,
+            window_size_velocity=window_size_velocity,
+            mask_type=mask_type,
+            verbose=verbose,
+            batch_size=batch_size,
+            normalize=normalize,
+        )
     if return_raw_ccfs:
         return analyze_ccfs(CCFs, v_grid), CCFs
     else:
@@ -81,6 +101,7 @@ def get_full_ccf_analysis_template(
     batch_size_specs: Optional[int] = None,
     normalize: bool = True,
     return_raw_ccfs: bool = False,
+    interp: str = "linear",
 ) -> Dict[str, NDArray[np.floating]]:
     """
     Calcule les CCFs via un template décalé (méthode rapide) puis réalise l'analyse.
@@ -109,6 +130,7 @@ def get_full_ccf_analysis_template(
         dtype=dtype,
         verbose=verbose,
         batch_size_specs=batch_size_specs,
+        interp=interp,
     )
 
     # Décalage à 0 par CCF, pour cohérence avec compute_CCFs
@@ -656,6 +678,7 @@ def compute_CCFs_template(
     dtype: torch.dtype = torch.float32,
     verbose: bool = False,
     batch_size_specs: int = None,
+    interp: str = "linear",
 ) -> np.ndarray:
     """
     Version optimisée : pré-calcule les templates décalés une seule fois,
@@ -789,7 +812,10 @@ def compute_CCFs_template(
             template_batch = (
                 template_t.unsqueeze(0).expand(Bv, -1).contiguous()
             )  # (Bv, L)
-            shifted_templates = shift_spectra_linear(
+            shift_fun = (
+                shift_spectra_cubic if interp == "cubic" else shift_spectra_linear
+            )
+            shifted_templates = shift_fun(
                 spectra=template_batch,
                 wavegrid=wave_batch,
                 velocities=v_batch_t,
@@ -833,7 +859,12 @@ def compute_CCFs_template(
                 cols = []
                 for j in range(Bv):
                     vS = v_batch_t[j].repeat(S)
-                    shifted_S = shift_spectra_linear(
+                    shift_fun = (
+                        shift_spectra_cubic
+                        if interp == "cubic"
+                        else shift_spectra_linear
+                    )
+                    shifted_S = shift_fun(
                         spectra=temp_batch,
                         wavegrid=wave_batch_S,
                         velocities=vS,
@@ -883,6 +914,100 @@ def compute_CCFs_template(
         )
         speedup_estimate = (n_specs * n_v * L) / (total_time * 1e9)  # GFLOPS estimate
         print(f"Performance estimée : {speedup_estimate:.1f} GFLOPS")
+
+    return CCFs
+
+
+def compute_CCFs_mask_interp(
+    spectra: np.ndarray,
+    wavegrid: np.ndarray,
+    v_grid: np.ndarray,
+    window_size_velocity: float,
+    mask_type: str = "G2",
+    interp: str = "linear",
+    dtype: torch.dtype = torch.float32,
+    verbose: bool = False,
+    batch_size_specs: Optional[int] = None,
+) -> np.ndarray:
+    """
+    Calcule les CCFs par interpolation (linéaire ou cubique) en décalant les spectres,
+    puis en projetant sur un masque fixe (au repos) gaussien.
+
+    Cette méthode est équivalente au masque sparse, mais permet de choisir l'interpolation
+    (utile pour des grilles spectrales plus grossières).
+    """
+    assert interp in {"linear", "cubic"}
+    # Charger le masque de raies
+    mask = get_mask(mask_type)
+    line_pos = mask[:, 0]
+    line_weights = mask[:, 1]
+
+    # Construire le masque gaussien au repos M0(lam)
+    c = 299_792_458.0
+    L = wavegrid.shape[0]
+    M0 = np.zeros(L, dtype=np.float64)
+    # Vectorisé par paquets de lignes pour éviter gros pics mémoire si besoin
+    for lam0, w in zip(line_pos, line_weights):
+        sigma = lam0 * (window_size_velocity / c)
+        x = (wavegrid - lam0) / sigma
+        M0 += w * np.exp(-0.5 * x * x)
+
+    # Préparer tensors
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+    n_specs = spectra.shape[0]
+    n_v = len(v_grid)
+    if batch_size_specs is None:
+        batch_size_specs = min(256, n_specs)
+
+    # Tensors constants
+    wave_t = torch.as_tensor(wavegrid, dtype=dtype, device=device)
+    M0_t = torch.as_tensor(M0, dtype=dtype, device=device)  # (L,)
+
+    # Batches
+    spec_batches = [
+        spectra[i : i + batch_size_specs] for i in range(0, n_specs, batch_size_specs)
+    ]
+
+    CCFs = np.zeros(
+        (n_specs, n_v), dtype=np.float32 if dtype == torch.float32 else np.float64
+    )
+
+    # Boucle sur vitesses (streaming mémoire-sûr)
+    for vi, v in enumerate(v_grid):
+        if verbose and (vi % max(1, len(v_grid) // 10) == 0):
+            print(f"  v {vi + 1}/{len(v_grid)}")
+        # On décale les spectres par -v pour aligner avec le masque au repos
+        for si, spec_batch in enumerate(spec_batches):
+            if isinstance(spec_batch, torch.Tensor):
+                specs_gpu = spec_batch.to(dtype=dtype, device=device)
+            else:
+                specs_gpu = torch.as_tensor(spec_batch, dtype=dtype, device=device)
+            S = specs_gpu.shape[0]
+            wave_b = wave_t.unsqueeze(0).expand(S, -1).contiguous()
+            vS = torch.full((S,), fill_value=float(-v), dtype=dtype, device=device)
+            shift_fun = (
+                shift_spectra_cubic if interp == "cubic" else shift_spectra_linear
+            )
+            shifted = shift_fun(
+                spectra=specs_gpu,
+                wavegrid=wave_b,
+                velocities=vS,
+                extrapolate="constant",
+                return_mask=False,
+            )  # (S, L)
+            shifted_centered = shifted - 1.0
+            # Produit scalaire avec M0
+            col = torch.sum(shifted_centered * M0_t.unsqueeze(0), dim=1)  # (S,)
+            # Range dans la bonne tranche
+            s_start = si * batch_size_specs
+            s_end = s_start + S
+            CCFs[s_start:s_end, vi] = col.detach().cpu().numpy()
+            del specs_gpu, wave_b, vS, shifted, shifted_centered, col
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
     return CCFs
 

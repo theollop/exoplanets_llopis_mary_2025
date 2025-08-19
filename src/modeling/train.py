@@ -28,7 +28,7 @@ import os
 import yaml
 import torch
 import csv
-import matplotlib.pyplot as plt
+import numpy as np
 from datetime import datetime
 from torch.utils.data import DataLoader
 from torch.cuda.amp import GradScaler as DeprecatedGradScaler  # compat
@@ -50,6 +50,8 @@ from src.plots_aestra import (
     plot_aestra_analysis,
     plot_rv_predictions_dataset,
     plot_activity,
+    plot_latent_distance_distribution,
+    plot_latent_space_3d,
 )
 
 console = Console()
@@ -264,6 +266,7 @@ def load_experiment_checkpoint(path, device="cuda", dataset_filepath=None):
         beta_brest=config.get("beta_brest", 1.0),
         consistency_mode=config.get("consistency_mode", "mse"),
         encode_in_rest_frame=config.get("encode_in_rest_frame", True),
+        interp_method=config.get("interpolate", "linear"),
     )
 
     # Load state dict with compatibility handling
@@ -596,7 +599,9 @@ def create_early_stopping(phase_config):
     return early_stopping
 
 
-def get_bobs_brest_init(b_obs: str, b_rest: str, dataset: SpectrumDataset):
+def get_bobs_brest_init(
+    b_obs: str, b_rest: str, dataset: SpectrumDataset, device="cuda", dtype="float32"
+):
     """
     Récupère et initialise b_obs et b_rest depuis la configuration.
 
@@ -611,12 +616,18 @@ def get_bobs_brest_init(b_obs: str, b_rest: str, dataset: SpectrumDataset):
     Returns:
         tuple: (b_obs, b_rest) comme tensors
     """
+
+    if dtype == "float32":
+        dtype = torch.float32
+    elif dtype == "float64":
+        dtype = torch.float64
+    elif dtype == "float16":
+        dtype = torch.float16
+
     if b_obs == "mean":
         b_obs_tensor = dataset.spectra.mean(axis=0)
     elif b_obs == "random":
-        b_obs_tensor = torch.randn_like(
-            dataset.spectra[0], device=dataset.device, dtype=dataset.dtype
-        )
+        b_obs_tensor = torch.randn_like(dataset.spectra[0], device=device, dtype=dtype)
     elif b_obs == "true_template":
         b_obs_tensor = dataset.template
         if dataset.template is None:
@@ -624,15 +635,19 @@ def get_bobs_brest_init(b_obs: str, b_rest: str, dataset: SpectrumDataset):
             b_obs_tensor = dataset.spectra.mean(
                 axis=0
             )  # Fallback to mean if no template
+
+    elif "index" in b_obs:
+        index = int(b_obs.split("_")[-1])
+        b_obs_tensor = dataset.spectra[index]
+    elif b_obs == "zero":
+        b_obs_tensor = torch.zeros_like(dataset.spectra[0], device=device, dtype=dtype)
     else:
         raise ValueError(f"Unknown b_obs type: {b_obs}")
 
     if b_rest == "mean":
         b_rest_tensor = dataset.spectra.mean(axis=0)
     elif b_rest == "random":
-        b_rest_tensor = torch.randn_like(
-            dataset.spectra[0], device=dataset.device, dtype=dataset.dtype
-        )
+        b_rest_tensor = torch.randn_like(dataset.spectra[0], device=device, dtype=dtype)
     elif b_rest == "true_template":
         b_rest_tensor = dataset.template
         if dataset.template is None:
@@ -640,6 +655,12 @@ def get_bobs_brest_init(b_obs: str, b_rest: str, dataset: SpectrumDataset):
             b_rest_tensor = dataset.spectra.mean(
                 axis=0
             )  # Fallback to mean if no template
+    elif "index" in b_rest:
+        index = int(b_rest.split("_")[-1])
+        b_rest_tensor = dataset.spectra[index]
+
+    elif b_rest == "zero":
+        b_rest_tensor = torch.zeros_like(dataset.spectra[0], device=device, dtype=dtype)
     else:
         raise ValueError(f"Unknown b_rest type: {b_rest}")
 
@@ -694,18 +715,19 @@ def train_phase(
         "corr": [],
     }
 
-    # Table pour les losses
-    table = Table(expand=True)
-    table.add_column("Epoch")
-    table.add_column("RV")
-    table.add_column("FID")
-    table.add_column("C")
-    table.add_column("Reg")
-    table.add_column("Smooth")
-    table.add_column("Template")
-    table.add_column("Activity")
-    table.add_column("Corr")
-    table.add_column("Total Loss")
+    # Configuration des colonnes du tableau (affichage compact de la dernière ligne uniquement)
+    loss_table_columns = [
+        "Epoch",
+        "RV",
+        "FID",
+        "C",
+        "Reg",
+        "Smooth",
+        "Template",
+        "Activity",
+        "Corr",
+        "Total Loss",
+    ]
 
     model.set_phase(phase_name)
     model.train()
@@ -832,7 +854,11 @@ def train_phase(
                     return ""
                 return f"{vv:.4e}" if vv > 0.0 else ""
 
-            table.add_row(
+            # Affichage: ne montrer que la dernière ligne sous forme d'un mini-tableau
+            row_table = Table(expand=True)
+            for col in loss_table_columns:
+                row_table.add_column(col)
+            row_table.add_row(
                 f"{epoch + 1}/{n_epochs}",
                 fmt(epoch_losses["rv"]),
                 fmt(epoch_losses["fid"]),
@@ -844,9 +870,7 @@ def train_phase(
                 fmt(epoch_losses["corr"]),  # OK
                 fmt(total_loss),
             )
-            # Affichage
-            console.clear()
-            console.print(table)
+            console.print(row_table)
 
             # Vérification Early Stopping
             if early_stopping is not None:
@@ -933,6 +957,154 @@ def train_phase(
                 except Exception as e:
                     console.log(f"⚠️  Activity plotting failed: {e}")
 
+            # Latent plots (distance distribution and 3D space) at intervals
+            latent_dist_every = phase_config.get(
+                "plot_latent_distance_every",
+                config.get("plot_latent_distance_every", 0),
+            )
+            latent_space_every = phase_config.get(
+                "plot_latent_space_every",
+                config.get("plot_latent_space_every", 0),
+            )
+
+            need_latent_eval = (
+                latent_dist_every > 0 and (epoch + 1) % latent_dist_every == 0
+            ) or (latent_space_every > 0 and (epoch + 1) % latent_space_every == 0)
+
+            if need_latent_eval:
+                # Build an eval dataloader (no shuffle) and compute latents + RVs once
+                eval_dl = DataLoader(
+                    dataset=dataset,
+                    batch_size=config.get("batch_size", 32),
+                    shuffle=False,
+                    collate_fn=generate_collate_fn(dataset=dataset),
+                    num_workers=0,
+                )
+                was_training = model.training
+                model.eval()
+                all_s_list, all_saug_list, all_vobs_list = [], [], []
+                device = next(model.parameters()).device
+                with torch.no_grad():
+                    for _batch in eval_dl:
+                        (
+                            yobs,
+                            yaug,
+                            voffset_true,
+                            wavegrid,
+                            weights_fid,
+                            indices,
+                            yact_true,
+                            activity_proxies_norm,
+                        ) = _batch
+
+                        # Move to model device for safety
+                        def _to_dev(t):
+                            return (
+                                t.to(device, non_blocking=True)
+                                if isinstance(t, torch.Tensor)
+                                else t
+                            )
+
+                        yobs = _to_dev(yobs)
+                        yaug = _to_dev(yaug)
+                        wavegrid = _to_dev(wavegrid)
+                        activity_proxies_norm = _to_dev(activity_proxies_norm)
+
+                        # RV predictions (obs and aug)
+                        vobs_pred, vaug_pred = model.get_rvestimator_pred(
+                            batch_yobs=yobs, batch_yaug=yaug
+                        )
+
+                        # Spender forward to get latents (obs and aug)
+                        (
+                            yobs_prime,
+                            yact,
+                            yact_aug,
+                            s,
+                            saug,
+                        ) = model.get_spender_pred(
+                            batch_yobs=yobs,
+                            batch_yaug=yaug,
+                            batch_wavegrid=wavegrid,
+                            batch_vobs_pred=vobs_pred,
+                            batch_vaug_pred=vaug_pred,
+                            get_aug_data=True,
+                            batch_activity_proxies_norm=activity_proxies_norm,
+                            include_activity_proxies=model.include_activity_proxies,
+                        )
+
+                        all_s_list.append(s.detach().cpu().numpy())
+                        all_saug_list.append(saug.detach().cpu().numpy())
+                        all_vobs_list.append(vobs_pred.detach().cpu().numpy())
+
+                # Restore training state
+                if was_training:
+                    model.train()
+
+                all_s = np.concatenate(all_s_list, axis=0)
+                all_saug = np.concatenate(all_saug_list, axis=0)
+                rv_values = np.concatenate(all_vobs_list, axis=0)
+
+                # Plot latent distance distribution
+                if latent_dist_every > 0 and (epoch + 1) % latent_dist_every == 0:
+                    # Compute distances (random pairs vs augmented)
+                    n = all_s.shape[0]
+                    inds = np.array(
+                        [np.random.choice(n, size=2, replace=False) for _ in range(n)]
+                    )
+                    delta_s_rand = np.linalg.norm(
+                        all_s[inds[:, 0]] - all_s[inds[:, 1]], axis=1
+                    )
+                    delta_s_aug = np.linalg.norm(all_s - all_saug, axis=1)
+
+                    fig_dir = (
+                        exp_dirs["figures_dir"]
+                        if exp_dirs
+                        else config.get("plot_dir", "reports/figures")
+                    )
+                    out_dir = os.path.join(fig_dir, phase_name, "latent")
+                    os.makedirs(out_dir, exist_ok=True)
+                    save_path = os.path.join(
+                        out_dir, f"latent_distance_epoch_{epoch + 1}.png"
+                    )
+                    try:
+                        plot_latent_distance_distribution(
+                            delta_s_rand=delta_s_rand,
+                            delta_s_aug=delta_s_aug,
+                            save_path=save_path,
+                            show_plot=False,
+                        )
+                        console.log(
+                            f"📈 Latent distance distribution plotted at epoch {epoch + 1} (saved in {out_dir})"
+                        )
+                    except Exception as e:
+                        console.log(f"⚠️  Latent distance plotting failed: {e}")
+
+                # Plot latent 3D space (or 2D projections when D>3)
+                if latent_space_every > 0 and (epoch + 1) % latent_space_every == 0:
+                    fig_dir = (
+                        exp_dirs["figures_dir"]
+                        if exp_dirs
+                        else config.get("plot_dir", "reports/figures")
+                    )
+                    out_dir = os.path.join(fig_dir, phase_name, "latent")
+                    os.makedirs(out_dir, exist_ok=True)
+                    save_path = os.path.join(
+                        out_dir, f"latent_space_epoch_{epoch + 1}.png"
+                    )
+                    try:
+                        plot_latent_space_3d(
+                            latent_s=all_s,
+                            rv_values=rv_values,
+                            save_path=save_path,
+                            show_plot=False,
+                        )
+                        console.log(
+                            f"🧭 Latent space plotted at epoch {epoch + 1} (saved in {out_dir})"
+                        )
+                    except Exception as e:
+                        console.log(f"⚠️  Latent space plotting failed: {e}")
+
             # Plots de spectres périodiques
             plot_spectra_every = phase_config.get("plot_spectra_every", 0)
             if plot_spectra_every > 0 and (epoch + 1) % plot_spectra_every == 0:
@@ -982,8 +1154,8 @@ def train_phase(
                 # ⚠️ CRITIQUE: Nettoyage de la mémoire GPU après sauvegarde
                 clear_gpu_memory()
 
-            # Nettoyage périodique de la mémoire (tous les 10 epochs)
-            if (epoch + 1) % 10 == 0:
+            # Nettoyage périodique de la mémoire (tous les 50 epochs)
+            if (epoch + 1) % config.get("clear_memory_every", 50) == 0:
                 clear_gpu_memory()
                 memory_info = get_gpu_memory_info()
                 if "error" not in memory_info:
@@ -1156,6 +1328,8 @@ def main(
             b_obs=config.get("b_obs_init", "true_template"),
             b_rest=config.get("b_rest_init", "mean"),
             dataset=dataset,
+            device=device,
+            dtype=config.get("model_dtype", "float32"),
         )
         console.log(
             f"✅ Initialisation b_obs : {config.get('b_obs_init', 'true_template')} b_rest : {config.get('b_rest_init', 'mean')}"
@@ -1169,6 +1343,9 @@ def main(
             console.log("🔄 b_rest_equal_b_obs is enabled")
         if config.get("encode_in_rest_frame", True):
             console.log("🔄 encode_in_rest_frame is enabled")
+
+        if config.get("interpolate", "linear"):
+            console.log(f"🔄 interpolate method: {config.get('interpolate')}")
 
         model = AESTRA(
             n_pixels=dataset.n_pixels,
@@ -1197,6 +1374,7 @@ def main(
             beta_brest=config.get("beta_brest", 1.0),
             consistency_mode=config.get("consistency_mode", "mse"),
             encode_in_rest_frame=config.get("encode_in_rest_frame", True),
+            interp_method=config.get("interpolate", "linear"),
         )
         console.log(
             f"✅ Modèle créé avec succès (include_activity_proxies={model.include_activity_proxies})"
@@ -1387,7 +1565,7 @@ def main(
 
 if __name__ == "__main__":
     main(
-        config_path="src/modeling/configs/base_config.yaml",
-        dataset_filepath="data/npz_datasets/soapgpu_equiv_for_harps_ns1275_4000-4050_p100_k0p1_phi0.npz",
+        config_path="src/modeling/configs/aestra_config_cubic.yaml",
+        dataset_filepath="data/npz_datasets/soapgpu_ns3292_5000-5050_p100_k1_phi0_cubic.npz",
         output_root_dir="experiments",
     )

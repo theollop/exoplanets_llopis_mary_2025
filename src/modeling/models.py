@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from src.interpolate import shift_spectra_linear
+from src.interpolate import shift_spectra_linear, shift_spectra_cubic
 import os
 import torch.optim as optim
 from typing import Optional
@@ -394,6 +394,7 @@ class AESTRA(nn.Module):
         beta_brest: float = 1.0,
         consistency_mode: str = "mse",
         encode_in_rest_frame: bool = True,
+        interp_method: str = "linear",
     ):
         """
         Args:
@@ -461,6 +462,7 @@ class AESTRA(nn.Module):
         self.spender = self.spender.to(dtype=dtype)
         self.rvestimator = self.rvestimator.to(dtype=dtype)
         self.encode_in_rest_frame = encode_in_rest_frame
+        self.interp_method = interp_method
 
     def set_phase(self, phase: str):
         self.phase = phase
@@ -665,9 +667,14 @@ class AESTRA(nn.Module):
         encode_in_rest_frame=True,
     ):
         if encode_in_rest_frame:
-            yobs_rest = shift_spectra_linear(
-                batch_yobs, batch_wavegrid, -batch_vobs_pred
-            )
+            if self.interp_method == "linear":
+                yobs_rest = shift_spectra_linear(
+                    batch_yobs, batch_wavegrid, -batch_vobs_pred, extrapolate
+                )
+            else:
+                yobs_rest = shift_spectra_cubic(
+                    batch_yobs, batch_wavegrid, -batch_vobs_pred, extrapolate
+                )
             batch_robs = yobs_rest - self.b_obs.unsqueeze(0)
         else:
             batch_robs = batch_yobs - self.b_obs.unsqueeze(0)
@@ -689,20 +696,37 @@ class AESTRA(nn.Module):
         base_rest = self.b_obs if self.b_rest_equal_b_obs else self.b_rest
         batch_yrest = base_rest.unsqueeze(0) + batch_yact
 
-        batch_yobs_prime = shift_spectra_linear(
-            spectra=batch_yrest,
-            wavegrid=batch_wavegrid,
-            velocities=batch_vobs_pred,
-            extrapolate=extrapolate,
-        )
+        if self.interp_method == "linear":
+            batch_yobs_prime = shift_spectra_linear(
+                spectra=batch_yrest,
+                wavegrid=batch_wavegrid,
+                velocities=batch_vobs_pred,
+                extrapolate=extrapolate,
+            )
+        else:
+            batch_yobs_prime = shift_spectra_cubic(
+                spectra=batch_yrest,
+                wavegrid=batch_wavegrid,
+                velocities=batch_vobs_pred,
+                extrapolate=extrapolate,
+            )
 
         if get_aug_data:
             if self.encode_in_rest_frame:
-                batch_raug = shift_spectra_linear(
-                    spectra=batch_yaug,
-                    wavegrid=batch_wavegrid,
-                    velocities=batch_vaug_pred,
-                ) - self.b_obs.unsqueeze(0)
+                if self.interp_method == "linear":
+                    batch_raug = shift_spectra_linear(
+                        spectra=batch_yaug,
+                        wavegrid=batch_wavegrid,
+                        velocities=batch_vaug_pred,
+                        extrapolate=extrapolate,
+                    ) - self.b_obs.unsqueeze(0)
+                else:
+                    batch_raug = shift_spectra_cubic(
+                        spectra=batch_yaug,
+                        wavegrid=batch_wavegrid,
+                        velocities=batch_vaug_pred,
+                        extrapolate=extrapolate,
+                    ) - self.b_obs.unsqueeze(0)
             else:
                 batch_raug = batch_yaug - self.b_obs.unsqueeze(0)
             proxies_aug = None
@@ -784,11 +808,24 @@ def get_k_reg(k_reg_init: float, iteration_count: int = None, cycle_length: int 
     Retourne la valeur de k_reg en fonction du nombre d'itérations.
     La valeur de k_reg augmente linéairement de 0 à 1 sur un cycle de cycle_length itérations.
     """
-    if iteration_count is None or cycle_length == 0:
-        return k_reg_init
+    if iteration_count is None or cycle_length <= 0:
+        return float(k_reg_init)
 
-    k_reg = k_reg_init + (iteration_count % cycle_length) / cycle_length
-    return k_reg
+    # Position dans le cycle [0 .. cycle_length-1]
+    i = int(iteration_count) % int(cycle_length)
+
+    # Pas choisi pour atteindre exactement 1.0 au dernier index du cycle
+    if cycle_length == 1:
+        return 1.0
+    step = (1.0 - float(k_reg_init)) / float(cycle_length - 1)
+
+    k_reg = float(k_reg_init) + i * step
+    # Par sécurité numérique
+    if i == cycle_length - 1:
+        k_reg = 1.0
+
+    # Clamp dans [k_reg_init, 1.0]
+    return float(max(min(k_reg, 1.0), float(k_reg_init)))
 
 
 def loss_reg(
