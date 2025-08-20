@@ -19,6 +19,7 @@ from scipy.ndimage import uniform_filter1d
 from src.interpolate import shift_spectra_linear, shift_spectra_cubic
 from src.rassine import normalize_batch_with_rassine, normalize_with_rassine
 from src.utils import clear_gpu_memory
+from src.batch_ccf_analysis import compute_ccf_proxies_from_arrays
 # ============================================================
 # ---------------------- Config types ------------------------
 # ============================================================
@@ -580,7 +581,7 @@ def create_soap_gpu_paper_dataset(
     smooth_kernel_size: int = 3,
     use_rassine=False,
     storage_dtype=np.float64,
-    ccf_npz_path: Optional[str] = None,
+    compute_ccf_proxies: bool = False,
     new_wavegrid_filepath: str = None,
     interpolate_method="linear",
 ):
@@ -802,16 +803,26 @@ def create_soap_gpu_paper_dataset(
         "v_true": v_true_out.astype(storage_dtype, copy=False),
         "metadata": metadata,
     }
-    # Optional: load activity proxies from a CCF analysis .npz and add to payload
-    if ccf_npz_path is not None:
+    # Optionnel: calculer et joindre les proxies CCF sur le dataset final
+    if compute_ccf_proxies:
+        print("Calcul des proxies CCF...")
         try:
-            proxies = load_activity_proxies_npz(ccf_npz_path)  # (N,3)
-            if proxies.shape[0] < n_spectra:
-                raise ValueError(
-                    f"CCF proxies length ({proxies.shape[0]}) < n_spectra ({n_spectra})"
-                )
-            proxies = proxies[idx_start:idx_end, :]  # (n_spectra, 3)
-            # Compute robust zscore med/mad on training set (here whole set used as train)
+            proxies_ccf = compute_ccf_proxies_from_arrays(
+                spectra=spectra_out,
+                wavegrid=wavegrid_ds,
+                batch_size=batch_size or 128,
+                v_grid_range=(-20000, 20000),
+                v_grid_step=250,
+                window_size_velocity=820.0,
+                mask_type="G2",
+                normalize=True,
+                return_raw_ccfs=True,
+                verbose=True,
+            )
+            depths = proxies_ccf["depths"].astype(np.float32)
+            fwhms = proxies_ccf["fwhms"].astype(np.float32)
+            spans = proxies_ccf["spans"].astype(np.float32)
+            proxies = np.stack([depths, fwhms, spans], axis=1)
             med, mad = robust_zscore_train_only(proxies)
             proxies_norm = apply_robust_zscore(proxies, med, mad)
 
@@ -819,13 +830,19 @@ def create_soap_gpu_paper_dataset(
             payload["activity_proxies_norm"] = proxies_norm.astype(
                 np.float32, copy=False
             )
-            # Store normalization params for downstream denormalization
             payload["activity_proxies_med"] = med.astype(np.float32, copy=False)
             payload["activity_proxies_mad"] = mad.astype(np.float32, copy=False)
-            # Add to metadata a flag
             payload["metadata"]["activity_proxies_included"] = True
+            payload["metadata"]["activity_proxies_mask_type"] = "G2"
+            payload["metadata"]["activity_proxies_v_grid_range"] = (
+                -20000,
+                20000,
+            )
+            payload["metadata"]["activity_proxies_v_grid_step"] = 250
+            payload["metadata"]["activity_proxies_window_size_velocity"] = 820.0
+            payload["ccfs"] = proxies_ccf["raw_ccfs"].astype(np.float32, copy=False)
         except Exception as e:
-            print(f"⚠️  Loading activity proxies failed: {e}")
+            print(f"⚠️  Échec du calcul des proxies CCF: {e}")
     if spectra_ds_no_activity is not None:
         payload["spectra_no_activity"] = spectra_ds_no_activity[:n_spectra].astype(
             storage_dtype, copy=False
@@ -1217,13 +1234,14 @@ if __name__ == "__main__":
         spectra_filepath="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/soap_gpu_paper/spec_cube_tot_filtered_normalized_float32.h5",
         template_filepath="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/soap_gpu_paper/template.npy",
         wavegrid_filepath="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/soap_gpu_paper/wavegrid.npy",
-        # new_wavegrid_filepath="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/soap_gpu_paper/wavegrid_2000.npy",
+        new_wavegrid_filepath="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/soap_gpu_paper/wavegrid_2000.npy",
         time_values_filepath="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/soap_gpu_paper/time_values.npy",
         output_dir="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/npz_datasets",
+        output_filename="plot_dataset_ccf.npz",
         idx_start=0,
-        idx_end=1000,
-        wavemin=5000,
-        wavemax=5050,
+        idx_end=3192,
+        wavemin=None,
+        wavemax=None,
         downscaling_factor=1,
         smooth_after_downscaling=False,
         smooth_kernel_size=1,
@@ -1233,9 +1251,9 @@ if __name__ == "__main__":
         planets_amplitudes=[0.3],
         planets_periods=[100],
         planets_phases=[0.0],
-        batch_size=10,
+        batch_size=100,
         use_rassine=False,
         storage_dtype=np.float32,
-        ccf_npz_path="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/ccf_results/ccf_analysis_results.npz",
-        interpolate_method="cubic",
+        compute_ccf_proxies=True,
+        interpolate_method="linear",
     )

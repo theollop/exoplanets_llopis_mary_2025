@@ -38,7 +38,7 @@ vmax: +10                  # Vitesse max (m/s)
 interpolate: "linear"     # Méthode d'interpolation
 extrapolate: "linear"     # Méthode d'extrapolation hors bornes
 out_dtype: float32        # Type de sortie des spectres augmentés (float16 économise ~50% mémoire GPU)
-get_aug_data: true        # Si true, calcule les latents des spectres augmentés (loss de consistency)
+get_aug_data: false        # Si true, calcule les latents des spectres augmentés (loss de consistency)
 
 
 # --------------------------------------------------------------------------
@@ -47,8 +47,8 @@ get_aug_data: true        # Si true, calcule les latents des spectres augmentés
 latent_dim: 3             # Dimension de l'espace latent (anciennement "S")
 encode_in_rest_frame: false
 
-b_obs_init: index_758    # Initialise b_obs à partir du spectre index=1613 (faible activité)
-b_rest_init: mean         # Moyenne de tous les spectres
+b_obs_init: true_template    # Initialise b_obs à partir du spectre index=1613 (faible activité)
+b_rest_init: true_template         # Moyenne de tous les spectres
 b_rest_equal_b_obs: false # Force b_rest = b_obs (si true)
 
 model_dtype: float32      # Type de données pour les poids du modèle (float16/float32/float64)
@@ -63,7 +63,7 @@ sigma_v: 0.3              # Écart-type pour le bruit Doppler
 # Flux reg loss
 sigma_y: 0.1              # Écart-type pour le bruit de flux
 k_reg_init: 0.0           # Coefficient de régularisation
-cycle_length: 1000        # Nombre d’itérations pour un cycle de régularisation
+cycle_length: 0        # Nombre d’itérations pour un cycle de régularisation
 
 # Consistency loss
 consistency_mode: "mse"   # Mode de perte de consistance ("mse" ou "sigmoid")
@@ -125,7 +125,7 @@ plot_rv_every: 50          # Plot des RV
 # --------------------------------------------------------------------------
 phases:
   - name: rvonly
-    n_epochs: 50
+    n_epochs: 100
     trainable_params:
       b_obs: false
       b_rest: false
@@ -141,7 +141,7 @@ phases:
     n_epochs: 100
     trainable_params:
       b_obs: false
-      b_rest: true
+      b_rest: false
       rvestimator: true
       spender: true
 

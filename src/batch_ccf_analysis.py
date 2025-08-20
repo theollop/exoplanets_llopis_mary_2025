@@ -8,6 +8,110 @@ from src.ccf import get_full_ccf_analysis
 from src.utils import clear_gpu_memory
 
 
+def compute_ccf_proxies_from_arrays(
+    spectra: np.ndarray,
+    wavegrid: np.ndarray,
+    batch_size: int = 128,
+    v_grid_range=(-20000, 20000),
+    v_grid_step=250,
+    window_size_velocity=820.0,
+    mask_type: str = "G2",
+    normalize: bool = True,
+    return_raw_ccfs: bool = False,
+    verbose: bool = False,
+):
+    """
+    Calcule les proxies CCF (depth, fwhm, span, rv, ...) sur des tableaux en mémoire.
+
+    Args:
+        spectra: (N, P) spectres normalisés
+        wavegrid: (P,) grille de longueurs d'onde
+        batch_size: taille de lot pour traiter les spectres
+        v_grid_range: (min,max) en m/s
+        v_grid_step: pas en m/s
+        window_size_velocity: fenêtre de filtrage en m/s
+        mask_type: type de masque (ex: 'G2')
+        normalize: normaliser la CCF
+        return_raw_ccfs: si True, renvoie aussi la matrice des CCF brutes (concaténée)
+
+    Returns:
+        dict avec clés: 'rvs','depths','fwhms','spans','continuum','amplitude','v_grid','wavegrid'
+        et optionnellement 'raw_ccfs'
+    """
+    assert spectra.ndim == 2 and wavegrid.ndim == 1
+
+    v_grid = np.arange(v_grid_range[0], v_grid_range[1] + v_grid_step, v_grid_step)
+
+    N = spectra.shape[0]
+    all_rvs, all_depths, all_fwhms, all_spans = [], [], [], []
+    all_continuum, all_amplitude = [], []
+    raw_list = [] if return_raw_ccfs else None
+
+    for start in range(0, N, batch_size):
+        if verbose:
+            print(
+                f"Processing batch {start // batch_size + 1}/{(N + batch_size - 1) // batch_size}"
+            )
+        end = min(start + batch_size, N)
+        batch_spectra = spectra[start:end]
+
+        if return_raw_ccfs:
+            ccf_results, raw_ccfs = get_full_ccf_analysis(
+                spectra=batch_spectra,
+                wavegrid=wavegrid,
+                v_grid=v_grid,
+                window_size_velocity=window_size_velocity,
+                mask_type=mask_type,
+                verbose=False,
+                batch_size=batch_size,
+                normalize=normalize,
+                return_raw_ccfs=True,
+            )
+        else:
+            ccf_results = get_full_ccf_analysis(
+                spectra=batch_spectra,
+                wavegrid=wavegrid,
+                v_grid=v_grid,
+                window_size_velocity=window_size_velocity,
+                mask_type=mask_type,
+                verbose=False,
+                batch_size=batch_size,
+                normalize=normalize,
+                return_raw_ccfs=False,
+            )
+            raw_ccfs = None
+
+        all_rvs.extend(ccf_results["rv"])  # list-like
+        all_depths.extend(ccf_results["depth"])  # list-like
+        all_fwhms.extend(ccf_results["fwhm"])  # list-like
+        all_spans.extend(ccf_results["span"])  # list-like
+        all_continuum.extend(ccf_results["continuum"])  # list-like
+        all_amplitude.extend(ccf_results["amplitude"])  # list-like
+        if return_raw_ccfs and raw_ccfs is not None:
+            raw_list.append(raw_ccfs)
+
+        # Nettoyage
+        if return_raw_ccfs and raw_ccfs is not None:
+            del raw_ccfs
+        del batch_spectra
+        clear_gpu_memory()
+        gc.collect()
+
+    out = {
+        "rvs": np.asarray(all_rvs),
+        "depths": np.asarray(all_depths),
+        "fwhms": np.asarray(all_fwhms),
+        "spans": np.asarray(all_spans),
+        "continuum": np.asarray(all_continuum),
+        "amplitude": np.asarray(all_amplitude),
+        "v_grid": v_grid,
+        "wavegrid": wavegrid,
+    }
+    if return_raw_ccfs and raw_list:
+        out["raw_ccfs"] = np.vstack(raw_list)
+    return out
+
+
 def process_spectra_batch_ccf(
     spectra_filepath="data/soap_gpu_paper/spec_cube_tot_filtered_normalized_float32.h5",
     wavegrid_filepath="data/soap_gpu_paper/wavegrid.npy",
@@ -18,8 +122,8 @@ def process_spectra_batch_ccf(
     window_size_velocity=820.0,
     mask_type="G2",
     use_rassine=True,
-    wavemin=4500,
-    wavemax=6000,
+    wavemin=None,
+    wavemax=None,
 ):
     # Chargement du template et wavegrid
     wavegrid_full = np.load(wavegrid_filepath)
