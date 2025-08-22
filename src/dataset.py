@@ -118,8 +118,20 @@ class SpectrumDataset(Dataset):
 
         # Optionnel: override des weights_fid par un masque basé sur les raies
         if mask_weights_fid is not None:
-            self._override_weights_fid(mask_weights_fid)
-            self.metadata["mask_weights_fid"] = mask_weights_fid
+            # Only perform override when explicitly requested:
+            # - bool True means use default mask ("G2")
+            # - str indicates mask_type
+            # - ndarray / torch.Tensor indicates explicit weights vector
+            if isinstance(mask_weights_fid, (bool, np.bool_)):
+                if mask_weights_fid:
+                    self._override_weights_fid(mask_weights_fid)
+                    self.metadata["mask_weights_fid"] = True
+            elif isinstance(mask_weights_fid, str) or isinstance(
+                mask_weights_fid, (np.ndarray, torch.Tensor)
+            ):
+                self._override_weights_fid(mask_weights_fid)
+                self.metadata["mask_weights_fid"] = mask_weights_fid
+            # Otherwise (e.g. False), do nothing
 
         if cuda and torch.cuda.is_available():
             self.move_to_cuda()
