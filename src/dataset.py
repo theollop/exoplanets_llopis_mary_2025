@@ -5,6 +5,7 @@ from torch.utils.data import Dataset
 from typing import Optional, Union
 from src.interpolate import augment_spectra_uniform
 from src.utils import get_mask
+from src.ccf import build_CCF_masks_sparse
 
 ##############################################################################
 ##############################################################################
@@ -212,46 +213,87 @@ class SpectrumDataset(Dataset):
             )
 
     # --------- helpers masque de raies / weights_fid ----------
-    def _build_binary_line_mask(self, mask_type: str = "G2") -> torch.Tensor:
-        """Construit un masque binaire 1D (longueur = n_pixels) qui met 1 aux
-        positions les plus proches des raies du masque choisi, 0 ailleurs.
+    def _build_binary_line_mask(
+        self, mask_type: str = "G2", window_size_velocity: float = None
+    ) -> torch.Tensor:
+        """Construit un masque binaire 1D (longueur = n_pixels) qui met 1
+        pour les pixels se trouvant dans une fenêtre autour de chaque raie.
 
-        Notes:
-        - Utilise src.utils.get_mask(mask_type) qui renvoie un tableau [N_lines, 2]
-          (positions, poids). On ne garde que les positions.
-        - On matche chaque raie à l'indice de pixel le plus proche sur `wavegrid`.
-        - Les raies hors des bornes de la grille sont ignorées.
+        La fenêtre est définie en m/s (window_size_velocity) et convertie en
+        étendue en longueur d'onde via sigma = lam0 * (window_size_velocity / c).
+        On prend le support ±4*sigma (comme dans build_CCF_masks_sparse).
+
+        Args:
+            mask_type: nom du masque (ex: "G2").
+            window_size_velocity: sigma en m/s; si None, on lit
+                self.metadata['mask_window_velocity'] ou 410.0 par défaut.
         """
         # Prépare wavegrid côté CPU pour le matching numpy, garde dtype conforme
         wavegrid_t = self.wavegrid
         wavegrid_np = wavegrid_t.detach().cpu().numpy()
         P = wavegrid_np.shape[0]
 
+        # window en m/s
+        if window_size_velocity is None:
+            window_size_velocity = float(
+                self.metadata.get("mask_window_velocity", 820.0)
+            )
+
+        c = 299792458.0
+
         mask_arr = get_mask(mask_type)
         line_pos = mask_arr[:, 0].astype(wavegrid_np.dtype, copy=False)
 
-        # Filtrer les raies dans les bornes de la grille
-        in_bounds = (line_pos >= wavegrid_np[0]) & (line_pos <= wavegrid_np[-1])
+        # Filtrer les raies dans les bornes de la grille (au moins partiellement)
+        in_bounds = (line_pos + 0 >= wavegrid_np[0]) & (line_pos <= wavegrid_np[-1])
         line_pos = line_pos[in_bounds]
         if line_pos.size == 0:
             # Aucun recouvrement -> retourne tout à zéro
             zeros = torch.zeros(P, dtype=self.data_dtype, device=wavegrid_t.device)
             return zeros
 
-        idx = np.searchsorted(wavegrid_np, line_pos)
-        # clip pour comparer left/right sans sortir du range
-        idx = np.clip(idx, 1, P - 1)
-        left_dist = np.abs(line_pos - wavegrid_np[idx - 1])
-        right_dist = np.abs(wavegrid_np[idx] - line_pos)
-        nearest = np.where(right_dist < left_dist, idx, idx - 1)
+        # Construire le masque en utilisant la même logique que build_CCF_masks_sparse
+        # On récupère les positions et poids depuis le fichier de masque
+        line_weights = mask_arr[:, 1]
 
-        weights_np = np.zeros(
-            P, dtype=np.float32 if self.data_dtype == torch.float32 else np.float64
+        # build_CCF_masks_sparse attend des numpy arrays
+        try:
+            CCF_mask = build_CCF_masks_sparse(
+                line_pos=line_pos,
+                line_weights=line_weights,
+                v_grid=np.array([0.0], dtype=float),
+                wavegrid=wavegrid_np,
+                window_size_velocity=float(window_size_velocity),
+            )
+        except Exception:
+            print("Erreur lors de la construction du masque CCF")
+            # En cas d'échec (sécurité), retomber sur le masque simple ±4σ
+            weights_np = np.zeros(
+                P, dtype=np.float32 if self.data_dtype == torch.float32 else np.float64
+            )
+            for lam0 in line_pos:
+                sigma = lam0 * (window_size_velocity / c)
+                start = lam0 - 4.0 * sigma
+                end = lam0 + 4.0 * sigma
+                i0 = int(np.searchsorted(wavegrid_np, start))
+                i1 = int(np.searchsorted(wavegrid_np, end))
+                if i0 < 0:
+                    i0 = 0
+                if i1 >= P:
+                    i1 = P - 1
+                if i1 >= i0:
+                    weights_np[i0 : i1 + 1] = 1.0
+            weights_t = torch.from_numpy(weights_np).to(
+                dtype=self.data_dtype, device=wavegrid_t.device
+            )
+            return weights_t.contiguous()
+
+        # CCF_mask est CSR shape (1, P). Convertir en tableau et rendre binaire (>0)
+        mask_arr_1d = CCF_mask.toarray().ravel()
+        bin_np = (mask_arr_1d > 0).astype(
+            np.float32 if self.data_dtype == torch.float32 else np.float64
         )
-        if nearest.size > 0:
-            weights_np[nearest] = 1.0
-
-        weights_t = torch.from_numpy(weights_np).to(
+        weights_t = torch.from_numpy(bin_np).to(
             dtype=self.data_dtype, device=wavegrid_t.device
         )
         return weights_t.contiguous()
