@@ -1305,6 +1305,7 @@ def main(
     try:
         # Contrôle CPU/GPU pour le dataset via la config
         dataset_cuda = bool(config.get("dataset_cuda", False))
+        console.log(f"📊 mask_weights_fid: {config.get('mask_weights_fid', False)}")
         dataset = SpectrumDataset(
             dataset_filepath=config.get(
                 "dataset_filepath",
@@ -1317,7 +1318,6 @@ def main(
         console.log(
             f"✅ Dataset créé avec succès (device={'GPU' if dataset_cuda and torch.cuda.is_available() else 'CPU'})"
         )
-        console.log(f"📊 mask_weights_fid: {config.get('mask_weights_fid', False)}")
     except Exception as e:
         console.log(f"❌ Erreur lors de la création du dataset: {e}")
         raise
