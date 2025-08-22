@@ -126,7 +126,7 @@ plot_rv_every: 50          # Plot des RV
 # --------------------------------------------------------------------------
 phases:
   - name: rvonly
-    n_epochs: 0
+    n_epochs: 50
     trainable_params:
       b_obs: false
       b_rest: false
