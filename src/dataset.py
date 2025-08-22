@@ -2,7 +2,9 @@ import os
 import numpy as np
 import torch
 from torch.utils.data import Dataset
+from typing import Optional, Union
 from src.interpolate import augment_spectra_uniform
+from src.utils import get_mask
 
 ##############################################################################
 ##############################################################################
@@ -100,6 +102,7 @@ class SpectrumDataset(Dataset):
         split: str = "all",  # ignoré, conservé pour compatibilité API
         data_dtype: torch.dtype = torch.float32,
         cuda: bool = True,
+        mask_weights_fid: Optional[Union[bool, str, np.ndarray, torch.Tensor]] = None,
     ):
         if not dataset_filepath.endswith(".npz"):
             raise ValueError("dataset_filepath doit pointer vers un fichier .npz")
@@ -111,6 +114,11 @@ class SpectrumDataset(Dataset):
         self.data_dtype = data_dtype
 
         self._init_from_npz(dataset_filepath, data_dtype)
+
+        # Optionnel: override des weights_fid par un masque basé sur les raies
+        if mask_weights_fid is not None:
+            self._override_weights_fid(mask_weights_fid)
+            self.metadata["mask_weights_fid"] = mask_weights_fid
 
         if cuda and torch.cuda.is_available():
             self.move_to_cuda()
@@ -148,10 +156,7 @@ class SpectrumDataset(Dataset):
         spectra_no_activity_np = pick("spectra_no_activity")
         v_true_np = pick("v_true")
         weights_fid_np = pick("weights_fid")
-        activity_proxies_np = pick("activity_proxies")
         activity_proxies_norm_np = pick("activity_proxies_norm")
-        activity_proxies_med_np = pick("activity_proxies_med")
-        activity_proxies_mad_np = pick("activity_proxies_mad")
 
         # Fallback v_true si absent -> sinus de metadata
         if v_true_np is None:
@@ -206,6 +211,85 @@ class SpectrumDataset(Dataset):
                 "spectra_no_activity et spectra doivent avoir la même forme"
             )
 
+    # --------- helpers masque de raies / weights_fid ----------
+    def _build_binary_line_mask(self, mask_type: str = "G2") -> torch.Tensor:
+        """Construit un masque binaire 1D (longueur = n_pixels) qui met 1 aux
+        positions les plus proches des raies du masque choisi, 0 ailleurs.
+
+        Notes:
+        - Utilise src.utils.get_mask(mask_type) qui renvoie un tableau [N_lines, 2]
+          (positions, poids). On ne garde que les positions.
+        - On matche chaque raie à l'indice de pixel le plus proche sur `wavegrid`.
+        - Les raies hors des bornes de la grille sont ignorées.
+        """
+        # Prépare wavegrid côté CPU pour le matching numpy, garde dtype conforme
+        wavegrid_t = self.wavegrid
+        wavegrid_np = wavegrid_t.detach().cpu().numpy()
+        P = wavegrid_np.shape[0]
+
+        mask_arr = get_mask(mask_type)
+        line_pos = mask_arr[:, 0].astype(wavegrid_np.dtype, copy=False)
+
+        # Filtrer les raies dans les bornes de la grille
+        in_bounds = (line_pos >= wavegrid_np[0]) & (line_pos <= wavegrid_np[-1])
+        line_pos = line_pos[in_bounds]
+        if line_pos.size == 0:
+            # Aucun recouvrement -> retourne tout à zéro
+            zeros = torch.zeros(P, dtype=self.data_dtype, device=wavegrid_t.device)
+            return zeros
+
+        idx = np.searchsorted(wavegrid_np, line_pos)
+        # clip pour comparer left/right sans sortir du range
+        idx = np.clip(idx, 1, P - 1)
+        left_dist = np.abs(line_pos - wavegrid_np[idx - 1])
+        right_dist = np.abs(wavegrid_np[idx] - line_pos)
+        nearest = np.where(right_dist < left_dist, idx, idx - 1)
+
+        weights_np = np.zeros(
+            P, dtype=np.float32 if self.data_dtype == torch.float32 else np.float64
+        )
+        if nearest.size > 0:
+            weights_np[nearest] = 1.0
+
+        weights_t = torch.from_numpy(weights_np).to(
+            dtype=self.data_dtype, device=wavegrid_t.device
+        )
+        return weights_t.contiguous()
+
+    def _override_weights_fid(
+        self, mask_weights_fid: Union[bool, str, np.ndarray, torch.Tensor]
+    ) -> None:
+        """Override `self.weights_fid`.
+
+        Règles:
+        - Si mask_weights_fid est un np.ndarray/torch.Tensor de longueur n_pixels:
+          on l'utilise directement (cast vers dtype du dataset).
+        - Si mask_weights_fid est True: on construit un masque binaire avec type "G2".
+        - Si mask_weights_fid est une str: on l'utilise comme mask_type pour get_mask.
+        """
+        # Cas tableau explicite
+        if isinstance(mask_weights_fid, (np.ndarray, torch.Tensor)):
+            t = _to_tensor(mask_weights_fid, self.data_dtype)
+            if t.dim() != 1 or t.shape[0] != self.n_pixels:
+                raise ValueError(
+                    "mask_weights_fid fourni doit être 1D et de même longueur que wavegrid"
+                )
+            # Conserver device de wavegrid
+            self.weights_fid = t.to(device=self.wavegrid.device).contiguous()
+            return
+
+        # Cas bool/str -> construire masque binaire
+        if mask_weights_fid is True:
+            mask_type = "G2"
+        elif isinstance(mask_weights_fid, str):
+            mask_type = mask_weights_fid
+        else:
+            raise ValueError(
+                "mask_weights_fid doit être un bool, une str (mask_type) ou un vecteur 1D"
+            )
+
+        self.weights_fid = self._build_binary_line_mask(mask_type=mask_type)
+
     # --------- API Dataset ----------
     def __len__(self):
         return self.n_spectra
@@ -225,6 +309,7 @@ class SpectrumDataset(Dataset):
             + mb(self.wavegrid)
             + mb(self.template)
             + mb(self.time_values)
+            + mb(getattr(self, "weights_fid", None))
         )
 
     def move_to_cuda(self):
@@ -238,6 +323,7 @@ class SpectrumDataset(Dataset):
                 "spectra_no_activity",
                 "activity_proxies_norm",
                 "v_true",
+                "weights_fid",
             ]:
                 t = getattr(self, name, None)
                 if t is not None:
@@ -258,6 +344,7 @@ class SpectrumDataset(Dataset):
             "activity",
             "spectra_no_activity",
             "v_true",
+            "weights_fid",
         ]:
             cast(k)
         self.data_dtype = new_dtype

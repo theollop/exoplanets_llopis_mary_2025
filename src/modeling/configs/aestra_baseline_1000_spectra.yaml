@@ -69,8 +69,9 @@ cycle_length: 1000        # Nombre d’itérations pour un cycle de régularisat
 consistency_mode: "mse"   # Mode de perte de consistance ("mse" ou "sigmoid")
 sigma_s: 0.3              # Poids dans la loss de consistency 
 
-# Fiducial loss
+# Fidelity loss
 sigma_l: 1.0
+mask_weights_fid: true    # Permet d'appliquer un masque lors de la loss de reconstruction sur les spectres (sélectionne que les raies)
 
 # Corrélation loss
 sigma_corr: 0.0           # Attention : nécessite get_aug_data == true !!!
@@ -125,7 +126,7 @@ plot_rv_every: 50          # Plot des RV
 # --------------------------------------------------------------------------
 phases:
   - name: rvonly
-    n_epochs: 50
+    n_epochs: 0
     trainable_params:
       b_obs: false
       b_rest: false

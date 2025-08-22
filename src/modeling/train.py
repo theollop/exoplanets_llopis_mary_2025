@@ -1312,10 +1312,12 @@ def main(
             ),
             data_dtype=getattr(torch, config.get("data_dtype", "float32")),
             cuda=dataset_cuda,
+            mask_weights_fid=config.get("mask_weights_fid", False),
         )
         console.log(
             f"✅ Dataset créé avec succès (device={'GPU' if dataset_cuda and torch.cuda.is_available() else 'CPU'})"
         )
+        console.log(f"📊 mask_weights_fid: {config.get('mask_weights_fid', False)}")
     except Exception as e:
         console.log(f"❌ Erreur lors de la création du dataset: {e}")
         raise
@@ -1565,7 +1567,7 @@ def main(
 
 if __name__ == "__main__":
     main(
-        config_path="src/modeling/configs/aestra_config_cubic.yaml",
-        dataset_filepath="data/npz_datasets/soapgpu_ns3292_5000-5050_p100_k1_phi0_cubic.npz",
+        config_path="src/modeling/configs/aestra_baseline_1000_spectra.yaml",
+        dataset_filepath="data/npz_datasets/soapgpu_ns1000_5000-5050_p100_k0p3_phi0_cubic.npz",
         output_root_dir="experiments",
     )
