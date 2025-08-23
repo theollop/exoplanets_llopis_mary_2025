@@ -38,7 +38,7 @@ vmax: +10                  # Vitesse max (m/s)
 interpolate: "linear"     # Méthode d'interpolation
 extrapolate: "linear"     # Méthode d'extrapolation hors bornes
 out_dtype: float32        # Type de sortie des spectres augmentés (float16 économise ~50% mémoire GPU)
-get_aug_data: true        # Si true, calcule les latents des spectres augmentés (loss de consistency)
+get_aug_data: false        # Si true, calcule les latents des spectres augmentés (loss de consistency)
 
 
 # --------------------------------------------------------------------------
@@ -126,7 +126,7 @@ plot_rv_every: 50          # Plot des RV
 # --------------------------------------------------------------------------
 phases:
   - name: rvonly
-    n_epochs: 70
+    n_epochs: 100
     trainable_params:
       b_obs: false
       b_rest: false
@@ -139,7 +139,7 @@ phases:
       weight_decay: 0.0
 
   - name: joint
-    n_epochs: 100
+    n_epochs: 200
     trainable_params:
       b_obs: false
       b_rest: true
@@ -151,11 +151,11 @@ phases:
       lr: 0.0001
       weight_decay: 0.0
 
-    scheduler: torch.optim.lr_scheduler.StepLR
-    scheduler_kwargs:
-      gamma: 0.7
-      step_size: 50
+    # scheduler: torch.optim.lr_scheduler.StepLR
+    # scheduler_kwargs:
+    #   gamma: 0.7
+    #   step_size: 50
 
-    plot_activity_every: 10
-    plot_latent_distance_every: 10
-    plot_latent_space_every: 10
+    plot_activity_every: 20
+    plot_latent_distance_every: 20
+    plot_latent_space_every: 20
