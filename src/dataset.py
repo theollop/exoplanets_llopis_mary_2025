@@ -166,6 +166,7 @@ class SpectrumDataset(Dataset):
             raise KeyError("Clé 'time_values' manquante dans le npz.")
 
         activity_np = pick("activity")
+        activity_noised_np = pick("activity_noised")
         spectra_no_activity_np = pick("spectra_no_activity")
         v_true_np = pick("v_true")
         weights_fid_np = pick("weights_fid")
@@ -196,6 +197,7 @@ class SpectrumDataset(Dataset):
         self.planet_phases = self.metadata.get("planets_phases", [])
         self.time_values = _to_tensor(time_values_np, data_dtype)
         self.activity = _to_tensor(activity_np, data_dtype)
+        self.activity_noised = _to_tensor(activity_noised_np, data_dtype)
         self.spectra_no_activity = _to_tensor(spectra_no_activity_np, data_dtype)
         self.v_true = _to_tensor(v_true_np, data_dtype)
         self.weights_fid = _to_tensor(weights_fid_np, data_dtype)
@@ -218,6 +220,10 @@ class SpectrumDataset(Dataset):
         if self.activity is not None:
             assert self.activity.shape == self.spectra.shape, (
                 "activity et spectra doivent avoir la même forme"
+            )
+        if self.activity_noised is not None:
+            assert self.activity_noised.shape == self.spectra.shape, (
+                "activity_noised et spectra doivent avoir la même forme"
             )
         if self.spectra_no_activity is not None:
             assert self.spectra_no_activity.shape == self.spectra.shape, (
@@ -363,6 +369,8 @@ class SpectrumDataset(Dataset):
             + mb(self.wavegrid)
             + mb(self.template)
             + mb(self.time_values)
+            + mb(getattr(self, "activity", None))
+            + mb(getattr(self, "activity_noised", None))
             + mb(getattr(self, "weights_fid", None))
         )
 
@@ -374,6 +382,7 @@ class SpectrumDataset(Dataset):
                 "template",
                 "time_values",
                 "activity",
+                "activity_noised",
                 "spectra_no_activity",
                 "activity_proxies_norm",
                 "v_true",
@@ -396,6 +405,7 @@ class SpectrumDataset(Dataset):
             "template",
             "time_values",
             "activity",
+            "activity_noised",
             "spectra_no_activity",
             "v_true",
             "weights_fid",
@@ -418,6 +428,7 @@ class SpectrumDataset(Dataset):
             f"spectra={shape_dtype(self.spectra)}\n"
             f"spectra_no_activity={shape_dtype(self.spectra_no_activity)}\n"
             f"activity={shape_dtype(self.activity)}\n"
+            f"activity_noised={shape_dtype(self.activity_noised)}\n"
             f"wavegrid={shape_dtype(self.wavegrid)}\n"
             f"template={shape_dtype(self.template)}\n"
             f"time_values={shape_dtype(self.time_values)}\n"
@@ -562,6 +573,14 @@ def generate_collate_fn(
             MB,
             batch_device,
         )
+        batch_yact_noised = _take_opt(
+            dataset,
+            "activity_noised",
+            True,
+            batch_indices,
+            MB,
+            batch_device,
+        )
         batch_activity_proxies_norm = _take_opt(
             dataset,
             "activity_proxies_norm",
@@ -579,6 +598,7 @@ def generate_collate_fn(
             batch_weights_fid,  # [M*B, ...] ou None
             batch_indices,  # [M*B]
             batch_yact_true,  # [M*B, n_pix] ou None
+            batch_yact_noised,  # [M*B, n_pix] ou None
             batch_activity_proxies_norm,  # [M*B, P] ou None
         )
 
