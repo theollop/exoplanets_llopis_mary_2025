@@ -532,6 +532,7 @@ class AESTRA(nn.Module):
             batch_indices,
             batch_yact_true,
             batch_activity_proxies_norm,
+            batch_yact_noised,
         ) = batch
 
         device, dtype = batch_yobs.device, batch_yobs.dtype

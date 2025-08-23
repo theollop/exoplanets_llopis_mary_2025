@@ -347,6 +347,7 @@ def plot_aestra_analysis(
         batch_indices,
         batch_yact_true,
         batch_activity_proxies_norm,
+        batch_yact_noised,
     ) = batch
     batch_size = batch_yobs.shape[0]
 
@@ -1078,6 +1079,7 @@ def plot_activity(
         batch_indices,
         batch_yact_true,
         batch_activity_proxies_norm,
+        batch_yact_noised,
     ) = batch
 
     # Prefer using batch_yact_true supplied in the batch; otherwise fallback to dataset.activity

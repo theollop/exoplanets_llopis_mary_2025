@@ -1568,6 +1568,7 @@ def main(
 if __name__ == "__main__":
     main(
         config_path="src/modeling/configs/aestra_baseline_1000_spectra.yaml",
-        dataset_filepath="data/npz_datasets/soapgpu_ns1000_5000-5050_p100_k0p3_phi0_cubic.npz",
+        dataset_filepath="data/npz_datasets/soapgpu_ns1275_5000-5050_harps-noise-2_p100_k1_phi0.npz",
         output_root_dir="experiments",
+        experiment_name="aestra_baseline",
     )
