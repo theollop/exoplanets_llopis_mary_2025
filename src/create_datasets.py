@@ -46,6 +46,9 @@ class NoiseParams:
     add_photon_noise: bool = False
     snr_target: Optional[float] = None
     seed: Optional[int] = None
+    use_realistic_harps_noise: bool = False
+    harps_material_path: Optional[str] = None
+    snr_scaling: float = 1.0
 
 
 # ============================================================
@@ -86,7 +89,9 @@ def auto_filename(
         bits.append(f"dx{prep.downscaling_factor}")
     if prep.smooth_after_downscaling:
         bits.append(f"sm{prep.smooth_kernel_size}")
-    if noise.add_photon_noise:
+    if noise.use_realistic_harps_noise:
+        bits.append(f"harps-noise-{_fmt_num(noise.snr_scaling)}")
+    elif noise.add_photon_noise:
         bits.append(
             "noise" if noise.snr_target is None else f"snr{_fmt_num(noise.snr_target)}"
         )
@@ -216,6 +221,179 @@ def add_photon_noise_batch(
     weights_X = np.empty_like(X, dtype=float)
     for i in range(N):
         noisy_X[i], weights_X[i] = _add_photon_noise(X[i], snr_target)
+    return noisy_X, weights_X
+
+
+def load_harps_snr_profile(
+    material_pkl_path: str = "/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/rv_datachallenge/Sun_B57001_E61001_planet-FallChallenge1/HARPN/STAR1136_HPN_Analyse_material.p",
+    target_wavegrid: Optional[np.ndarray] = None,
+    target_wavemin: float = 5000,
+    target_wavemax: float = 5050,
+) -> Tuple[np.ndarray, np.ndarray, float]:
+    """
+    Charge le profil SNR réaliste HARPS du RV Data Challenge et l'interpole
+    sur la grille spectrale cible.
+
+    Returns:
+        snr_profile: Profil SNR interpolé sur target_wavegrid
+        reference_flux: Flux de référence interpolé
+        ratio_factor: Facteur de ratio SNR appliqué
+    """
+    import pickle
+    from scipy import interpolate
+
+    # Charger les données HARPS
+    with open(material_pkl_path, "rb") as f:
+        material = pickle.load(f)
+
+    # Extraire les données nécessaires
+    harps_wave = material["wave"].to_numpy()
+    harps_snr = material["master_snr_curve"]
+
+    if "stellar_template" in material:
+        harps_flux = material["stellar_template"]
+    elif "reference_spectrum" in material:
+        harps_flux = material["reference_spectrum"]
+    else:
+        raise ValueError("Aucun template/référence trouvé dans les données HARPS")
+
+    # Facteur de ratio
+    ratio_factor = 1.0
+    if "ratio_factor_snr" in material and material["ratio_factor_snr"] is not None:
+        rf = material["ratio_factor_snr"]
+        if hasattr(rf, "iloc"):
+            ratio_factor = float(rf.iloc[0])
+        elif hasattr(rf, "__len__") and len(rf) == 1:
+            ratio_factor = float(rf[0])
+        else:
+            ratio_factor = float(rf)
+
+    # Appliquer le facteur de ratio
+    effective_snr = harps_snr * ratio_factor
+
+    # Créer la grille cible si non fournie
+    if target_wavegrid is None:
+        mask_harps = (harps_wave >= target_wavemin) & (harps_wave <= target_wavemax)
+        target_wavegrid = harps_wave[mask_harps]
+        target_snr = effective_snr[mask_harps]
+        target_flux = harps_flux[mask_harps]
+    else:
+        # Interpoler sur la grille cible
+        interp_snr = interpolate.interp1d(
+            harps_wave,
+            effective_snr,
+            kind="linear",
+            bounds_error=False,
+            fill_value="extrapolate",
+        )
+        interp_flux = interpolate.interp1d(
+            harps_wave,
+            harps_flux,
+            kind="linear",
+            bounds_error=False,
+            fill_value="extrapolate",
+        )
+
+        target_snr = interp_snr(target_wavegrid)
+        target_flux = interp_flux(target_wavegrid)
+
+    return target_snr, target_flux, ratio_factor
+
+
+def add_realistic_harps_noise_batch(
+    X: np.ndarray,
+    wavegrid: np.ndarray,
+    snr_scaling: float = 1.0,
+    material_pkl_path: Optional[str] = None,
+    seed: Optional[int] = None,
+    min_flux: float = 1e-12,
+    max_weight: float = 1e6,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Ajoute un bruit réaliste basé sur le profil SNR de HARPS du RV Data Challenge.
+
+    Parameters:
+        X: Spectres à bruiter (N, P)
+        wavegrid: Grille de longueurs d'onde (P,)
+        snr_scaling: Facteur d'échelle pour ajuster le niveau de SNR global
+        material_pkl_path: Chemin vers le fichier material HARPS
+        seed: Graine aléatoire
+
+    Returns:
+        noisy_X: Spectres bruités
+        weights_X: Poids correspondants (inverse variance)
+    """
+    if seed is not None:
+        np.random.seed(int(seed))
+
+    # Charger le profil SNR HARPS par défaut si non spécifié
+    if material_pkl_path is None:
+        material_pkl_path = "/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/rv_datachallenge/Sun_B57001_E61001_planet-FallChallenge1/HARPN/STAR1136_HPN_Analyse_material.p"
+
+    # Charger et interpoler le profil SNR HARPS
+    try:
+        snr_profile, reference_flux, ratio_factor = load_harps_snr_profile(
+            material_pkl_path,
+            target_wavegrid=wavegrid,
+            target_wavemin=wavegrid.min(),
+            target_wavemax=wavegrid.max(),
+        )
+
+        # CORRECTION: Normaliser le profil SNR et le mettre à l'échelle cible
+        # Le profil HARPS donne des variations relatives, pas des valeurs absolues
+        target_snr_mean = 200.0  # SNR cible réaliste
+        snr_profile_normalized = (
+            snr_profile / snr_profile.mean()
+        )  # Normaliser autour de 1
+        effective_snr = snr_profile_normalized * target_snr_mean * snr_scaling
+
+        print("📊 Profil SNR HARPS chargé et normalisé")
+        print(
+            f"   SNR HARPS original: [{snr_profile.min():.1f}, {snr_profile.max():.1f}], mean={snr_profile.mean():.1f}"
+        )
+        print(
+            f"   SNR final: [{effective_snr.min():.1f}, {effective_snr.max():.1f}], mean={effective_snr.mean():.1f}"
+        )
+
+    except Exception as e:
+        print(f"⚠️ Erreur chargement profil HARPS: {e}")
+        print("   Utilisation du SNR uniforme par défaut")
+        effective_snr = np.full_like(
+            wavegrid, 200.0 * snr_scaling
+        )  # SNR réaliste par défaut
+
+    N, P = X.shape
+    noisy_X = np.empty_like(X, dtype=float)
+    weights_X = np.empty_like(X, dtype=float)
+
+    for i in range(N):
+        spectrum = np.asarray(X[i], dtype=float)
+        spectrum = np.clip(spectrum, min_flux, None)
+
+        # Pour chaque pixel, calculer le bruit basé sur le SNR local
+        noisy_spectrum = np.empty_like(spectrum)
+        weights_spectrum = np.empty_like(spectrum)
+
+        for j in range(P):
+            flux_j = spectrum[j]
+            snr_j = effective_snr[j]
+
+            # Variance = flux / SNR²
+            variance_j = flux_j / (snr_j * snr_j)
+            sigma_j = np.sqrt(variance_j)
+
+            # Ajouter le bruit gaussien
+            noisy_spectrum[j] = flux_j + np.random.normal(0, sigma_j)
+
+            # Poids = 1 / variance = SNR² / flux
+            weights_spectrum[j] = (snr_j * snr_j) / flux_j if flux_j > min_flux else 0.0
+
+        # Limiter les poids extrêmes
+        weights_spectrum = np.clip(weights_spectrum, 0.0, max_weight)
+
+        noisy_X[i] = noisy_spectrum
+        weights_X[i] = weights_spectrum
+
     return noisy_X, weights_X
 
 
@@ -573,6 +751,9 @@ def create_soap_gpu_paper_dataset(
     add_photon_noise: bool = False,
     snr_target: Optional[float] = None,
     noise_seed: Optional[int] = None,
+    use_realistic_harps_noise: bool = False,
+    harps_material_path: Optional[str] = None,
+    snr_scaling: float = 1.0,
     planets_amplitudes: Optional[Sequence[float]] = None,
     planets_periods: Optional[Sequence[float]] = None,
     planets_phases: Optional[Sequence[float]] = None,
@@ -689,9 +870,36 @@ def create_soap_gpu_paper_dataset(
     activity_ds = compute_activity_pre_noise(spectra_ds, template_ds)
 
     # ---- Noise ----
-    noise = NoiseParams(add_photon_noise, snr_target, noise_seed)
+    noise = NoiseParams(
+        add_photon_noise,
+        snr_target,
+        noise_seed,
+        use_realistic_harps_noise,
+        harps_material_path,
+        snr_scaling,
+    )
     weights_fid = None
-    if noise.add_photon_noise:
+
+    if use_realistic_harps_noise:
+        print("🔊 Bruit réaliste HARPS basé sur le RV Data Challenge...")
+        spectra_ds, weights_fid = add_realistic_harps_noise_batch(
+            spectra_ds,
+            wavegrid_ds,
+            snr_scaling=snr_scaling,
+            material_pkl_path=harps_material_path,
+            seed=noise_seed,
+        )
+        # Optionnel: normaliser les poids pour éviter le déséquilibre
+        if weights_fid is not None:
+            weights_mean = weights_fid.mean()
+            # Option 1: Normalisation
+            # weights_fid = weights_fid / weights_mean
+            # Option 2: Écrêtage (recommandé)
+            weights_fid = np.clip(weights_fid, weights_mean * 0.1, weights_mean * 10)
+            print(
+                f"   Poids écrêtés: range [{weights_fid.min():.3f}, {weights_fid.max():.3f}]"
+            )
+    elif noise.add_photon_noise:
         print("🔊 Bruit photonique...")
         spectra_ds, weights_fid = add_photon_noise_batch(
             spectra_ds, noise.snr_target, noise.seed
@@ -1219,16 +1427,19 @@ if __name__ == "__main__":
         smooth_after_downscaling=False,
         smooth_kernel_size=1,
         add_photon_noise=False,
-        snr_target=300.0,
+        snr_target=200,
         noise_seed=42,
-        planets_amplitudes=[0.3],
-        planets_periods=[100],
-        planets_phases=[0.0],
+        use_realistic_harps_noise=True,
+        harps_material_path="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/rv_datachallenge/Sun_B57000_E61000_planet-FallChallenge3/HARPN/STAR1134_HPN_Analyse_material.p",
+        snr_scaling=1,
+        planets_amplitudes=None,
+        planets_periods=None,
+        planets_phases=None,
         batch_size=100,
         use_rassine=False,
         storage_dtype=np.float32,
         compute_ccf_proxies=True,
-        interpolate_method="cubic",
+        interpolate_method="interpolate",
     )
 
     # create_soap_gpu_paper_dataset(
