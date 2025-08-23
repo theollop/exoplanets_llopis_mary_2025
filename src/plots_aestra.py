@@ -447,6 +447,14 @@ def plot_aestra_analysis(
         else None
     )
 
+    # Debug: vérifier la disponibilité et les caractéristiques de l'activité bruitée
+    if yact_noised is not None:
+        print(
+            f"[DEBUG] Noised activity found: range=[{yact_noised.min():.6f}, {yact_noised.max():.6f}], std={yact_noised.std():.6f}"
+        )
+    else:
+        print("[DEBUG] No noised activity available in dataset")
+
     # Création du plot d'analyse complet
     fig, axes = plt.subplots(4, 2, figsize=(16, 20))
     fig.suptitle(
@@ -523,13 +531,26 @@ def plot_aestra_analysis(
         )
     if yact_noised is not None:
         # Tracer l'activité bruitée (spectre bruité - template)
+        # Vérifier si l'amplitude de l'activité bruitée est beaucoup plus petite
+        yact_scale_factor = 1.0
+        if yact_true is not None:
+            true_rms = np.sqrt(np.mean(yact_true**2))
+            noised_rms = np.sqrt(np.mean(yact_noised**2))
+            if noised_rms > 0 and true_rms / noised_rms > 10:
+                yact_scale_factor = true_rms / noised_rms * 0.5  # Scale pour visibilité
+                print(
+                    f"[DEBUG] Scaling noised activity by {yact_scale_factor:.2f} for visibility"
+                )
+
+        # Améliorer la visibilité avec un style plus distinctif
         axes[1, 1].plot(
             wavegrid,
-            yact_noised,
-            "red",
-            linewidth=1.5,
-            alpha=0.7,
-            label="Noised Activity (obs - template)",
+            yact_noised * yact_scale_factor,
+            color="red",
+            linewidth=2.0,  # Plus épais pour meilleure visibilité
+            alpha=0.8,  # Plus opaque
+            linestyle="-",  # Ligne continue distinctive
+            label=f"Noised Activity {'(x' + f'{yact_scale_factor:.1f})' if yact_scale_factor != 1.0 else ''}",
         )
     axes[1, 1].axhline(y=0, color="k", linestyle="--", alpha=0.5)
     axes[1, 1].set_xlabel("Wavelength (Å)")
@@ -1250,6 +1271,9 @@ def plot_latent_distance_distribution(
     mean_rand = np.mean(delta_s_rand)
     mean_aug = np.mean(delta_s_aug)
 
+    # Calcul de la distance entre les deux espérances de distributions
+    distance_between_means = abs(mean_rand - mean_aug)
+
     # Détermination automatique de la plage des valeurs
     all_values = np.concatenate([delta_s_rand, delta_s_aug])
     min_val = np.min(
@@ -1269,7 +1293,7 @@ def plot_latent_distance_distribution(
         bins=bins,
         alpha=0.7,
         color="blue",
-        label=f"(∆s_rand): {mean_rand:.3e}",
+        label=f"$\\langle\\Delta s_{{\\text{{rand}}}}\\rangle$: {mean_rand:.3e}",
         density=False,
     )
     plt.hist(
@@ -1277,8 +1301,18 @@ def plot_latent_distance_distribution(
         bins=bins,
         alpha=0.7,
         color="red",
-        label=f"(∆s_aug): {mean_aug:.3e}",
+        label=f"$\\langle\\Delta s_{{\\text{{aug}}}}\\rangle$: {mean_aug:.3e}",
         density=False,
+    )
+
+    # Ajouter la distance entre les moyennes dans la légende
+    plt.text(
+        0.02,
+        0.98,
+        f"Distance entre moyennes: {distance_between_means:.3e}",
+        transform=plt.gca().transAxes,
+        verticalalignment="top",
+        bbox=dict(boxstyle="round", facecolor="wheat", alpha=0.8),
     )
 
     # Configuration des axes et labels
