@@ -439,6 +439,13 @@ def plot_aestra_analysis(
         else None
     )
 
+    # Récupérer l'activité bruitée si disponible
+    yact_noised = (
+        dataset.activity_noised[sample_idx].detach().cpu().numpy()
+        if hasattr(dataset, "activity_noised")
+        else None
+    )
+
     # Création du plot d'analyse complet
     fig, axes = plt.subplots(4, 2, figsize=(16, 20))
     fig.suptitle(
@@ -513,6 +520,16 @@ def plot_aestra_analysis(
             alpha=0.6,
             label="True Activity",
         )
+    if yact_noised is not None:
+        # Tracer l'activité bruitée (spectre bruité - template)
+        axes[1, 1].plot(
+            wavegrid,
+            yact_noised,
+            "red",
+            linewidth=1.5,
+            alpha=0.7,
+            label="Noised Activity (obs - template)",
+        )
     axes[1, 1].axhline(y=0, color="k", linestyle="--", alpha=0.5)
     axes[1, 1].set_xlabel("Wavelength (Å)")
     axes[1, 1].set_ylabel("Activity Flux")
@@ -572,6 +589,20 @@ def plot_aestra_analysis(
 
     # Plot 8: Informations sur l'analyse
     axes[3, 1].axis("off")
+
+    # Préparer les informations sur l'activité
+    activity_info = f"• Activity y_act range: [{y_act.min():.3f}, {y_act.max():.3f}]"
+    if yact_true is not None:
+        activity_info += (
+            f"\n• True activity range: [{yact_true.min():.3f}, {yact_true.max():.3f}]"
+        )
+    if yact_noised is not None:
+        activity_info += f"\n• Noised activity range: [{yact_noised.min():.3f}, {yact_noised.max():.3f}]"
+        # Calculer le niveau de bruit dans l'activité
+        if yact_true is not None:
+            noise_rms = np.sqrt(np.mean((yact_noised - yact_true) ** 2))
+            activity_info += f"\n• Activity noise RMS: {noise_rms:.6f}"
+
     info_text = f"""AESTRA Analysis Summary:
     
 • Sample: {sample_idx}/{batch_size - 1}
@@ -584,7 +615,7 @@ def plot_aestra_analysis(
 • s_obs - s_aug difference: {np.mean(np.abs(s_obs - s_aug)):.3E}
 • Template b_obs range: [{model.b_obs.min():.3f}, {model.b_obs.max():.3f}]
 • Template b_rest range: [{b_rest.min():.3f}, {b_rest.max():.3f}]
-• Activity y_act range: [{y_act.min():.3f}, {y_act.max():.3f}]
+{activity_info}
 
 • Reconstruction RMS: {np.sqrt(np.mean(residual**2)):.6f}
 • Wavelength range: {wavegrid.min():.1f} - {wavegrid.max():.1f} Å

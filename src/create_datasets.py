@@ -905,6 +905,17 @@ def create_soap_gpu_paper_dataset(
             spectra_ds, noise.snr_target, noise.seed
         )
 
+    # ---- Activity after noise (bruitée) ----
+    # Calculer l'activité après bruitage : spectra_bruités - template_bruité
+    activity_noised = None
+    if noise.add_photon_noise or use_realistic_harps_noise:
+        # Pour l'activité bruitée, on utilise les spectres bruités moins le template (non bruité)
+        # car le template reste la référence stellaire
+        activity_noised = spectra_ds - template_ds.reshape(1, -1)
+        print(
+            f"📊 Activité bruitée calculée: range [{activity_noised.min():.6f}, {activity_noised.max():.6f}]"
+        )
+
     # ---- Planets injection (optional)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     v_true_tot = np.zeros_like(time_values, dtype=float)
@@ -964,6 +975,9 @@ def create_soap_gpu_paper_dataset(
     # ---- Train/val splits for save
     spectra_out = spectra_ds[:n_spectra]
     activity_out = activity_ds[:n_spectra]
+    activity_noised_out = (
+        activity_noised[:n_spectra] if activity_noised is not None else None
+    )
     v_true_out = v_true_tot[:n_spectra]
 
     # ---- Output filename
@@ -1011,6 +1025,12 @@ def create_soap_gpu_paper_dataset(
         "v_true": v_true_out.astype(storage_dtype, copy=False),
         "metadata": metadata,
     }
+
+    # Ajouter l'activité bruitée si calculée
+    if activity_noised_out is not None:
+        payload["activity_noised"] = activity_noised_out.astype(
+            storage_dtype, copy=False
+        )
     # Optionnel: calculer et joindre les proxies CCF sur le dataset final
     if compute_ccf_proxies:
         print("Calcul des proxies CCF...")
@@ -1432,9 +1452,9 @@ if __name__ == "__main__":
         use_realistic_harps_noise=True,
         harps_material_path="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/rv_datachallenge/Sun_B57000_E61000_planet-FallChallenge3/HARPN/STAR1134_HPN_Analyse_material.p",
         snr_scaling=1,
-        planets_amplitudes=None,
-        planets_periods=None,
-        planets_phases=None,
+        planets_amplitudes=[0.3],
+        planets_periods=[100],
+        planets_phases=[0.0],
         batch_size=100,
         use_rassine=False,
         storage_dtype=np.float32,
