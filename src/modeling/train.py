@@ -995,6 +995,7 @@ def train_phase(
                             indices,
                             yact_true,
                             activity_proxies_norm,
+                            batch_yact_noised,
                         ) = _batch
 
                         # Move to model device for safety
