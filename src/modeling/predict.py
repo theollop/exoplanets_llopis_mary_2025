@@ -670,12 +670,11 @@ def get_vtraditionnal(v_apparent, depth, span, fwhm):
 
 
 def compute_latent_distances(all_s, all_saug, seed=None):
-    """Compute latent distances for random pairs and augmented pairs."""
+    assert all_s.shape == all_saug.shape
+    rng = np.random.default_rng(seed)
     n = all_s.shape[0]
-    if seed is not None:
-        np.random.seed(seed)
-
-    inds = np.array([np.random.choice(n, size=2, replace=False) for _ in range(n)])
+    inds = rng.integers(0, n, size=(n, 2))
+    inds[inds[:, 0] == inds[:, 1], 1] = (inds[inds[:, 0] == inds[:, 1], 1] + 1) % n
     delta_s_rand = np.linalg.norm(all_s[inds[:, 0]] - all_s[inds[:, 1]], axis=1)
     delta_s_aug = np.linalg.norm(all_s - all_saug, axis=1)
     return delta_s_rand, delta_s_aug
@@ -985,8 +984,9 @@ def main(
         # De-trending AESTRA
         v_encode = prediction_results["all_vobs"].astype(np.float32)
         s_latent = prediction_results["all_s"].astype(np.float32)
+        N = v_encode.shape[0]
         v_correct, v0_avg, sigma_R = detrend_vencode_with_latent(
-            v_encode, s_latent, knn=10
+            v_encode, s_latent, knn=max(10, int(0.05 * N))
         )
         if not _exists(detrending_npz_path):
             np.savez(
