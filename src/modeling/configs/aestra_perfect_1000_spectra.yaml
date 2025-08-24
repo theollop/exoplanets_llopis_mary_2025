@@ -19,9 +19,9 @@ move_batches_to_device: true
 non_blocking_transfer: true
 
 # Augmentation (Doppler)
-M_aug: 1
-vmin: -8
-vmax: +8
+M_aug: 3
+vmin: -7
+vmax: +7
 interpolate: "linear"        # (ton code actuel)
 extrapolate: "linear"
 out_dtype: float32
@@ -29,7 +29,7 @@ get_aug_data: true           # pour la consistance latente et métriques
 
 # Modèle
 latent_dim: 3
-encode_in_rest_frame: false   # l’encodeur travaille en repos (Fig. 1 du papier)
+encode_in_rest_frame: false   # entrée de l'encodeur changée (déshifté par v_encode)
 b_obs_init: true_template
 b_rest_init: true_template            # (sera écrasé en mémoire par b_rest_true côté loader)
 b_rest_equal_b_obs: false
@@ -63,7 +63,7 @@ alpha_act: 5.0
 loss_b_rest: false
 beta_brest: 0.0
 
-# Lissage activité (laisse à 0 si tu ne fais pas de post-traitement ici)
+# Loss de lissage d'activité (alpha = 0 si on ne veut pas)
 smooth_alpha: 2
 smooth_order: 2
 
