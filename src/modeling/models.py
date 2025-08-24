@@ -3,7 +3,9 @@ import torch.nn as nn
 from src.interpolate import shift_spectra_linear, shift_spectra_cubic
 import os
 import torch.optim as optim
-from typing import Optional
+from typing import Optional, Tuple
+
+Tensor = torch.Tensor
 
 ##############################################################################
 ##############################################################################
@@ -395,7 +397,7 @@ class AESTRA(nn.Module):
         consistency_mode: str = "mse",
         encode_in_rest_frame: bool = True,
         interp_method: str = "linear",
-        loss_fid_enabled: bool = True,
+        loss_fid_in_rest_frame: bool = False,
     ):
         """
         Args:
@@ -464,7 +466,7 @@ class AESTRA(nn.Module):
         self.rvestimator = self.rvestimator.to(dtype=dtype)
         self.encode_in_rest_frame = encode_in_rest_frame
         self.interp_method = interp_method
-        self.loss_fid_enabled = loss_fid_enabled
+        self.loss_fid_in_rest_frame = loss_fid_in_rest_frame
 
     def set_phase(self, phase: str):
         self.phase = phase
@@ -577,15 +579,15 @@ class AESTRA(nn.Module):
                 batch_activity_proxies_norm=batch_activity_proxies_norm,
                 include_activity_proxies=self.include_activity_proxies,
                 encode_in_rest_frame=self.encode_in_rest_frame,
+                loss_fid_in_rest_frame=self.loss_fid_in_rest_frame
             )
 
-            if self.loss_fid_enabled:
-                losses["fid"] = loss_fid(
-                    batch_yobs_prime=batch_yobs_prime,
-                    batch_yobs=batch_yobs,
-                    batch_weights=batch_weights_fid,
-                    sigma_l=self.sigma_l,
-                )
+            losses["fid"] = loss_fid(
+                batch_yobs_prime=batch_yobs_prime,
+                batch_yobs=batch_yobs,
+                batch_weights=batch_weights_fid,
+                sigma_l=self.sigma_l,
+            )
 
             # Consistency sur les latents (dépend de get_aug_data)
             if get_aug_data and s is not None and s_aug is not None:
@@ -660,98 +662,100 @@ class AESTRA(nn.Module):
 
     def get_spender_pred(
         self,
-        batch_yobs,
-        batch_yaug,
-        batch_wavegrid,
-        batch_vobs_pred,
-        batch_vaug_pred,
-        extrapolate="linear",
-        get_aug_data=True,
-        include_activity_proxies=False,
-        batch_activity_proxies_norm=None,
-        encode_in_rest_frame=True,
-    ):
-        if encode_in_rest_frame:
-            if self.interp_method == "linear":
-                yobs_rest = shift_spectra_linear(
-                    batch_yobs, batch_wavegrid, -batch_vobs_pred, extrapolate
-                )
-            else:
-                yobs_rest = shift_spectra_cubic(
-                    batch_yobs, batch_wavegrid, -batch_vobs_pred, extrapolate
-                )
-            batch_robs = yobs_rest - self.b_obs.unsqueeze(0)
+        batch_yobs: Tensor,
+        batch_yaug: Tensor,
+        batch_wavegrid: Tensor,
+        batch_vobs_pred: Tensor,
+        batch_vaug_pred: Tensor,
+        extrapolate: str = "linear",
+        get_aug_data: bool = True,
+        include_activity_proxies: bool = False,
+        batch_activity_proxies_norm: Optional[Tensor] = None,
+        encode_in_rest_frame: bool = True,
+    ) -> Tuple[Tensor, Tensor, Optional[Tensor], Tensor, Optional[Tensor]]:
+        """
+        Forward 'SPENDER' propre avec gestion unifiée des shifts, proxies, et retour cohérent.
+        Retourne:
+            yobs_prime:  reconstruction dans le cadre observé (ou rest-frame si loss_fid_in_rest_frame)
+            yact:        activité décodée (observations)
+            yact_aug:    activité décodée pour l'augment (optionnel)
+            s:           latents (observations)
+            s_aug:       latents (augment, optionnel)
+        """
+
+        # ------------------------------------------------------------
+        # Sélection unique de la fonction de ré-échantillonnage
+        # ------------------------------------------------------------
+        if self.interp_method == "linear":
+            shift = shift_spectra_linear
         else:
-            batch_robs = batch_yobs - self.b_obs.unsqueeze(0)
+            shift = shift_spectra_cubic
 
-        proxies_obs = None
-        if include_activity_proxies and batch_activity_proxies_norm is not None:
-            if batch_activity_proxies_norm.ndim == 1:
-                proxies_obs = batch_activity_proxies_norm.unsqueeze(0).expand(
-                    batch_robs.size(0), -1
-                )
-            else:
-                proxies_obs = batch_activity_proxies_norm
-            proxies_obs = proxies_obs.to(
-                device=batch_robs.device, dtype=batch_robs.dtype
-            )
+        # ------------------------------------------------------------
+        # Helper: préparation des proxies (broadcast + dtype/device)
+        # ------------------------------------------------------------
+        def _prep_proxies(proxies: Optional[Tensor], target: Tensor) -> Optional[Tensor]:
+            if not include_activity_proxies or proxies is None:
+                return None
+            if proxies.ndim == 1:
+                proxies = proxies.unsqueeze(0).expand(target.size(0), -1)
+            return proxies.to(device=target.device, dtype=target.dtype)
 
-        batch_yact, s = self.spender(batch_robs, proxies=proxies_obs)
+        # ------------------------------------------------------------
+        # Résiduel d'observation (observed ou rest-frame suivant le flag)
+        # ------------------------------------------------------------
+        if encode_in_rest_frame:
+            # Dé-shift vers le repos: -v_pred
+            yobs_rest = shift(batch_yobs, batch_wavegrid, -batch_vobs_pred, extrapolate)
+            robs = yobs_rest - self.b_obs.unsqueeze(0)
+        else:
+            robs = batch_yobs - self.b_obs.unsqueeze(0)
+
+        proxies_obs = _prep_proxies(batch_activity_proxies_norm, robs)
+
+        # ------------------------------------------------------------
+        # Encodage + décodage activité sur les observations
+        # ------------------------------------------------------------
+        yact, s = self.spender(robs, proxies=proxies_obs)
 
         base_rest = self.b_obs if self.b_rest_equal_b_obs else self.b_rest
-        batch_yrest = base_rest.unsqueeze(0) + batch_yact
+        yrest = base_rest.unsqueeze(0) + yact
 
-        if self.interp_method == "linear":
-            batch_yobs_prime = shift_spectra_linear(
-                spectra=batch_yrest,
-                wavegrid=batch_wavegrid,
-                velocities=batch_vobs_pred,
-                extrapolate=extrapolate,
-            )
+        # ------------------------------------------------------------
+        # Reconstruction pour la fidélité
+        # - si on entraîne Lfid en rest-frame: on compare yrest à la cible rest-frame
+        # - sinon: on re-shift vers le cadre observé avec +v_pred
+        # ------------------------------------------------------------
+        if getattr(self, "loss_fid_in_rest_frame", False):
+            yobs_prime = yrest
         else:
-            batch_yobs_prime = shift_spectra_cubic(
-                spectra=batch_yrest,
+            yobs_prime = shift(
+                spectra=yrest,
                 wavegrid=batch_wavegrid,
                 velocities=batch_vobs_pred,
                 extrapolate=extrapolate,
             )
+
+        # ------------------------------------------------------------
+        # Branche "augment" (optionnelle)
+        # ------------------------------------------------------------
+        yact_aug: Optional[Tensor]
+        s_aug: Optional[Tensor]
 
         if get_aug_data:
-            if self.encode_in_rest_frame:
-                if self.interp_method == "linear":
-                    batch_raug = shift_spectra_linear(
-                        spectra=batch_yaug,
-                        wavegrid=batch_wavegrid,
-                        velocities=batch_vaug_pred,
-                        extrapolate=extrapolate,
-                    ) - self.b_obs.unsqueeze(0)
-                else:
-                    batch_raug = shift_spectra_cubic(
-                        spectra=batch_yaug,
-                        wavegrid=batch_wavegrid,
-                        velocities=batch_vaug_pred,
-                        extrapolate=extrapolate,
-                    ) - self.b_obs.unsqueeze(0)
+            if encode_in_rest_frame:
+                # IMPORTANT: pour l'augment en rest-frame, il faut aussi -v_aug_pred
+                yaug_rest = shift(batch_yaug, batch_wavegrid, -batch_vaug_pred, extrapolate)
+                raug = yaug_rest - self.b_obs.unsqueeze(0)
             else:
-                batch_raug = batch_yaug - self.b_obs.unsqueeze(0)
-            proxies_aug = None
-            if include_activity_proxies and batch_activity_proxies_norm is not None:
-                if batch_activity_proxies_norm.ndim == 1:
-                    proxies_aug = batch_activity_proxies_norm.unsqueeze(0).expand(
-                        batch_raug.size(0), -1
-                    )
-                else:
-                    proxies_aug = batch_activity_proxies_norm
-                proxies_aug = proxies_aug.to(
-                    device=batch_raug.device, dtype=batch_raug.dtype
-                )
+                raug = batch_yaug - self.b_obs.unsqueeze(0)
 
-            batch_yact_aug, s_aug = self.spender(batch_raug, proxies=proxies_aug)
+            proxies_aug = _prep_proxies(batch_activity_proxies_norm, raug)
+            yact_aug, s_aug = self.spender(raug, proxies=proxies_aug)
         else:
-            batch_yact_aug, s_aug = None, None
+            yact_aug, s_aug = None, None
 
-        return batch_yobs_prime, batch_yact, batch_yact_aug, s, s_aug
-
+        return yobs_prime, yact, yact_aug, s, s_aug
 
 def loss_rv(batch_voffset_true, batch_voffset_pred, sigma_v=1.0):
     return torch.mean((batch_voffset_true - batch_voffset_pred) ** 2 / (sigma_v**2))

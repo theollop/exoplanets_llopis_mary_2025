@@ -114,7 +114,7 @@ phases:
     optimizer_kwargs:
       lr: 2.0e-4
       weight_decay: 0.0
-    loss_fid_enabled: false
+    loss_fid_in_rest_frame: true
 
   - name: joint
     n_epochs: 140

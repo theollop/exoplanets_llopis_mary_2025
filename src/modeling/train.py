@@ -267,7 +267,7 @@ def load_experiment_checkpoint(path, device="cuda", dataset_filepath=None):
         consistency_mode=config.get("consistency_mode", "mse"),
         encode_in_rest_frame=config.get("encode_in_rest_frame", True),
         interp_method=config.get("interpolate", "linear"),
-        loss_fid_enabled=config.get("loss_fid_enabled", True),
+        loss_fid_in_rest_frame=config.get("loss_fid_in_rest_frame", True),
     )
 
     # Load state dict with compatibility handling
@@ -1564,11 +1564,11 @@ def main(
         if config.get("interpolate", "linear"):
             console.log(f"🔄 interpolate method: {config.get('interpolate')}")
 
-        if config.get("loss_fid_enabled", True):
-            console.log("🔄 loss_fid_enabled is enabled")
+        if config.get("loss_fid_in_rest_frame", True):
+            console.log("🔄 loss_fid_in_rest_frame is enabled")
 
         else:
-            console.log("🔄 loss_fid_enabled is disabled")
+            console.log("🔄 loss_fid_in_rest_frame is disabled")
 
         model = AESTRA(
             n_pixels=dataset.n_pixels,
@@ -1598,7 +1598,7 @@ def main(
             consistency_mode=config.get("consistency_mode", "mse"),
             encode_in_rest_frame=config.get("encode_in_rest_frame", True),
             interp_method=config.get("interpolate", "linear"),
-            loss_fid_enabled=config.get("loss_fid_enabled", True),
+            loss_fid_in_rest_frame=config.get("loss_fid_in_rest_frame", True),
         )
         console.log(
             f"✅ Modèle créé avec succès (include_activity_proxies={model.include_activity_proxies})"
@@ -1628,7 +1628,7 @@ def main(
         # Losses activées
         model_details_table.add_row("📊 Loss B_rest", f"{'✅' if config.get('loss_b_rest', False) else '❌'}")
         model_details_table.add_row("⭐ Loss Activity", f"{'✅' if config.get('loss_activity', False) else '❌'}")
-        model_details_table.add_row("🔍 Loss FID", f"{'✅' if config.get('loss_fid_enabled', True) else '❌'}")
+        model_details_table.add_row("🔍 Loss FID", f"{'✅' if config.get('loss_fid_in_rest_frame', True) else '❌'}")
         
         # Configuration avancée
         smooth_alpha = config.get("smooth_alpha", 0.0)
