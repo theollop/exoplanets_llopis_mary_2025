@@ -395,6 +395,7 @@ class AESTRA(nn.Module):
         consistency_mode: str = "mse",
         encode_in_rest_frame: bool = True,
         interp_method: str = "linear",
+        loss_fid_enabled: bool = True,
     ):
         """
         Args:
@@ -463,6 +464,7 @@ class AESTRA(nn.Module):
         self.rvestimator = self.rvestimator.to(dtype=dtype)
         self.encode_in_rest_frame = encode_in_rest_frame
         self.interp_method = interp_method
+        self.loss_fid_enabled = loss_fid_enabled
 
     def set_phase(self, phase: str):
         self.phase = phase
@@ -577,12 +579,13 @@ class AESTRA(nn.Module):
                 encode_in_rest_frame=self.encode_in_rest_frame,
             )
 
-            losses["fid"] = loss_fid(
-                batch_yobs_prime=batch_yobs_prime,
-                batch_yobs=batch_yobs,
-                batch_weights=batch_weights_fid,
-                sigma_l=self.sigma_l,
-            )
+            if self.loss_fid_enabled:
+                losses["fid"] = loss_fid(
+                    batch_yobs_prime=batch_yobs_prime,
+                    batch_yobs=batch_yobs,
+                    batch_weights=batch_weights_fid,
+                    sigma_l=self.sigma_l,
+                )
 
             # Consistency sur les latents (dépend de get_aug_data)
             if get_aug_data and s is not None and s_aug is not None:
@@ -621,6 +624,7 @@ class AESTRA(nn.Module):
                     batch_yact=batch_yact,
                     batch_yact_true=batch_yact_true,
                     alpha_act=self.alpha_act,
+                    batch_weights_fid=batch_weights_fid,
                 )
 
         # Corrélation latents / RV (optionnelle)
@@ -888,7 +892,7 @@ def corr_loss_pairs(
     return corr_loss_v_vs_S(dv, S, stopgrad_S=stopgrad_S, eps=eps)
 
 
-def loss_activity(batch_yact, batch_yact_true, alpha_act=1.0):
+def loss_activity(batch_yact, batch_yact_true, alpha_act=1.0, batch_weights_fid=None):
     """
     Activity loss: L2 between the original and augmented spectra.
 
@@ -903,7 +907,14 @@ def loss_activity(batch_yact, batch_yact_true, alpha_act=1.0):
     if batch_yact is None or batch_yact_true is None:
         return batch_yact.new_tensor(0.0)
 
-    return alpha_act * torch.mean((batch_yact - batch_yact_true) ** 2)
+    if batch_weights_fid is not None:
+        res = batch_weights_fid * (batch_yact - batch_yact_true) ** 2
+    else:
+        res = (batch_yact - batch_yact_true) ** 2
+
+    loss = alpha_act * torch.mean(res)
+
+    return loss
 
 
 def loss_b_rest(b_rest_true, b_rest_pred, beta_brest=1.0):

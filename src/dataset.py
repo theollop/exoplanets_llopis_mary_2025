@@ -598,8 +598,8 @@ def generate_collate_fn(
             batch_weights_fid,  # [M*B, ...] ou None
             batch_indices,  # [M*B]
             batch_yact_true,  # [M*B, n_pix] ou None
-            batch_yact_noised,  # [M*B, n_pix] ou None
             batch_activity_proxies_norm,  # [M*B, P] ou None
+            batch_yact_noised,  # [M*B, n_pix] ou None
         )
 
     return collate_fn
