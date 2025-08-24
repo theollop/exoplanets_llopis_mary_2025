@@ -105,7 +105,7 @@ phases:
 
 
   - name: joint
-    n_epochs: 200
+    n_epochs: 600
     trainable_params:
       b_obs: false
       b_rest: true       
