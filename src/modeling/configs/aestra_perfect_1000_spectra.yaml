@@ -25,7 +25,7 @@ vmax: +7
 interpolate: "linear"        # (ton code actuel)
 extrapolate: "linear"
 out_dtype: float32
-get_aug_data: true           # pour la consistance latente et métriques
+get_aug_data: false           # pour la consistance latente et métriques
 
 # Modèle
 latent_dim: 3
@@ -115,6 +115,8 @@ phases:
       lr: 2.0e-4
       weight_decay: 0.0
     loss_fid_in_rest_frame: true
+    plot_activity_every: 3
+
 
   - name: joint
     n_epochs: 140

@@ -47,7 +47,6 @@ from src.dataset import SpectrumDataset, generate_collate_fn
 from src.utils import get_class, clear_gpu_memory, get_gpu_memory_info
 from src.plots_aestra import (
     plot_losses,
-    plot_aestra_analysis,
     plot_rv_predictions_dataset,
     plot_activity,
     plot_latent_distance_distribution,
@@ -267,7 +266,7 @@ def load_experiment_checkpoint(path, device="cuda", dataset_filepath=None):
         consistency_mode=config.get("consistency_mode", "mse"),
         encode_in_rest_frame=config.get("encode_in_rest_frame", True),
         interp_method=config.get("interpolate", "linear"),
-        loss_fid_in_rest_frame=config.get("loss_fid_in_rest_frame", True),
+        loss_fid_in_rest_frame=config.get("loss_fid_in_rest_frame", False),
     )
 
     # Load state dict with compatibility handling
@@ -1098,7 +1097,7 @@ def train_phase(
                             batch_vaug_pred=vaug_pred,
                             get_aug_data=True,
                             batch_activity_proxies_norm=activity_proxies_norm,
-                            include_activity_proxies=model.include_activity_proxies,
+                            include_activity_pFroxies=model.include_activity_proxies,
                         )
 
                         all_s_list.append(s.detach().cpu().numpy())
@@ -1173,26 +1172,6 @@ def train_phase(
                     except Exception as e:
                         console.log(f"⚠️  Latent space plotting failed: {e}")
 
-            # Plots de spectres périodiques
-            plot_spectra_every = phase_config.get("plot_spectra_every", 0)
-            if plot_spectra_every > 0 and (epoch + 1) % plot_spectra_every == 0:
-                spectra_plot_dir = (
-                    exp_dirs["spectra_dir"]
-                    if exp_dirs
-                    else phase_config.get("spectra_plot_dir", "reports/spectra")
-                )
-                plot_aestra_analysis(
-                    batch,
-                    dataset,
-                    model,
-                    exp_name,
-                    phase_name,
-                    epoch + 1,
-                    spectra_plot_dir,
-                    zoom_line=True,
-                    data_root_dir=config.get("data_root_dir", "data"),
-                )
-
             # Sauvegarde CSV périodique
             csv_save_every = config.get("csv_save_every", 0)  # Par défaut pas de CSV
             if csv_save_every > 0 and (epoch + 1) % csv_save_every == 0:
@@ -1262,21 +1241,31 @@ def train_phase(
     # Ajouter les métriques finales
     final_epoch = len(losses_history["total"])
     summary_table.add_row("🎯 Epochs complétées", f"{final_epoch}/{n_epochs}", "")
-    summary_table.add_row("📊 Loss totale", f"{losses_history['total'][-1]:.4e}", format_evolution(total_evolution))
-    summary_table.add_row("🎯 Loss RV", f"{losses_history['rv'][-1]:.4e}", format_evolution(rv_evolution))
-    summary_table.add_row("🔍 Loss FID", f"{losses_history['fid'][-1]:.4e}", format_evolution(fid_evolution))
-    summary_table.add_row("⚙️ Loss C", f"{losses_history['c'][-1]:.4e}", "")
-    summary_table.add_row("📏 Loss Reg", f"{losses_history['reg'][-1]:.4e}", "")
+    
+    # Vérifier si on a des losses (au moins 1 epoch exécutée)
+    if final_epoch > 0:
+        summary_table.add_row("📊 Loss totale", f"{losses_history['total'][-1]:.4e}", format_evolution(total_evolution))
+        summary_table.add_row("🎯 Loss RV", f"{losses_history['rv'][-1]:.4e}", format_evolution(rv_evolution))
+        summary_table.add_row("🔍 Loss FID", f"{losses_history['fid'][-1]:.4e}", format_evolution(fid_evolution))
+        summary_table.add_row("⚙️ Loss C", f"{losses_history['c'][-1]:.4e}", "")
+        summary_table.add_row("📏 Loss Reg", f"{losses_history['reg'][-1]:.4e}", "")
+    else:
+        summary_table.add_row("📊 Loss totale", "N/A (0 epochs)", "")
+        summary_table.add_row("🎯 Loss RV", "N/A (0 epochs)", "")
+        summary_table.add_row("🔍 Loss FID", "N/A (0 epochs)", "")
+        summary_table.add_row("⚙️ Loss C", "N/A (0 epochs)", "")
+        summary_table.add_row("📏 Loss Reg", "N/A (0 epochs)", "")
     
     # Ajouter les losses optionnelles si elles existent et sont > 0
-    if losses_history.get("smooth") and losses_history["smooth"][-1] > 0:
-        summary_table.add_row("🌊 Loss Smooth", f"{losses_history['smooth'][-1]:.4e}", "")
-    if losses_history.get("template") and losses_history["template"][-1] > 0:
-        summary_table.add_row("📋 Loss Template", f"{losses_history['template'][-1]:.4e}", "")
-    if losses_history.get("activity") and losses_history["activity"][-1] > 0:
-        summary_table.add_row("⭐ Loss Activity", f"{losses_history['activity'][-1]:.4e}", "")
-    if losses_history.get("corr") and losses_history["corr"][-1] > 0:
-        summary_table.add_row("🔗 Loss Corr", f"{losses_history['corr'][-1]:.4e}", "")
+    if final_epoch > 0:
+        if losses_history.get("smooth") and losses_history["smooth"][-1] > 0:
+            summary_table.add_row("🌊 Loss Smooth", f"{losses_history['smooth'][-1]:.4e}", "")
+        if losses_history.get("template") and losses_history["template"][-1] > 0:
+            summary_table.add_row("📋 Loss Template", f"{losses_history['template'][-1]:.4e}", "")
+        if losses_history.get("activity") and losses_history["activity"][-1] > 0:
+            summary_table.add_row("⭐ Loss Activity", f"{losses_history['activity'][-1]:.4e}", "")
+        if losses_history.get("corr") and losses_history["corr"][-1] > 0:
+            summary_table.add_row("🔗 Loss Corr", f"{losses_history['corr'][-1]:.4e}", "")
     
     # Learning rate final
     if losses_history["lr"]:
@@ -1564,7 +1553,7 @@ def main(
         if config.get("interpolate", "linear"):
             console.log(f"🔄 interpolate method: {config.get('interpolate')}")
 
-        if config.get("loss_fid_in_rest_frame", True):
+        if config.get("loss_fid_in_rest_frame", False):
             console.log("🔄 loss_fid_in_rest_frame is enabled")
 
         else:
@@ -1598,7 +1587,7 @@ def main(
             consistency_mode=config.get("consistency_mode", "mse"),
             encode_in_rest_frame=config.get("encode_in_rest_frame", True),
             interp_method=config.get("interpolate", "linear"),
-            loss_fid_in_rest_frame=config.get("loss_fid_in_rest_frame", True),
+            loss_fid_in_rest_frame=config.get("loss_fid_in_rest_frame", False),
         )
         console.log(
             f"✅ Modèle créé avec succès (include_activity_proxies={model.include_activity_proxies})"
@@ -1628,8 +1617,8 @@ def main(
         # Losses activées
         model_details_table.add_row("📊 Loss B_rest", f"{'✅' if config.get('loss_b_rest', False) else '❌'}")
         model_details_table.add_row("⭐ Loss Activity", f"{'✅' if config.get('loss_activity', False) else '❌'}")
-        model_details_table.add_row("🔍 Loss FID", f"{'✅' if config.get('loss_fid_in_rest_frame', True) else '❌'}")
-        
+        model_details_table.add_row("🔍 Loss FID in rest frame", f"{'✅' if config.get('loss_fid_in_rest_frame', False) else '❌'}")
+
         # Configuration avancée
         smooth_alpha = config.get("smooth_alpha", 0.0)
         sigma_l = config.get("sigma_l", 0.0)
@@ -1753,8 +1742,8 @@ def main(
     
     # Paramètres d'augmentation
     dataloader_table.add_row("🎯 M_aug", f"{config.get('M_aug', 'N/A')}")
-    dataloader_table.add_row("🏃 V_min", f"{config.get('vmin', 'N/A')} km/s")
-    dataloader_table.add_row("🏃 V_max", f"{config.get('vmax', 'N/A')} km/s")
+    dataloader_table.add_row("🏃 V_min", f"{config.get('vmin', 'N/A')} m/s")
+    dataloader_table.add_row("🏃 V_max", f"{config.get('vmax', 'N/A')} m/s")
     dataloader_table.add_row("🔄 Interpolation", f"{config.get('interpolate', 'linear')}")
     dataloader_table.add_row("📏 Extrapolation", f"{config.get('extrapolate', 'N/A')}")
     

@@ -578,8 +578,6 @@ class AESTRA(nn.Module):
                 get_aug_data=get_aug_data,
                 batch_activity_proxies_norm=batch_activity_proxies_norm,
                 include_activity_proxies=self.include_activity_proxies,
-                encode_in_rest_frame=self.encode_in_rest_frame,
-                loss_fid_in_rest_frame=self.loss_fid_in_rest_frame
             )
 
             losses["fid"] = loss_fid(
@@ -671,7 +669,6 @@ class AESTRA(nn.Module):
         get_aug_data: bool = True,
         include_activity_proxies: bool = False,
         batch_activity_proxies_norm: Optional[Tensor] = None,
-        encode_in_rest_frame: bool = True,
     ) -> Tuple[Tensor, Tensor, Optional[Tensor], Tensor, Optional[Tensor]]:
         """
         Forward 'SPENDER' propre avec gestion unifiée des shifts, proxies, et retour cohérent.
@@ -704,7 +701,7 @@ class AESTRA(nn.Module):
         # ------------------------------------------------------------
         # Résiduel d'observation (observed ou rest-frame suivant le flag)
         # ------------------------------------------------------------
-        if encode_in_rest_frame:
+        if self.encode_in_rest_frame:
             # Dé-shift vers le repos: -v_pred
             yobs_rest = shift(batch_yobs, batch_wavegrid, -batch_vobs_pred, extrapolate)
             robs = yobs_rest - self.b_obs.unsqueeze(0)
@@ -743,7 +740,7 @@ class AESTRA(nn.Module):
         s_aug: Optional[Tensor]
 
         if get_aug_data:
-            if encode_in_rest_frame:
+            if self.encode_in_rest_frame:
                 # IMPORTANT: pour l'augment en rest-frame, il faut aussi -v_aug_pred
                 yaug_rest = shift(batch_yaug, batch_wavegrid, -batch_vaug_pred, extrapolate)
                 raug = yaug_rest - self.b_obs.unsqueeze(0)
