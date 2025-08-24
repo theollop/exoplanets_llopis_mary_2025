@@ -9,7 +9,7 @@ checkpoint_every: 100
 clear_memory_every: 50
 
 # DataLoader
-batch_size: 32
+batch_size: 16
 shuffle: true
 num_workers: 2
 pin_memory: true
@@ -19,13 +19,13 @@ move_batches_to_device: true
 non_blocking_transfer: true
 
 # Augmentation (Doppler)
-M_aug: 1
-vmin: -7
-vmax: +7
-interpolate: "linear"        # (ton code actuel)
+M_aug: 2
+vmin: -8
+vmax: +8
+interpolate: "linear"
 extrapolate: "linear"
 out_dtype: float32
-get_aug_data: false           # pour la consistance latente et métriques
+get_aug_data: true           # pour la consistance latente et métriques
 
 # Modèle
 latent_dim: 3
@@ -56,10 +56,10 @@ mask_weights_fid: false       # applique un masque raies si dispo côté code
 sigma_corr: 0.0
 
 # Activité (loss dédiée vers y_act^true)
-loss_activity: true
+loss_activity: false
 alpha_act: 5.0
 
-# b_rest (pas de loss, on le fige à b_rest_true)
+# b_rest
 loss_b_rest: false
 beta_brest: 0.0
 
@@ -92,7 +92,7 @@ plot_rv_every: 50
 # Phases d’entraînement
 phases:
   - name: rvonly
-    n_epochs: 0
+    n_epochs: 100
     trainable_params:
       b_obs: false
       b_rest: false        # b_rest fixé = b_rest_true (chargé côté code)
@@ -103,26 +103,12 @@ phases:
       lr: 1.0e-4
       weight_decay: 0.0
 
-  - name: act_only
-    n_epochs: 70
-    trainable_params:
-      b_obs: false
-      b_rest: false        # toujours figé
-      rvestimator: false
-      spender: true        # apprend y_act avec Lfid (masqué) + Lreg + loss_activity
-    optimizer: "torch.optim.Adam"
-    optimizer_kwargs:
-      lr: 2.0e-4
-      weight_decay: 0.0
-    loss_fid_in_rest_frame: true
-    plot_activity_every: 10
-
 
   - name: joint
-    n_epochs: 140
+    n_epochs: 200
     trainable_params:
       b_obs: false
-      b_rest: false        # figé
+      b_rest: false       
       rvestimator: true
       spender: true
     optimizer: "torch.optim.Adam"
@@ -130,6 +116,6 @@ phases:
       lr: 1.0e-4
       weight_decay: 0.0
 
-    plot_activity_every: 20
-    plot_latent_distance_every: 20
-    plot_latent_space_every: 20
+    plot_activity_every: 10
+    plot_latent_distance_every: 10
+    plot_latent_space_every: 10

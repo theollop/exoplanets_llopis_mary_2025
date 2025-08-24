@@ -682,196 +682,111 @@ def plot_ccf_analysis(
 
 
 def plot_activity(
-    batch: tuple,
-    dataset: SpectrumDataset,
-    model: torch.nn.Module,
-    exp_name: str,
-    phase_name: str,
-    epoch: int,
-    plot_dir: str,
-    sample_idx: Optional[int] = None,
-    data_root_dir: str = "data",
-) -> None:
+    batch,
+    dataset,
+    model,
+    exp_name,
+    phase_name,
+    epoch,
+    plot_dir,
+    data_root_dir="data",
+):
     """
-    Plot de comparaison entre l'activité vraie et l'activité prédite par AESTRA.
-
-    Structure du plot :
-    - 1ère ligne : spectre d'activité complet (vraie vs prédite)
-    - 2ème ligne : zoom sur les 3 raies les plus importantes (weightées)
-
+    Plot l'activité prédite vs l'activité réelle pour comparaison.
+    
     Args:
-        batch: Batch de données (y_obs, y_aug, v_offset, wavegrid)
-        dataset: Dataset contenant l'activité vraie
+        batch: Batch d'entraînement contenant yact_true
+        dataset: Dataset utilisé
         model: Modèle AESTRA
         exp_name: Nom de l'expérience
         phase_name: Phase d'entraînement
-        epoch: Époch actuelle
+        epoch: Epoch actuelle
         plot_dir: Répertoire de sauvegarde
-        sample_idx: Index de l'échantillon (None pour aléatoire)
-        data_root_dir: Répertoire racine des données (par défaut "data")
+        data_root_dir: Répertoire racine des données
     """
-    # Préparation du sous-dossier (créé plus bas juste avant la sauvegarde)
-
-    # Unpack batch (we expect batch_yact_true to be present)
+    # Créer le sous-dossier organisé par type
+    typed_plot_dir = create_typed_plot_dir(plot_dir, phase_name, "activity")
+    
+    # Extraire les données du batch
     (
-        batch_yobs,
-        batch_yaug,
-        batch_voffset,
-        batch_wavegrid,
-        batch_weights_fid,
-        batch_indices,
-        batch_yact_true,
-        batch_activity_proxies_norm,
-        batch_yact_noised,
+        yobs,
+        yaug,
+        voffset_true,
+        wavegrid,
+        weights_fid,
+        indices,
+        yact_true,
+        activity_proxies_norm,
+        yact_noised,
     ) = batch
-
-    # Prefer using batch_yact_true supplied in the batch; otherwise fallback to dataset.activity
-    def to_numpy(x):
-        if torch.is_tensor(x):
-            return x.detach().cpu().numpy()
-        return np.asarray(x)
-
-    # Determine sample index and flat index (assume no multiple augmentations for simplicity)
-    batch_size = (
-        int(batch_indices.shape[0])
-        if batch_indices is not None
-        else int(batch_yact_true.shape[0])
-    )
-    if sample_idx is None:
-        sample_idx = np.random.randint(0, batch_size)
-    sample_idx = int(sample_idx % batch_size)
-
-    # Extract wavegrid, true activity and run model prediction for the same sample
-    flat_idx = sample_idx
-    wavegrid = to_numpy(batch_wavegrid[flat_idx])
-    y_act_true = to_numpy(batch_yact_true[sample_idx])
-
+    
+    # Si pas d'activité vraie, pas de plot
+    if yact_true is None:
+        return
+    
+    # Mode évaluation pour les prédictions
+    was_training = model.training
     model.eval()
+    
     with torch.no_grad():
-        batch_robs = batch_yobs - model.b_obs.unsqueeze(0)
+        # Prédictions RV
+        vobs_pred, vaug_pred = model.get_rvestimator_pred(
+            batch_yobs=yobs, batch_yaug=yaug
+        )
+        
+        # Prédictions SPENDER pour obtenir yact
+        yobs_prime, yact_pred, yact_aug, s, s_aug = model.get_spender_pred(
+            batch_yobs=yobs,
+            batch_yaug=yaug,
+            batch_wavegrid=wavegrid,
+            batch_vobs_pred=vobs_pred,
+            batch_vaug_pred=vaug_pred,
+            get_aug_data=False,
+            batch_activity_proxies_norm=activity_proxies_norm,
+            include_activity_proxies=model.include_activity_proxies,
+        )
+    
+    # Restaurer l'état du modèle
+    if was_training:
+        model.train()
+    
+    # Conversion en numpy
+    yact_true_np = yact_true.detach().cpu().numpy()
+    yact_pred_np = yact_pred.detach().cpu().numpy()
+    
+    # Sélectionner quelques spectres pour le plot (max 4)
+    n_samples = min(4, yact_true_np.shape[0])
+    indices_plot = np.linspace(0, yact_true_np.shape[0] - 1, n_samples, dtype=int)
+    
+    # Créer le plot
+    fig, axes = plt.subplots(2, 2, figsize=(15, 10))
+    fig.suptitle(f"Activité Prédite vs Réelle - {phase_name} Epoch {epoch}", fontsize=16)
+    
+    axes = axes.flatten()
+    
+    for i, idx in enumerate(indices_plot):
+        ax = axes[i]
+        
+        # Plot activité vraie vs prédite
+        ax.plot(yact_true_np[idx], 'b-', label='Activité vraie', alpha=0.8, linewidth=1.5)
+        ax.plot(yact_pred_np[idx], 'r--', label='Activité prédite', alpha=0.8, linewidth=1.5)
+        
+        # Calcul MSE pour ce spectre
+        mse = np.mean((yact_true_np[idx] - yact_pred_np[idx])**2)
 
-        # Préparer les proxies d'activité si utilisés
-        proxies_obs = None
-        if getattr(model, "include_activity_proxies", False) and (
-            batch_activity_proxies_norm is not None
-        ):
-            if batch_activity_proxies_norm.ndim == 1:
-                proxies_obs = batch_activity_proxies_norm.unsqueeze(0).expand(
-                    batch_robs.size(0), -1
-                )
-            else:
-                proxies_obs = batch_activity_proxies_norm
-            proxies_obs = proxies_obs.to(
-                device=batch_robs.device, dtype=batch_robs.dtype
-            )
-
-        batch_yact_pred, _ = model.spender(batch_robs, proxies=proxies_obs)
-    y_act_pred = to_numpy(batch_yact_pred[flat_idx])
-
-    # Build requested composite: y_act_pred_vs_template = b_rest + y_act_pred - b_obs
-    b_rest_np = (
-        to_numpy(model.b_rest)
-        if hasattr(model, "b_rest")
-        else np.zeros_like(y_act_pred)
-    )
-    b_obs_np = (
-        to_numpy(model.b_obs) if hasattr(model, "b_obs") else np.zeros_like(y_act_pred)
-    )
-    y_rest_pred = b_rest_np + y_act_pred
-    y_act_pred_vs_template = y_rest_pred - b_obs_np
-
-    # Simple safe correlation
-    def safe_corr(a, b):
-        a = np.asarray(a).ravel()
-        b = np.asarray(b).ravel()
-        if a.std() == 0 or b.std() == 0:
-            return np.nan
-        return float(np.corrcoef(a, b)[0, 1])
-
-    corr_pred = safe_corr(y_act_true, y_act_pred_vs_template)
-
-    # Select up to 3 strong lines from G2 mask for zooms
-    g2mask = get_mask("G2")
-    line_positions, line_weights = g2mask[:, 0], g2mask[:, 1]
-    in_range = (line_positions >= wavegrid.min()) & (line_positions <= wavegrid.max())
-    sel_pos = line_positions[in_range]
-    sel_w = line_weights[in_range]
-    if sel_pos.size > 0:
-        n_lines = min(3, sel_pos.size)
-        top_idx = np.argsort(sel_w)[-n_lines:]
-        order = np.argsort(sel_w[top_idx])[::-1]
-        top_idx = top_idx[order]
-        selected_lines = sel_pos[top_idx]
-        selected_weights = sel_w[top_idx]
-    else:
-        selected_lines = np.array([])
-        selected_weights = np.array([])
-
-    # ------------- PLOTTING -------------
-    fig, axes = plt.subplots(
-        2, 1, figsize=(14, 8), gridspec_kw={"height_ratios": [2, 1]}
-    )
-
-    # Full spectrum
-    ax = axes[0]
-    ax.plot(wavegrid, y_act_true, color="k", lw=1.5, label="True activity")
-    # Plot decoded predicted activity (y_act_pred)
-    ax.plot(
-        wavegrid,
-        y_act_pred,
-        color="#2ca02c",
-        lw=1.0,
-        alpha=0.9,
-        label="Predicted activity (y_act_pred)",
-    )
-    # Plot requested composite b_rest + y_act_pred - b_obs
-    ax.plot(
-        wavegrid,
-        y_act_pred_vs_template,
-        color="#1f77b4",
-        lw=1.2,
-        alpha=0.9,
-        label=f"b_rest + y_act_pred - b_obs  r={corr_pred:.2f}",
-    )
-    ax.axhline(0.0, color="gray", ls="--", alpha=0.5)
-    ax.set_xlabel("Wavelength (Å)")
-    ax.set_ylabel("Activity flux")
-    ax.set_title(f"Activity comparison — sample {sample_idx} — epoch {epoch}")
-    ax.legend()
-    ax.grid(True, alpha=0.3)
-
-    # Zoom row: show up to 3 lines side by side
-    n_zoom = min(3, max(1, selected_lines.size))
-    axes_zoom = []
-    gs2 = fig.add_gridspec(1, n_zoom, top=0.35, bottom=0.05)
-    for i in range(n_zoom):
-        axz = fig.add_subplot(gs2[0, i])
-        if i < selected_lines.size:
-            lp = selected_lines[i]
-            halfwin = 0.18
-            mask = (wavegrid >= lp - halfwin) & (wavegrid <= lp + halfwin)
-            axz.plot(wavegrid[mask], y_act_true[mask], "k-", lw=1.2)
-            axz.plot(wavegrid[mask], y_act_pred[mask], color="#2ca02c", lw=1.0)
-            axz.plot(
-                wavegrid[mask], y_act_pred_vs_template[mask], color="#1f77b4", lw=1.0
-            )
-            axz.axvline(lp, color="red", ls=":", alpha=0.7)
-            axz.set_title(f"Line @{lp:.2f} Å (w={selected_weights[i]:.3f})")
-        else:
-            axz.text(0.5, 0.5, "No line", ha="center", va="center")
-            axz.set_axis_off()
-        axz.grid(True, alpha=0.3)
-        axes_zoom.append(axz)
-
+        ax.set_title(f'Spectre {idx} - MSE: {mse:.4e} indice global : {indices[idx]}')
+        ax.set_xlabel('Pixel')
+        ax.set_ylabel('Flux d\'activité')
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+    
     plt.tight_layout()
-    outdir = create_typed_plot_dir(plot_dir, phase_name, "activity")
-    filepath = os.path.join(outdir, f"activity_epoch_{epoch}_sample{sample_idx}.png")
-    plt.savefig(filepath, dpi=300, bbox_inches="tight")
+    
+    # Sauvegarde
+    filename = f"activity_comparison_epoch_{epoch}.png"
+    filepath = os.path.join(typed_plot_dir, filename)
+    plt.savefig(filepath, dpi=200, bbox_inches="tight")
     plt.close()
-
-    print(
-        f"📊 Activity plot saved: {os.path.join(phase_name, 'activity', os.path.basename(filepath))}"
-    )
 
 
 # ==== Plots de predict.py ====

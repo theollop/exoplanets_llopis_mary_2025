@@ -815,21 +815,20 @@ def create_soap_gpu_paper_dataset(
         try:
             from scipy.interpolate import interp1d
 
+            # Utiliser la même méthode d'interpolation pour template et spectres
+            # pour éviter les inconsistances aux bords
+            
             # interpolate template
             try:
-                ftmp = interp1d(
-                    wavegrid_masked,
-                    template_masked,
-                    kind="linear",
-                    bounds_error=False,
-                    fill_value="extrapolate",
-                )
-                template_masked = ftmp(new_wavegrid_masked)
-            except Exception:
-                # fallback to numpy interp for template
+                # Utiliser np.interp qui est plus conservateur aux bords
                 template_masked = np.interp(
                     new_wavegrid_masked, wavegrid_masked, template_masked
                 )
+            except Exception as e:
+                print(f"⚠️  Erreur interpolation template: {e}")
+                # En cas d'échec, garder la grille originale
+                new_wavegrid_masked = wavegrid_masked
+                print("   Utilisation de la grille originale")
 
             # interpolate each spectrum onto new grid
             spect_interp = np.empty(
@@ -841,22 +840,43 @@ def create_soap_gpu_paper_dataset(
                         new_wavegrid_masked, wavegrid_masked, spectra[i]
                     )
                 except Exception:
-                    # if interpolation fails for a spectrum, fill with NaNs
-                    spect_interp[i] = np.full(new_wavegrid_masked.size, np.nan)
+                    # if interpolation fails for a spectrum, fill with template values
+                    print(f"⚠️  Erreur interpolation spectre {i}, utilisation du template")
+                    spect_interp[i] = template_masked.copy()
 
             spectra = spect_interp
             # replace the masked wavegrid with the new one for downstream ops
             wavegrid_masked = new_wavegrid_masked
+            
+            # Vérification de cohérence après interpolation
+            activity_check = np.mean(np.abs(spectra - template_masked.reshape(1, -1)), axis=0)
+            edge_pixels = 10
+            edge_activity = np.mean([
+                activity_check[:edge_pixels].mean(), 
+                activity_check[-edge_pixels:].mean()
+            ])
+            center_activity = activity_check[edge_pixels:-edge_pixels].mean()
+            
+            if edge_activity > 3 * center_activity:
+                print(f"⚠️  Activité élevée aux bords après interpolation: "
+                      f"bords={edge_activity:.6f}, centre={center_activity:.6f}")
+                print("   Cela peut indiquer un problème d'interpolation")
+            
             print(
                 f"Interpolated spectra and template on new grid (n_pix={wavegrid_masked.size})"
             )
         except Exception as e:
             print(f"⚠️  Interpolation sur new_wavegrid_masked a échoué: {e}")
-
-    wavegrid_ds = downscale_mean_1d(wavegrid_masked, downscaling_factor)
-    template_ds = downscale_mean_1d(template_masked, downscaling_factor)
-    spectra_ds, n_bins = downscale_mean_2d(spectra, downscaling_factor)
-    print(f"📐 Downscaling: {Npix} → {n_bins} (factor {downscaling_factor})")
+    if downscaling_factor > 1:
+        wavegrid_ds = downscale_mean_1d(wavegrid_masked, downscaling_factor)
+        template_ds = downscale_mean_1d(template_masked, downscaling_factor)
+        spectra_ds, n_bins = downscale_mean_2d(spectra, downscaling_factor)
+        print(f"📐 Downscaling: {Npix} → {n_bins} (factor {downscaling_factor})")
+    else :
+        wavegrid_ds = wavegrid_masked
+        template_ds = template_masked
+        spectra_ds = spectra
+        n_bins = Npix
 
     # ---- Optional smoothing
     if smooth_after_downscaling:
@@ -1442,11 +1462,11 @@ if __name__ == "__main__":
         idx_start=0,
         idx_end=1275,
         wavemin=5000,
-        wavemax=5050,
+        wavemax=5010,
         downscaling_factor=1,
         smooth_after_downscaling=False,
         smooth_kernel_size=1,
-        add_photon_noise=False,
+        add_photon_noise=True,
         snr_target=2000,
         noise_seed=42,
         # use_realistic_harps_noise=False,
@@ -1454,12 +1474,12 @@ if __name__ == "__main__":
         # snr_scaling=1,
         planets_amplitudes=[0.5],
         planets_periods=[100],
-        planets_phases=[0.0],
+        planets_phases=[0],
         batch_size=100,
         use_rassine=False,
         storage_dtype=np.float32,
         compute_ccf_proxies=True,
-        interpolate_method="interpolate",
+        interpolate_method="linear",
     )
 
     # create_soap_gpu_paper_dataset(

@@ -682,24 +682,24 @@ def train_phase(
     n_epochs = phase_config["n_epochs"]
 
     console.rule(f"[bold green]🚀 PHASE: {phase_name.upper()}[/]", style="bold green")
-    
+
     # Affichage détaillé de la configuration de la phase
     phase_info_table = Table(title=f"Configuration Phase '{phase_name}'", expand=True)
     phase_info_table.add_column("Paramètre", style="cyan", width=25)
     phase_info_table.add_column("Valeur", style="white")
-    
+
     # Informations de base
     phase_info_table.add_row("📊 Nombre d'epochs", f"{n_epochs}")
     phase_info_table.add_row("🎯 Epoch de départ", f"{start_epoch}")
     phase_info_table.add_row("🔄 Phase du modèle", f"{phase_name}")
-    
+
     # Configuration de l'optimiseur
     optimizer_info = phase_config.get("optimizer", "N/A")
     optimizer_kwargs = phase_config.get("optimizer_kwargs", {})
     lr = optimizer_kwargs.get("lr", "N/A")
     phase_info_table.add_row("⚙️ Optimiseur", f"{optimizer_info}")
     phase_info_table.add_row("📈 Learning Rate", f"{lr}")
-    
+
     # Configuration du scheduler si présent
     if "scheduler" in phase_config:
         scheduler_info = phase_config.get("scheduler", "N/A")
@@ -709,43 +709,53 @@ def train_phase(
             phase_info_table.add_row(f"  └─ {key}", f"{value}")
     else:
         phase_info_table.add_row("📉 Scheduler", "Aucun")
-    
+
     # Paramètres entraînables
     trainable_params = phase_config.get("trainable_params", {})
     phase_info_table.add_row("🔧 Paramètres entraînables", "")
     for param_name, is_trainable in trainable_params.items():
         status = "✅ Oui" if is_trainable else "❌ Non"
         phase_info_table.add_row(f"  └─ {param_name}", status)
-    
+
     # Early Stopping si configuré
     if "early_stopping" in phase_config:
         es_config = phase_config["early_stopping"]
         patience = es_config.get("patience", 10)
         metric = es_config.get("metric", "total")
         mode = es_config.get("mode", "min")
-        phase_info_table.add_row("⏹️ Early Stopping", f"Patience: {patience}, Metric: {metric}, Mode: {mode}")
+        phase_info_table.add_row(
+            "⏹️ Early Stopping", f"Patience: {patience}, Metric: {metric}, Mode: {mode}"
+        )
     else:
         phase_info_table.add_row("⏹️ Early Stopping", "Désactivé")
-    
+
     # Configuration des plots périodiques
     plot_rv_every = phase_config.get("plot_rv_every", config.get("plot_rv_every", 0))
-    plot_activity_every = phase_config.get("plot_activity_every", config.get("plot_activity_every", 0))
+    plot_activity_every = phase_config.get(
+        "plot_activity_every", config.get("plot_activity_every", 0)
+    )
     plot_spectra_every = phase_config.get("plot_spectra_every", 0)
-    
+
     if plot_rv_every > 0:
         phase_info_table.add_row("📈 Plot RV (epochs)", f"{plot_rv_every}")
     if plot_activity_every > 0:
         phase_info_table.add_row("📊 Plot Activity (epochs)", f"{plot_activity_every}")
     if plot_spectra_every > 0:
         phase_info_table.add_row("🌈 Plot Spectra (epochs)", f"{plot_spectra_every}")
-    
+
     # Configuration mixed precision
-    use_mixed_precision = config.get("use_mixed_precision", False) and config.get("grad_scaler_enabled", False)
+    use_mixed_precision = config.get("use_mixed_precision", False) and config.get(
+        "grad_scaler_enabled", False
+    )
     autocast_enabled = config.get("autocast_enabled", True) and use_mixed_precision
-    phase_info_table.add_row("🚀 Mixed Precision", "✅ Activée" if use_mixed_precision else "❌ Désactivée")
+    phase_info_table.add_row(
+        "🚀 Mixed Precision", "✅ Activée" if use_mixed_precision else "❌ Désactivée"
+    )
     if use_mixed_precision:
-        phase_info_table.add_row("🎯 Autocast", "✅ Activé" if autocast_enabled else "❌ Désactivé")
-    
+        phase_info_table.add_row(
+            "🎯 Autocast", "✅ Activé" if autocast_enabled else "❌ Désactivé"
+        )
+
     console.print(phase_info_table)
     console.print()  # Ligne vide pour la lisibilité
 
@@ -1097,7 +1107,7 @@ def train_phase(
                             batch_vaug_pred=vaug_pred,
                             get_aug_data=True,
                             batch_activity_proxies_norm=activity_proxies_norm,
-                            include_activity_pFroxies=model.include_activity_proxies,
+                            include_activity_proxies=model.include_activity_proxies,
                         )
 
                         all_s_list.append(s.detach().cpu().numpy())
@@ -1213,22 +1223,43 @@ def train_phase(
             progress.advance(epoch_task)
 
     # Résumé de fin de phase
-    console.rule(f"[bold blue]📊 RÉSUMÉ PHASE '{phase_name.upper()}'[/]", style="bold blue")
-    
+    console.rule(
+        f"[bold blue]📊 RÉSUMÉ PHASE '{phase_name.upper()}'[/]", style="bold blue"
+    )
+
     # Créer un tableau de résumé
     summary_table = Table(title=f"Résultats Phase '{phase_name}'", expand=True)
     summary_table.add_column("Métrique", style="cyan", width=20)
     summary_table.add_column("Valeur Finale", style="white")
     summary_table.add_column("Évolution", style="yellow")
-    
+
     # Calculer les évolutions (première vs dernière epoch)
     if len(losses_history["total"]) > 1:
-        total_evolution = ((losses_history["total"][-1] - losses_history["total"][0]) / losses_history["total"][0]) * 100
-        rv_evolution = ((losses_history["rv"][-1] - losses_history["rv"][0]) / losses_history["rv"][0]) * 100 if losses_history["rv"][0] > 0 else 0
-        fid_evolution = ((losses_history["fid"][-1] - losses_history["fid"][0]) / losses_history["fid"][0]) * 100 if losses_history["fid"][0] > 0 else 0
+        total_evolution = (
+            (losses_history["total"][-1] - losses_history["total"][0])
+            / losses_history["total"][0]
+        ) * 100
+        rv_evolution = (
+            (
+                (losses_history["rv"][-1] - losses_history["rv"][0])
+                / losses_history["rv"][0]
+            )
+            * 100
+            if losses_history["rv"][0] > 0
+            else 0
+        )
+        fid_evolution = (
+            (
+                (losses_history["fid"][-1] - losses_history["fid"][0])
+                / losses_history["fid"][0]
+            )
+            * 100
+            if losses_history["fid"][0] > 0
+            else 0
+        )
     else:
         total_evolution = rv_evolution = fid_evolution = 0
-    
+
     # Formater les évolutions
     def format_evolution(evo):
         if abs(evo) < 0.01:
@@ -1237,16 +1268,28 @@ def train_phase(
             return f"↓ {abs(evo):.1f}% (amélioration)"
         else:
             return f"↑ {evo:.1f}% (dégradation)"
-    
+
     # Ajouter les métriques finales
     final_epoch = len(losses_history["total"])
     summary_table.add_row("🎯 Epochs complétées", f"{final_epoch}/{n_epochs}", "")
-    
+
     # Vérifier si on a des losses (au moins 1 epoch exécutée)
     if final_epoch > 0:
-        summary_table.add_row("📊 Loss totale", f"{losses_history['total'][-1]:.4e}", format_evolution(total_evolution))
-        summary_table.add_row("🎯 Loss RV", f"{losses_history['rv'][-1]:.4e}", format_evolution(rv_evolution))
-        summary_table.add_row("🔍 Loss FID", f"{losses_history['fid'][-1]:.4e}", format_evolution(fid_evolution))
+        summary_table.add_row(
+            "📊 Loss totale",
+            f"{losses_history['total'][-1]:.4e}",
+            format_evolution(total_evolution),
+        )
+        summary_table.add_row(
+            "🎯 Loss RV",
+            f"{losses_history['rv'][-1]:.4e}",
+            format_evolution(rv_evolution),
+        )
+        summary_table.add_row(
+            "🔍 Loss FID",
+            f"{losses_history['fid'][-1]:.4e}",
+            format_evolution(fid_evolution),
+        )
         summary_table.add_row("⚙️ Loss C", f"{losses_history['c'][-1]:.4e}", "")
         summary_table.add_row("📏 Loss Reg", f"{losses_history['reg'][-1]:.4e}", "")
     else:
@@ -1255,36 +1298,50 @@ def train_phase(
         summary_table.add_row("🔍 Loss FID", "N/A (0 epochs)", "")
         summary_table.add_row("⚙️ Loss C", "N/A (0 epochs)", "")
         summary_table.add_row("📏 Loss Reg", "N/A (0 epochs)", "")
-    
+
     # Ajouter les losses optionnelles si elles existent et sont > 0
     if final_epoch > 0:
         if losses_history.get("smooth") and losses_history["smooth"][-1] > 0:
-            summary_table.add_row("🌊 Loss Smooth", f"{losses_history['smooth'][-1]:.4e}", "")
+            summary_table.add_row(
+                "🌊 Loss Smooth", f"{losses_history['smooth'][-1]:.4e}", ""
+            )
         if losses_history.get("template") and losses_history["template"][-1] > 0:
-            summary_table.add_row("📋 Loss Template", f"{losses_history['template'][-1]:.4e}", "")
+            summary_table.add_row(
+                "📋 Loss Template", f"{losses_history['template'][-1]:.4e}", ""
+            )
         if losses_history.get("activity") and losses_history["activity"][-1] > 0:
-            summary_table.add_row("⭐ Loss Activity", f"{losses_history['activity'][-1]:.4e}", "")
+            summary_table.add_row(
+                "⭐ Loss Activity", f"{losses_history['activity'][-1]:.4e}", ""
+            )
         if losses_history.get("corr") and losses_history["corr"][-1] > 0:
-            summary_table.add_row("🔗 Loss Corr", f"{losses_history['corr'][-1]:.4e}", "")
-    
+            summary_table.add_row(
+                "🔗 Loss Corr", f"{losses_history['corr'][-1]:.4e}", ""
+            )
+
     # Learning rate final
     if losses_history["lr"]:
         summary_table.add_row("📈 Learning Rate", f"{losses_history['lr'][-1]:.2e}", "")
-    
+
     # Early stopping si activé
     if early_stopping is not None and early_stopping.stopped_epoch > 0:
-        summary_table.add_row("⏹️ Early Stopping", f"Arrêté à l'epoch {early_stopping.stopped_epoch}", f"Meilleur: epoch {early_stopping.best_epoch}")
-    
+        summary_table.add_row(
+            "⏹️ Early Stopping",
+            f"Arrêté à l'epoch {early_stopping.stopped_epoch}",
+            f"Meilleur: epoch {early_stopping.best_epoch}",
+        )
+
     console.print(summary_table)
     console.print()  # Ligne vide
-    
+
     console.log(f"✅ Phase '{phase_name}' terminée avec succès !")
-    
+
     if early_stopping is not None and early_stopping.stopped_epoch > 0:
-        console.log(f"⏹️ Arrêt précoce déclenché - Meilleure performance à l'epoch {early_stopping.best_epoch}")
+        console.log(
+            f"⏹️ Arrêt précoce déclenché - Meilleure performance à l'epoch {early_stopping.best_epoch}"
+        )
     else:
         console.log(f"🎯 Phase complète - {final_epoch} epochs exécutées")
-        
+
     console.print()  # Ligne vide avant la sauvegarde
 
     # Sauvegarde finale de la phase (TOUJOURS, même si early stopping)
@@ -1415,34 +1472,45 @@ def main(
     if exp_name is None:
         exp_name = determined_exp_name
 
-    console.rule(f"[bold blue]🚀 AESTRA TRAINING - EXPERIMENT: {exp_name.upper()}[/]", style="bold blue")
-    
+    console.rule(
+        f"[bold blue]🚀 AESTRA TRAINING - EXPERIMENT: {exp_name.upper()}[/]",
+        style="bold blue",
+    )
+
     # Affichage de la configuration générale
-    general_info_table = Table(title="Configuration Générale de l'Expérience", expand=True)
+    general_info_table = Table(
+        title="Configuration Générale de l'Expérience", expand=True
+    )
     general_info_table.add_column("Paramètre", style="cyan", width=25)
     general_info_table.add_column("Valeur", style="white")
-    
+
     # Informations sur l'expérience
     general_info_table.add_row("🏷️ Nom d'expérience", f"{exp_name}")
     general_info_table.add_row("📁 Dossier de sortie", f"{exp_dirs['experiment_dir']}")
     general_info_table.add_row("📋 Source config", f"{config_source}")
-    
+
     # Informations sur le dataset
-    dataset_path = config.get('dataset_filepath', 'N/A')
+    dataset_path = config.get("dataset_filepath", "N/A")
     general_info_table.add_row("📊 Dataset", f"{os.path.basename(dataset_path)}")
     general_info_table.add_row("📁 Chemin dataset", f"{dataset_path}")
-    
+
     # Configuration du modèle
     general_info_table.add_row("🧠 Modèle", "AESTRA")
-    general_info_table.add_row("🎯 Dimension latente", f"{config.get('latent_dim', 'N/A')}")
-    general_info_table.add_row("💾 Type de données", f"{config.get('model_dtype', 'float32')}")
+    general_info_table.add_row(
+        "🎯 Dimension latente", f"{config.get('latent_dim', 'N/A')}"
+    )
+    general_info_table.add_row(
+        "💾 Type de données", f"{config.get('model_dtype', 'float32')}"
+    )
     general_info_table.add_row("🖥️ Device", f"{device}")
-    
+
     # Configuration d'entraînement
     general_info_table.add_row("🔄 Batch size", f"{config.get('batch_size', 'N/A')}")
     general_info_table.add_row("👥 Num workers", f"{config.get('num_workers', 0)}")
-    general_info_table.add_row("📌 Pin memory", f"{'✅' if config.get('pin_memory', False) else '❌'}")
-    
+    general_info_table.add_row(
+        "📌 Pin memory", f"{'✅' if config.get('pin_memory', False) else '❌'}"
+    )
+
     # Phases d'entraînement
     phases_info = []
     total_epochs = 0
@@ -1451,26 +1519,32 @@ def main(
         phase_epochs = phase.get("n_epochs", 0)
         total_epochs += phase_epochs
         phases_info.append(f"{phase_name} ({phase_epochs} epochs)")
-    
+
     general_info_table.add_row("🎭 Phases", " → ".join(phases_info))
     general_info_table.add_row("⏱️ Total epochs", f"{total_epochs}")
-    
+
     # Configuration de sauvegarde/plotting
     checkpoint_every = config.get("checkpoint_every", 50)
     plot_every = config.get("plot_every", 0)
     general_info_table.add_row("💾 Checkpoint every", f"{checkpoint_every} epochs")
-    general_info_table.add_row("📈 Plot every", f"{plot_every} epochs" if plot_every > 0 else "Désactivé")
-    
+    general_info_table.add_row(
+        "📈 Plot every", f"{plot_every} epochs" if plot_every > 0 else "Désactivé"
+    )
+
     # Reprise depuis checkpoint
     if checkpoint_path:
-        general_info_table.add_row("� Reprise depuis", f"Epoch {start_epoch}, phase '{current_phase}'")
-        general_info_table.add_row("📂 Checkpoint", f"{os.path.basename(checkpoint_path)}")
+        general_info_table.add_row(
+            "� Reprise depuis", f"Epoch {start_epoch}, phase '{current_phase}'"
+        )
+        general_info_table.add_row(
+            "📂 Checkpoint", f"{os.path.basename(checkpoint_path)}"
+        )
     else:
         general_info_table.add_row("🆕 Mode", "Nouvel entraînement")
-    
+
     console.print(general_info_table)
     console.print()  # Ligne vide
-    
+
     # Début de la création du dataset
     console.rule("[bold yellow]📊 CRÉATION DU DATASET[/]", style="bold yellow")
     console.log(f"📁 Chargement depuis: {config.get('dataset_filepath')}")
@@ -1493,35 +1567,42 @@ def main(
         console.log(
             f"✅ Dataset créé avec succès (device={'GPU' if dataset_cuda and torch.cuda.is_available() else 'CPU'})"
         )
-        
+
         # Informations détaillées sur le dataset
         dataset_details_table = Table(title="Détails du Dataset", expand=True)
         dataset_details_table.add_column("Propriété", style="cyan", width=25)
         dataset_details_table.add_column("Valeur", style="white")
-        
+
         dataset_details_table.add_row("📊 Nombre de spectres", f"{len(dataset)}")
         dataset_details_table.add_row("🌈 Nombre de pixels", f"{dataset.n_pixels}")
         dataset_details_table.add_row("💾 Type de données", f"{dataset.spectra.dtype}")
         dataset_details_table.add_row("🖥️ Device", f"{dataset.spectra.device}")
-        dataset_details_table.add_row("📏 Forme des spectres", f"{dataset.spectra.shape}")
-        
+        dataset_details_table.add_row(
+            "📏 Forme des spectres", f"{dataset.spectra.shape}"
+        )
+
         # Métadonnées du dataset si disponibles
-        if hasattr(dataset, 'metadata') and dataset.metadata:
+        if hasattr(dataset, "metadata") and dataset.metadata:
             if dataset.metadata.get("activity_proxies_included", False):
                 dataset_details_table.add_row("⭐ Activity proxies", "✅ Inclus")
-                if hasattr(dataset, 'activity_proxies') and dataset.activity_proxies is not None:
-                    dataset_details_table.add_row("📊 Proxies shape", f"{dataset.activity_proxies.shape}")
+                if (
+                    hasattr(dataset, "activity_proxies")
+                    and dataset.activity_proxies is not None
+                ):
+                    dataset_details_table.add_row(
+                        "📊 Proxies shape", f"{dataset.activity_proxies.shape}"
+                    )
             else:
                 dataset_details_table.add_row("⭐ Activity proxies", "❌ Non inclus")
-            
+
             if dataset.template is not None:
                 dataset_details_table.add_row("📋 Template", "✅ Disponible")
             else:
                 dataset_details_table.add_row("📋 Template", "❌ Non disponible")
-        
+
         console.print(dataset_details_table)
         console.print()  # Ligne vide
-        
+
     except Exception as e:
         console.log(f"❌ Erreur lors de la création du dataset: {e}")
         raise
@@ -1592,32 +1673,45 @@ def main(
         console.log(
             f"✅ Modèle créé avec succès (include_activity_proxies={model.include_activity_proxies})"
         )
-        
+
         # Informations détaillées sur le modèle
         model_details_table = Table(title="Détails du Modèle AESTRA", expand=True)
         model_details_table.add_column("Paramètre", style="cyan", width=25)
         model_details_table.add_column("Valeur", style="white")
-        
+
         # Paramètres principaux
-        model_details_table.add_row("🎯 Dimension latente (S)", f"{config['latent_dim']}")
+        model_details_table.add_row(
+            "🎯 Dimension latente (S)", f"{config['latent_dim']}"
+        )
         model_details_table.add_row("🌈 Nombre de pixels", f"{dataset.n_pixels}")
         model_details_table.add_row("📊 Sigma V", f"{config['sigma_v']}")
         model_details_table.add_row("📊 Sigma S", f"{config['sigma_s']}")
         model_details_table.add_row("📊 Sigma Y", f"{config['sigma_y']}")
         model_details_table.add_row("⚖️ K reg init", f"{config['k_reg_init']}")
         model_details_table.add_row("🔄 Cycle length", f"{config['cycle_length']}")
-        
+
         # Configuration b_obs et b_rest
         b_obs_type = config.get("b_obs_init", "true_template")
         b_rest_type = config.get("b_rest_init", "mean")
         model_details_table.add_row("🎯 B_obs init", f"{b_obs_type}")
         model_details_table.add_row("🎯 B_rest init", f"{b_rest_type}")
-        model_details_table.add_row("🔗 B_rest = B_obs", f"{'✅' if config.get('b_rest_equal_b_obs', False) else '❌'}")
-        
+        model_details_table.add_row(
+            "🔗 B_rest = B_obs",
+            f"{'✅' if config.get('b_rest_equal_b_obs', False) else '❌'}",
+        )
+
         # Losses activées
-        model_details_table.add_row("📊 Loss B_rest", f"{'✅' if config.get('loss_b_rest', False) else '❌'}")
-        model_details_table.add_row("⭐ Loss Activity", f"{'✅' if config.get('loss_activity', False) else '❌'}")
-        model_details_table.add_row("🔍 Loss FID in rest frame", f"{'✅' if config.get('loss_fid_in_rest_frame', False) else '❌'}")
+        model_details_table.add_row(
+            "📊 Loss B_rest", f"{'✅' if config.get('loss_b_rest', False) else '❌'}"
+        )
+        model_details_table.add_row(
+            "⭐ Loss Activity",
+            f"{'✅' if config.get('loss_activity', False) else '❌'}",
+        )
+        model_details_table.add_row(
+            "🔍 Loss FID in rest frame",
+            f"{'✅' if config.get('loss_fid_in_rest_frame', False) else '❌'}",
+        )
 
         # Configuration avancée
         smooth_alpha = config.get("smooth_alpha", 0.0)
@@ -1629,10 +1723,12 @@ def main(
             model_details_table.add_row("📏 Sigma L", f"{sigma_l}")
         if sigma_corr > 0:
             model_details_table.add_row("🔗 Sigma corr", f"{sigma_corr}")
-        
+
         # Activity proxies
         include_proxies = config.get("include_activity_proxies", False)
-        model_details_table.add_row("⭐ Activity proxies", f"{'✅' if include_proxies else '❌'}")
+        model_details_table.add_row(
+            "⭐ Activity proxies", f"{'✅' if include_proxies else '❌'}"
+        )
         if include_proxies:
             proxies_dim = config.get("activity_proxies_dim", 0)
             proj_dim = config.get("proxies_proj_dim", 32)
@@ -1640,19 +1736,28 @@ def main(
             model_details_table.add_row("  └─ Proxies dim", f"{proxies_dim}")
             model_details_table.add_row("  └─ Proj dim", f"{proj_dim}")
             model_details_table.add_row("  └─ Conditioning", f"{conditioning_mode}")
-        
+
         # Informations techniques
         total_params = sum(p.numel() for p in model.parameters())
         trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
         model_details_table.add_row("🔧 Paramètres totaux", f"{total_params:,}")
-        model_details_table.add_row("🎯 Paramètres entraînables", f"{trainable_params:,}")
-        model_details_table.add_row("💾 Type de données", f"{config.get('model_dtype', 'float32')}")
-        model_details_table.add_row("🔄 Interpolation", f"{config.get('interpolate', 'linear')}")
-        model_details_table.add_row("🎭 Encode in rest frame", f"{'✅' if config.get('encode_in_rest_frame', True) else '❌'}")
-        
+        model_details_table.add_row(
+            "🎯 Paramètres entraînables", f"{trainable_params:,}"
+        )
+        model_details_table.add_row(
+            "💾 Type de données", f"{config.get('model_dtype', 'float32')}"
+        )
+        model_details_table.add_row(
+            "🔄 Interpolation", f"{config.get('interpolate', 'linear')}"
+        )
+        model_details_table.add_row(
+            "🎭 Encode in rest frame",
+            f"{'✅' if config.get('encode_in_rest_frame', True) else '❌'}",
+        )
+
         console.print(model_details_table)
         console.print()  # Ligne vide
-        
+
     except Exception as e:
         console.log(f"❌ Erreur lors de la création du modèle: {e}")
         raise
@@ -1723,34 +1828,40 @@ def main(
         dataloader_kwargs["prefetch_factor"] = prefetch_factor
 
     dataloader = DataLoader(dataset, **dataloader_kwargs)
-    
+
     # Informations sur le DataLoader et cohérence dataset/modèle
     console.rule("[bold yellow]🚀 PRÉPARATION ENTRAÎNEMENT[/]", style="bold yellow")
-    
+
     dataloader_table = Table(title="Configuration DataLoader & Cohérence", expand=True)
     dataloader_table.add_column("Paramètre", style="cyan", width=25)
     dataloader_table.add_column("Valeur", style="white")
-    
+
     # Configuration DataLoader
     dataloader_table.add_row("📦 Batch size", f"{config['batch_size']}")
     dataloader_table.add_row("👥 Num workers", f"{num_workers}")
     dataloader_table.add_row("📌 Pin memory", f"{'✅' if pin_memory else '❌'}")
-    dataloader_table.add_row("🔄 Shuffle", f"{'✅' if config.get('shuffle', True) else '❌'}")
+    dataloader_table.add_row(
+        "🔄 Shuffle", f"{'✅' if config.get('shuffle', True) else '❌'}"
+    )
     if prefetch_factor is not None:
         dataloader_table.add_row("⚡ Prefetch factor", f"{prefetch_factor}")
-    dataloader_table.add_row("💪 Persistent workers", f"{'✅' if persistent_workers else '❌'}")
-    
+    dataloader_table.add_row(
+        "💪 Persistent workers", f"{'✅' if persistent_workers else '❌'}"
+    )
+
     # Paramètres d'augmentation
     dataloader_table.add_row("🎯 M_aug", f"{config.get('M_aug', 'N/A')}")
     dataloader_table.add_row("🏃 V_min", f"{config.get('vmin', 'N/A')} m/s")
     dataloader_table.add_row("🏃 V_max", f"{config.get('vmax', 'N/A')} m/s")
-    dataloader_table.add_row("🔄 Interpolation", f"{config.get('interpolate', 'linear')}")
+    dataloader_table.add_row(
+        "🔄 Interpolation", f"{config.get('interpolate', 'linear')}"
+    )
     dataloader_table.add_row("📏 Extrapolation", f"{config.get('extrapolate', 'N/A')}")
-    
+
     # Cohérence Activity Proxies
     dataset_has_proxies = dataset.metadata.get("activity_proxies_included", False)
     model_uses_proxies = model.include_activity_proxies
-    
+
     if dataset_has_proxies and model_uses_proxies:
         proxies_status = "✅ Cohérent (dataset + modèle)"
     elif dataset_has_proxies and not model_uses_proxies:
@@ -1759,42 +1870,48 @@ def main(
         proxies_status = "⚠️  Modèle attend des proxies, dataset non"
     else:
         proxies_status = "✅ Cohérent (aucun proxy)"
-    
+
     dataloader_table.add_row("⭐ Activity Proxies", proxies_status)
-    
+
     # Template cohérence
     dataset_has_template = dataset.template is not None
     model_uses_template = config.get("loss_b_rest", False)
-    
+
     if dataset_has_template and model_uses_template:
         template_status = "✅ Cohérent (template utilisé)"
     elif not dataset_has_template and model_uses_template:
         template_status = "⚠️  Modèle attend template, dataset non"
     else:
         template_status = "✅ Cohérent"
-    
+
     dataloader_table.add_row("� Template", template_status)
-    
+
     console.print(dataloader_table)
     console.print()  # Ligne vide
 
     # Entraînement par phases
-    console.rule("[bold green]🎭 DÉBUT DE L'ENTRAÎNEMENT PAR PHASES[/]", style="bold green")
-    
+    console.rule(
+        "[bold green]🎭 DÉBUT DE L'ENTRAÎNEMENT PAR PHASES[/]", style="bold green"
+    )
+
     # Tableau récapitulatif des phases
-    phases_overview_table = Table(title="Récapitulatif des Phases d'Entraînement", expand=True)
+    phases_overview_table = Table(
+        title="Récapitulatif des Phases d'Entraînement", expand=True
+    )
     phases_overview_table.add_column("Phase", style="cyan")
     phases_overview_table.add_column("Epochs", style="white")
     phases_overview_table.add_column("Optimiseur", style="yellow")
     phases_overview_table.add_column("LR", style="green")
     phases_overview_table.add_column("Paramètres Entraînables", style="magenta")
-    
+
     for phase_config in config["phases"]:
         phase_name = phase_config["name"]
         n_epochs = phase_config["n_epochs"]
-        optimizer_name = phase_config.get("optimizer", "N/A").split(".")[-1]  # Juste le nom de la classe
+        optimizer_name = phase_config.get("optimizer", "N/A").split(".")[
+            -1
+        ]  # Juste le nom de la classe
         lr = phase_config.get("optimizer_kwargs", {}).get("lr", "N/A")
-        
+
         # Résumé des paramètres entraînables
         trainable_params = phase_config.get("trainable_params", {})
         trainable_summary = []
@@ -1802,18 +1919,14 @@ def main(
             if is_trainable:
                 trainable_summary.append(param)
         trainable_str = ", ".join(trainable_summary) if trainable_summary else "Aucun"
-        
+
         phases_overview_table.add_row(
-            phase_name,
-            str(n_epochs),
-            optimizer_name,
-            str(lr),
-            trainable_str
+            phase_name, str(n_epochs), optimizer_name, str(lr), trainable_str
         )
-    
+
     console.print(phases_overview_table)
     console.print()  # Ligne vide
-    
+
     if current_phase is not None:
         # Reprendre depuis une phase spécifique
         phase_found = False
@@ -1894,13 +2007,15 @@ def main(
     )
     console.log(f"💾 Final model saved: {final_model_path}")
 
-    console.rule("[bold green]🎉 ENTRAÎNEMENT TERMINÉ AVEC SUCCÈS ![/]", style="bold green")
-    
+    console.rule(
+        "[bold green]🎉 ENTRAÎNEMENT TERMINÉ AVEC SUCCÈS ![/]", style="bold green"
+    )
+
     # Tableau de synthèse finale
     final_summary_table = Table(title="Synthèse Finale de l'Expérience", expand=True)
     final_summary_table.add_column("Élément", style="cyan", width=25)
     final_summary_table.add_column("Information", style="white")
-    
+
     final_summary_table.add_row("🏷️ Expérience", f"{exp_name}")
     final_summary_table.add_row("📁 Dossier de sortie", f"{exp_dirs['experiment_dir']}")
     final_summary_table.add_row("💾 Modèle final", f"{final_model_path}")
@@ -1908,21 +2023,21 @@ def main(
     final_summary_table.add_row("📈 Figures", f"{exp_dirs['figures_dir']}")
     final_summary_table.add_row("📋 Logs", f"{exp_dirs['logs_dir']}")
     final_summary_table.add_row("🎭 Phases exécutées", f"{len(config['phases'])}")
-    
+
     # Compter le nombre total d'epochs exécutées
     total_epochs_executed = sum(phase.get("n_epochs", 0) for phase in config["phases"])
     final_summary_table.add_row("⏱️ Total epochs", f"{total_epochs_executed}")
-    
+
     console.print(final_summary_table)
     console.print()
-    
+
     console.print("📋 [bold]Fichiers générés:[/]")
     console.print(f"   • Modèle final: [green]{os.path.basename(final_model_path)}[/]")
     console.print(f"   • Configuration: [green]config.yaml[/]")
     console.print("   • Checkpoints intermédiaires dans [green]models/[/]")
     console.print("   • Figures de suivi dans [green]figures/[/]")
     console.print()
-    
+
     console.print("🚀 [bold]Prochaines étapes suggérées:[/]")
     console.print("   • Utiliser [green]predict.py[/] pour faire des prédictions")
     console.print("   • Analyser les figures dans le dossier [green]figures/[/]")
@@ -1932,8 +2047,36 @@ def main(
 
 if __name__ == "__main__":
     main(
-        config_path="src/modeling/configs/aestra_perfect_1000_spectra.yaml",
-        dataset_filepath="data/npz_datasets/soapgpu_ns1275_5000-5050_p100_k0p5_phi0.npz",
+        config_path="src/modeling/configs/aestra_baseline_1000_spectra.yaml",
+        dataset_filepath="data/npz_datasets/soapgpu_ns1275_5000-5010_snr2000_p100_k0p5_phi0.npz",
         output_root_dir="experiments",
-        experiment_name="aestra_perfect",
+        experiment_name="aestra_baseline_noise",
+        checkpoint_path="experiments/aestra_baseline_noise/models/model_joint_epoch_200.pth",
     )
+
+    clear_gpu_memory()
+
+    # main(
+    #     config_path="src/modeling/configs/aestra_baseline_1000_spectra_s_5.yaml",
+    #     dataset_filepath="data/npz_datasets/soapgpu_ns1275_5000-5010_p100_k0p5_phi0.npz",
+    #     output_root_dir="experiments",
+    #     experiment_name="aestra_baseline_s_5",
+    # )
+
+    # clear_gpu_memory()
+
+    # main(
+    #     config_path="src/modeling/configs/aestra_baseline_1000_spectra_activity_proxies.yaml",
+    #     dataset_filepath="data/npz_datasets/soapgpu_ns1275_5000-5010_p100_k0p5_phi0.npz",
+    #     output_root_dir="experiments",
+    #     experiment_name="aestra_baseline_activity_proxies",
+    # )
+
+    # clear_gpu_memory()
+
+    # main(
+    #     config_path="src/modeling/configs/aestra_baseline_1000_spectra_encode_in_restframe.yaml",
+    #     dataset_filepath="data/npz_datasets/soapgpu_ns1275_5000-5010_p100_k0p5_phi0.npz",
+    #     output_root_dir="experiments",
+    #     experiment_name="aestra_baseline_encode_in_restframe",
+    # )

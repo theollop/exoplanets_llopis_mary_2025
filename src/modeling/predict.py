@@ -1892,105 +1892,31 @@ def main(
 
 
 if __name__ == "__main__":
-    # dset = SpectrumDataset(
-    #     dataset_filepath="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/npz_datasets/soapgpu_nst120_nsv120_5000-5050_dx2_sm3_p60_k1_phi0.npz",
-    #     split="val",
-    #     cuda=True,
+    clear_gpu_memory()
+    main(
+        experiment_dir="experiments/aestra_baseline_noise",
+        dataset_filepath="data/npz_datasets/soapgpu_ns1275_5000-5010_snr2000_p100_k0p5_phi0.npz",
+        perturbation_value=0.001,
+        batch_size=32,
+    )
+    # clear_gpu_memory()
+    # main(
+    #     experiment_dir="experiments/aestra_baseline_s_5",
+    #     dataset_filepath="data/npz_datasets/soapgpu_ns1275_5000-5010_p100_k0p5_phi0.npz",
+    #     perturbation_value=0.001,
+    #     batch_size=32,
     # )
-    # v_ref, depth, span, fwhm = get_vref(
-    #     dataset=dset,
-    #     CCF_params = {
-    #         "v_grid": np.arange(-20000, 20000, 250),
-    #         "window_size_velocity": 820,
-    #         "mask_type": "G2",
-    #         "verbose": False,
-    #         "batch_size": 100,
-    #         "normalize": True,
-    #     }
+    # clear_gpu_memory()
+    # main(
+    #     experiment_dir="experiments/aestra_baseline_activity_proxies",
+    #     dataset_filepath="data/npz_datasets/soapgpu_ns1275_5000-5010_p100_k0p5_phi0.npz",
+    #     perturbation_value=0.001,
+    #     batch_size=32,
     # )
-
-    # v_apparent, depth_apparent, span_apparent, fwhm_apparent = get_vapparent(
-    #     dataset=dset,
-    #     CCF_params = {
-    #         "v_grid": np.arange(-20000, 20000, 250),
-    #         "window_size_velocity": 820,
-    #         "mask_type": "G2",
-    #         "verbose": False,
-    #         "batch_size": 100,
-    #         "normalize": True,
-    #     }
+    # clear_gpu_memory()
+    # main(
+    #     experiment_dir="experiments/aestra_baseline_encode_in_restframe",
+    #     dataset_filepath="data/npz_datasets/soapgpu_ns1275_5000-5010_p100_k0p5_phi0.npz",
+    #     perturbation_value=0.001,
+    #     batch_size=32,
     # )
-
-    # plt.figure(figsize=(10, 5))
-    # plt.plot(dset.time_values.cpu().numpy(), v_apparent, label="v_ref")
-    # plt.xlabel("Time (days)")
-    # plt.ylabel("Radial Velocity (m/s)")
-    # plt.title("Reference Radial Velocity")
-    # plt.legend()
-    # plt.show()
-    # experiments_root = (
-    #     "/home/tliopis/Codes/exoplanets_llopis_mary_2025/experiments/exps_rapport"
-    # )
-    # for subdir in os.listdir(experiments_root):
-    #     full_path = os.path.join(experiments_root, subdir)
-    #     if os.path.isdir(full_path):
-    #         main(
-    #             experiment_dir=full_path,
-    #             # fap_threshold=0.01,
-    #             # exclude_width_frac=0.05,
-    #             # n_periods=5000,
-    #             # zoom_frac=0.15,
-    #             # batch_size=64,
-    #             perturbation_value=0.1,
-    #         )
-
-    # parent_dir = "experiments"
-
-    # # Liste uniquement les sous-dossiers
-    # subfolders = [
-    #     os.path.join(parent_dir, d)
-    #     for d in os.listdir(parent_dir)
-    #     if os.path.isdir(os.path.join(parent_dir, d))
-    # ]
-
-    # for path in subfolders:
-    #     if not os.path.exists(os.path.join(path, "postprocessing/data/metrics.csv")):
-    #         print(path)
-    #         experiment_dir_name = os.path.basename(path)
-    #         # Path convention: data/npz_datasets/exps_rapport/<experiment_name>.npz
-    #         experiment_datasets_path = os.path.join(
-    #             "data/npz_datasets", "exps_rapport", experiment_dir_name + ".npz"
-    #         )
-    #         main(
-    #             experiment_dir=path,
-    #             dataset_filepath=experiment_datasets_path,
-    #             # fap_threshold=0.01,
-    #             # exclude_width_frac=0.05,
-    #             # n_periods=5000,
-    #             # zoom_frac=0.15,
-    #             # batch_size=64,
-    #             perturbation_value=0.01,
-    #         )
-    parent_dir = "/home/tliopis/Codes/exoplanets_llopis_mary_2025/experiments"
-
-    # Liste uniquement les sous-dossiers
-    subfolders = [
-        os.path.join(parent_dir, d)
-        for d in os.listdir(parent_dir)
-        if os.path.isdir(os.path.join(parent_dir, d))
-    ]
-
-    for path in subfolders:
-        # if not os.path.exists/(os.path.join(path, "postprocessing/data/metrics.csv")):
-        # si le nom de fichier ne contient pas 5000-5500
-        if "5000-5500" not in os.path.basename(path):
-            dataset_filepath = os.path.join(
-                "data/npz_datasets", "exps_rapport", os.path.basename(path) + ".npz"
-            )
-            clear_gpu_memory()
-            main(
-                experiment_dir=path,
-                dataset_filepath=dataset_filepath,
-                perturbation_value=0.001,
-                batch_size=32,
-            )

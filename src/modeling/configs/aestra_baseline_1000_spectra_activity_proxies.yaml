@@ -9,7 +9,7 @@ checkpoint_every: 100
 clear_memory_every: 50
 
 # DataLoader
-batch_size: 32
+batch_size: 16
 shuffle: true
 num_workers: 2
 pin_memory: true
@@ -19,19 +19,19 @@ move_batches_to_device: true
 non_blocking_transfer: true
 
 # Augmentation (Doppler)
-M_aug: 1
-vmin: -7
-vmax: +7
-interpolate: "linear"        # (ton code actuel)
+M_aug: 2
+vmin: -8
+vmax: +8
+interpolate: "linear"
 extrapolate: "linear"
 out_dtype: float32
-get_aug_data: false           # pour la consistance latente et métriques
+get_aug_data: true           # pour la consistance latente et métriques
 
 # Modèle
 latent_dim: 3
 encode_in_rest_frame: false   # entrée de l'encodeur changée (déshifté par v_encode)
-b_obs_init: true_template
-b_rest_init: true_template            # (sera écrasé en mémoire par b_rest_true côté loader)
+b_obs_init: index_582
+b_rest_init: mean            # (sera écrasé en mémoire par b_rest_true côté loader)
 b_rest_equal_b_obs: false
 model_dtype: float32
 
@@ -42,7 +42,7 @@ sigma_v: 0.3
 # Flux reg loss (Lreg du papier)
 sigma_y: 0.1
 k_reg_init: 0.0
-cycle_length: 0
+cycle_length: 1000
 
 # Consistency loss (Lc du papier, optionnelle)
 consistency_mode: "sigmoid"
@@ -56,20 +56,20 @@ mask_weights_fid: false       # applique un masque raies si dispo côté code
 sigma_corr: 0.0
 
 # Activité (loss dédiée vers y_act^true)
-loss_activity: true
+loss_activity: false
 alpha_act: 5.0
 
-# b_rest (pas de loss, on le fige à b_rest_true)
+# b_rest
 loss_b_rest: false
 beta_brest: 0.0
 
 # Loss de lissage d'activité (alpha = 0 si on ne veut pas)
-smooth_alpha: 2
+smooth_alpha: 0
 smooth_order: 2
 
 # Proxies d’activité (désactivés)
-include_activity_proxies: false
-activity_proxies_dim: 0
+include_activity_proxies: true
+activity_proxies_dim: 3
 proxies_proj_dim: 32
 conditioning_mode: "concat"
 
@@ -92,7 +92,7 @@ plot_rv_every: 50
 # Phases d’entraînement
 phases:
   - name: rvonly
-    n_epochs: 0
+    n_epochs: 100
     trainable_params:
       b_obs: false
       b_rest: false        # b_rest fixé = b_rest_true (chargé côté code)
@@ -103,26 +103,12 @@ phases:
       lr: 1.0e-4
       weight_decay: 0.0
 
-  - name: act_only
-    n_epochs: 70
-    trainable_params:
-      b_obs: false
-      b_rest: false        # toujours figé
-      rvestimator: false
-      spender: true        # apprend y_act avec Lfid (masqué) + Lreg + loss_activity
-    optimizer: "torch.optim.Adam"
-    optimizer_kwargs:
-      lr: 2.0e-4
-      weight_decay: 0.0
-    loss_fid_in_rest_frame: true
-    plot_activity_every: 10
-
 
   - name: joint
-    n_epochs: 140
+    n_epochs: 200
     trainable_params:
       b_obs: false
-      b_rest: false        # figé
+      b_rest: true       
       rvestimator: true
       spender: true
     optimizer: "torch.optim.Adam"
@@ -130,6 +116,6 @@ phases:
       lr: 1.0e-4
       weight_decay: 0.0
 
-    plot_activity_every: 20
-    plot_latent_distance_every: 20
-    plot_latent_space_every: 20
+    plot_activity_every: 10
+    plot_latent_distance_every: 10
+    plot_latent_space_every: 10
