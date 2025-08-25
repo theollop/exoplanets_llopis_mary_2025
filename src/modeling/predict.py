@@ -1391,6 +1391,33 @@ def main(
             fap_level_bootstrap=fap_level_bootstrap,
         )
 
+        # Zoom plot around specific periods if given
+        if dataset.planet_periods:
+            for P_target in dataset.planet_periods:
+                zoom_width = 0.1 * P_target
+                mask = (periods >= P_target - zoom_width) & (
+                    periods <= P_target + zoom_width
+                )
+                if np.any(mask):
+                    plt.figure(figsize=(8, 5))
+                    plt.plot(periods[mask], power[mask], "b-", linewidth=1.5)
+                    plt.axvline(
+                        P_target,
+                        color="red",
+                        linestyle="--",
+                        alpha=0.8,
+                        label=f"P_inj = {P_target:.1f}d",
+                    )
+                    plt.xlabel("Period [days]")
+                    plt.ylabel("LS Power")
+                    plt.legend()
+                    plt.grid(alpha=0.3)
+                    zoom_path = os.path.join(
+                        fig_periodo_rv, f"{name}_zoom_P{P_target:.1f}.png"
+                    )
+                    plt.savefig(zoom_path, dpi=200, bbox_inches="tight")
+                    plt.close()
+
         if dataset.planet_periods:
             for i, P_val in enumerate(dataset.planet_periods):
                 m = metrics_list[i] if i < len(metrics_list) else {}
@@ -1501,6 +1528,34 @@ def main(
                 show_plot=False,
                 fap_level_bootstrap=fap_level_bootstrap,
             )
+
+            # Zoom plot around specific periods if given
+            if dataset.planet_periods:
+                for P_target in dataset.planet_periods:
+                    zoom_width = 0.1 * P_target
+                    mask = (periods >= P_target - zoom_width) & (
+                        periods <= P_target + zoom_width
+                    )
+                    if np.any(mask):
+                        plt.figure(figsize=(8, 5))
+                        plt.plot(periods[mask], power[mask], "b-", linewidth=1.5)
+                        plt.axvline(
+                            P_target,
+                            color="red",
+                            linestyle="--",
+                            alpha=0.8,
+                            label=f"P_inj = {P_target:.1f}d",
+                        )
+                        plt.xlabel("Period [days]")
+                        plt.ylabel("LS Power")
+                        plt.title(f"{name} - Zoom around P = {P_target:.1f} days")
+                        plt.legend()
+                        plt.grid(alpha=0.3)
+                        zoom_path = os.path.join(
+                            fig_periodo_latent, f"{name}_zoom_P{P_target:.1f}.png"
+                        )
+                        plt.savefig(zoom_path, dpi=200, bbox_inches="tight")
+                        plt.close()
 
             if dataset.planet_periods:
                 for j, P_val in enumerate(dataset.planet_periods):
