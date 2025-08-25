@@ -39,8 +39,8 @@ non_blocking_transfer: true
 # Remarque : on DÉSACTIVE l’usage dans la phase 0 via losses_enabled.L_rv=false
 #             (on la réactivera pour rvonly & joint).
 M_aug: 2                     # nombre d’augmentations (utilisé hors phase 0)
-vmin: -8                     # m/s
-vmax: +8                     # m/s
+vmin: -3                     # m/s
+vmax: +3                     # m/s
 interpolate: "linear"
 extrapolate: "linear"
 out_dtype: float32
@@ -81,13 +81,13 @@ consistency_mode: "sigmoid"
 sigma_s: 0.3
 
 # Supervisées (phase 0)
-loss_activity: true              # L_act : y_act ↔ y_act_true (rest-frame)
+loss_activity: false              # L_act : y_act ↔ y_act_true (rest-frame)
 alpha_act: 3.0                   # poids L_act
 loss_b_rest: true                # L_brest : brest ↔ b_rest_true
 beta_brest: 1.0                  # poids L_brest (haut en phase 0)
 
 # Supervision RV (si v_true dispo)
-rv_supervised: true              # L_rv^sup : v_encode ↔ v_true
+rv_supervised: false              # L_rv^sup : v_encode ↔ v_true
 gamma_rv_sup: 1.0               # poids L_rv^sup
 sigma_v_sup: 0.3                # échelle incertitude de L_rv^sup
 
@@ -130,54 +130,55 @@ plot_rv_every: 50
 # Phases d’entraînement
 # ============================================================
 phases:
-  # -------- Phase 0 : pré‑entraînement SUPERVISÉ sur simulés --------
-  - name: pretrain_truth
+
+  # Phase FT-WARMUP : adapter l’instrumental (decoder + brest) au nouveau dset
+  - name: ft_warmup
     n_epochs: 50
     trainable_params:
-      b_obs: false            # b_obs dérivé de b_rest (vérité)
-      b_rest: true            # on calibre brest autour de la vérité
+      b_obs: false
+      b_rest: true            # on calibre le template au nouvel instrument
+      rvestimator: false      # on ne touche pas les filtres RV d’emblée
+      spender: true           # encoder/decoder s’adaptent (LSF/blaze)
+    losses_enabled:
+      L_fid: true             # reconstruction bout-à-bout
+      L_rv: false             # pas encore d’aug Doppler
+      L_rv_supervised: false
+      L_reg: true             # régularise y_act
+      L_consistency: true     # invariance Doppler des latents
+      L_activity: false
+      L_brest: true           # tether léger pour éviter les drift
+    optimizer: "torch.optim.Adam"
+    optimizer_kwargs:
+      lr: 1.0e-4              # un peu plus haut pour converger l’adaptation
+      weight_decay: 0.0
+
+  # Phase FT-JOINT-LOWLR : on remet l’optimisation conjointe avec RV
+  - name: ft_joint_lowlr
+    n_epochs: 200
+    trainable_params:
+      b_obs: false
+      b_rest: true
       rvestimator: true
       spender: true
     losses_enabled:
-      L_fid: true             # reconstruction bout‑à‑bout (obs-frame)
-      L_rv: false             # PAS d’augmentation Doppler ici
-      L_rv_supervised: true   # v_encode ↔ v_true (si disponible)
-      L_reg: true             # régularisation (k_reg cyclé)
-      L_consistency: false    # inutile ici
-      L_activity: true        # y_act ↔ y_act_true (rest-frame)
-      L_brest: true           # brest ↔ b_rest_true
-    optimizer: "torch.optim.Adam"
-    optimizer_kwargs:
-      lr: 2.0e-4
-      weight_decay: 0.0
-
-  # -------- Phase 1 : RV‑only (auto‑supervisée) --------
-  - name: rvonly
-    n_epochs: 100
-    trainable_params:
-      b_obs: false
-      b_rest: false           # conserve brest calé en phase 0
-      rvestimator: true
-      spender: false
-    losses_enabled:
-      L_fid: false
-      L_rv: true              # uniquement offset Doppler artificiel
+      L_fid: true
+      L_rv: true              # réactive l’auto-supervision Doppler
       L_rv_supervised: false
-      L_reg: false
-      L_consistency: false
+      L_reg: true
+      L_consistency: true     # aide à garder l’invariance latente
       L_activity: false
-      L_brest: false
+      L_brest: true           # tether faible (voir overrides)
     optimizer: "torch.optim.Adam"
     optimizer_kwargs:
-      lr: 1.0e-4
+      lr: 5.0e-5
       weight_decay: 0.0
 
-  # -------- Phase 2 : joint (auto‑supervisée) --------
-  - name: joint
-    n_epochs: 600
+  # Phase FT-JOINT-FINISH : petit LR pour stabiliser (tuning fin des kernels RV)
+  - name: ft_joint_finish
+    n_epochs: 200
     trainable_params:
       b_obs: false
-      b_rest: true            # on laisse « respirer » brest mais avec faible tether
+      b_rest: true
       rvestimator: true
       spender: true
     losses_enabled:
@@ -185,29 +186,21 @@ phases:
       L_rv: true
       L_rv_supervised: false
       L_reg: true
-      L_consistency: true     # aide à l’invariance Doppler en réel
-      L_activity: false       # plus de vérités sur données réelles
-      L_brest: true           # petit rappel à la vérité (faible poids)
+      L_consistency: true
+      L_activity: false
+      L_brest: true
     optimizer: "torch.optim.Adam"
     optimizer_kwargs:
-      lr: 5.0e-5
+      lr: 2.0e-5
       weight_decay: 0.0
-    plot_activity_every: 10
-    plot_latent_distance_every: 10
-    plot_latent_space_every: 10
 
-# ----------------------------
-# Overrides par phase (poids)
-# ----------------------------
+# =================
+# Ajustements par phase (poids)
+# =================
 per_phase_overrides:
-  pretrain_truth:
-    alpha_act: 3.0
-    beta_brest: 1.0
-    gamma_rv_sup: 1.0
-    mask_weights_fid: true
-  rvonly: {}
-  joint:
-    alpha_act: 0.0
-    beta_brest: 0.1          # faible « tether » pour éviter la dérive de brest
-    gamma_rv_sup: 0.0
-    mask_weights_fid: true
+  ft_warmup:
+    beta_brest: 0.2   # tether un peu plus fort au début (stabilise brest)
+  ft_joint_lowlr:
+    beta_brest: 0.1
+  ft_joint_finish:
+    beta_brest: 0.05  # on relâche encore, tout en évitant la dérive lente

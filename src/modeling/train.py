@@ -56,6 +56,42 @@ from src.plots_aestra import (
 console = Console()
 
 
+def apply_phase_overrides(model, config, phase_config, phase_name):
+    """Apply per-phase overrides from config['per_phase_overrides'][phase_name].
+
+    This updates phase_config in-place, writes overrides into config for
+    visibility, and if the model has matching attributes, sets them on the model.
+    """
+    overrides = config.get("per_phase_overrides", {}).get(phase_name, {})
+    if not overrides:
+        return
+
+    console.log(
+        f"🔁 Applying per-phase overrides for phase '{phase_name}': {list(overrides.keys())}"
+    )
+
+    for k, v in overrides.items():
+        # If override targets a phase-level key, set it there
+        if k in phase_config:
+            phase_config[k] = v
+            continue
+
+        # If the config already has the key, overwrite it for this run
+        if k in config:
+            config[k] = v
+        else:
+            # Put it in config for visibility even if new
+            config[k] = v
+
+        # If model exposes the attribute, set it (e.g., alpha_act, beta_brest)
+        try:
+            if hasattr(model, k):
+                setattr(model, k, v)
+        except Exception:
+            # Ignore if model doesn't accept direct attribute set
+            pass
+
+
 def setup_experiment_directories(config, config_path=None):
     """
     Crée la structure de dossiers pour une expérience d'entraînement.
@@ -1988,6 +2024,10 @@ def main(
                 # Continuer avec les phases suivantes s'il y en a
                 current_idx = config["phases"].index(phase_config)
                 for next_phase_config in config["phases"][current_idx + 1 :]:
+                    # Apply per-phase overrides if present
+                    apply_phase_overrides(
+                        model, config, next_phase_config, next_phase_config["name"]
+                    )
                     train_phase(
                         model,
                         dataset,
@@ -2005,6 +2045,8 @@ def main(
                 f"⚠️  Phase '{current_phase}' not found in config, starting from beginning"
             )
             for phase_config in config["phases"]:
+                # Apply per-phase overrides before starting the phase
+                apply_phase_overrides(model, config, phase_config, phase_config["name"])
                 train_phase(
                     model,
                     dataset,
