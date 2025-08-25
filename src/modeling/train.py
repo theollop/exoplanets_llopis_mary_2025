@@ -267,6 +267,8 @@ def load_experiment_checkpoint(path, device="cuda", dataset_filepath=None):
         encode_in_rest_frame=config.get("encode_in_rest_frame", True),
         interp_method=config.get("interpolate", "linear"),
         loss_fid_in_rest_frame=config.get("loss_fid_in_rest_frame", False),
+        loss_rv_true=config.get("loss_rv_true", False),
+        sigma_rv_true=config.get("sigma_rv_true", 1.0),
     )
 
     # Load state dict with compatibility handling
@@ -367,6 +369,7 @@ def save_losses_to_csv(losses_history, exp_name, phase_name, epoch, csv_dir, con
             "corr_loss",
             "template_loss",
             "activity_loss",
+            "rv_true_loss",
             "total_loss",
         ]
         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
@@ -376,27 +379,31 @@ def save_losses_to_csv(losses_history, exp_name, phase_name, epoch, csv_dir, con
             writer.writeheader()
 
         # Écrire les données pour cette epoch seulement (la dernière)
-        if losses_history["rv"]:  # S'assurer qu'il y a des données
-            current_epoch = len(losses_history["rv"])
+        if losses_history.get("rv"):
+            current_epoch = len(losses_history.get("rv", []))
             timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-            writer.writerow(
-                {
-                    "timestamp": timestamp,
-                    "exp_name": exp_name,
-                    "phase": phase_name,
-                    "epoch": current_epoch,
-                    "rv_loss": losses_history["rv"][-1],
-                    "fid_loss": losses_history["fid"][-1],
-                    "c_loss": losses_history["c"][-1],
-                    "reg_loss": losses_history["reg"][-1],
-                    "smooth_loss": losses_history.get("smooth", [0])[-1],
-                    "corr_loss": losses_history.get("corr", [0])[-1],
-                    "template_loss": losses_history.get("template", [0])[-1],
-                    "activity_loss": losses_history.get("activity", [0])[-1],
-                    "total_loss": losses_history["total"][-1],
-                }
-            )
+            # Construire explicitement le dict de sortie en respectant les fieldnames
+            row = {
+                "timestamp": timestamp,
+                "exp_name": exp_name,
+                "phase": phase_name,
+                "epoch": current_epoch,
+                "rv_loss": losses_history.get("rv", [0])[-1],
+                "fid_loss": losses_history.get("fid", [0])[-1],
+                "c_loss": losses_history.get("c", [0])[-1],
+                "reg_loss": losses_history.get("reg", [0])[-1],
+                "smooth_loss": losses_history.get("smooth", [0])[-1],
+                "corr_loss": losses_history.get("corr", [0])[-1],
+                "template_loss": losses_history.get("template", [0])[-1],
+                "activity_loss": losses_history.get("activity", [0])[-1],
+                "rv_true_loss": losses_history.get("rv_true", [0])[-1],
+                "total_loss": losses_history.get("total", [0])[-1],
+            }
+
+            # Ne pas envoyer de clés supplémentaires au writer
+            safe_row = {k: row.get(k, "") for k in fieldnames}
+            writer.writerow(safe_row)
 
     console.log(f"💾 Losses saved to CSV: {csv_filename}")
 
@@ -729,6 +736,16 @@ def train_phase(
     else:
         phase_info_table.add_row("⏹️ Early Stopping", "Désactivé")
 
+    # Configuration des losses activées
+    if "losses_enabled" in phase_config:
+        losses_enabled = phase_config["losses_enabled"]
+        phase_info_table.add_row("📊 Losses activées", "")
+        for loss_name, is_enabled in losses_enabled.items():
+            status = "✅ Activée" if is_enabled else "❌ Désactivée"
+            phase_info_table.add_row(f"  └─ {loss_name}", status)
+    else:
+        phase_info_table.add_row("📊 Losses activées", "Configuration par défaut")
+
     # Configuration des plots périodiques
     plot_rv_every = phase_config.get("plot_rv_every", config.get("plot_rv_every", 0))
     plot_activity_every = phase_config.get(
@@ -789,6 +806,7 @@ def train_phase(
         "total": [],
         "lr": [],
         "corr": [],
+        "rv_true": [],
     }
 
     # Configuration des colonnes du tableau (affichage compact de la dernière ligne uniquement)
@@ -802,6 +820,7 @@ def train_phase(
         "Template",
         "Activity",
         "Corr",
+        "RV True",
         "Total Loss",
     ]
 
@@ -833,6 +852,8 @@ def train_phase(
                 "template": 0.0,
                 "activity": 0.0,
                 "corr": 0.0,
+                # supervision RV vraie (optionnelle) -- gardée ici pour cohérence
+                "rv_true": 0.0,
             }
 
             for it, batch in enumerate(dataloader):
@@ -869,6 +890,7 @@ def train_phase(
                             extrapolate="linear",
                             iteration_count=it,
                             get_aug_data=config.get("get_aug_data", True),
+                            losses_enabled=phase_config.get("losses_enabled", None),
                         )
                         # Calculer la loss totale pour ce batch
                         total_batch_loss = sum(losses.values())
@@ -878,6 +900,7 @@ def train_phase(
                         extrapolate="linear",
                         iteration_count=it,
                         get_aug_data=config.get("get_aug_data", True),
+                        losses_enabled=phase_config.get("losses_enabled", None),
                     )
                     # Calculer la loss totale pour ce batch
                     total_batch_loss = sum(losses.values())
@@ -910,15 +933,24 @@ def train_phase(
             if scheduler is not None:
                 scheduler.step()
 
-            # Sauvegarde des losses dans l'historique
-            losses_history["rv"].append(epoch_losses["rv"])
-            losses_history["fid"].append(epoch_losses["fid"])
-            losses_history["c"].append(epoch_losses["c"])
-            losses_history["reg"].append(epoch_losses["reg"])
-            losses_history.setdefault("smooth", []).append(epoch_losses["smooth"])
-            losses_history.setdefault("corr", []).append(epoch_losses["corr"])
-            losses_history.setdefault("template", []).append(epoch_losses["template"])
-            losses_history.setdefault("activity", []).append(epoch_losses["activity"])
+            # Sauvegarde des losses dans l'historique (accès sûr aux clés optionnelles)
+            losses_history["rv"].append(epoch_losses.get("rv", 0.0))
+            losses_history["fid"].append(epoch_losses.get("fid", 0.0))
+            losses_history["c"].append(epoch_losses.get("c", 0.0))
+            losses_history["reg"].append(epoch_losses.get("reg", 0.0))
+            losses_history.setdefault("smooth", []).append(
+                epoch_losses.get("smooth", 0.0)
+            )
+            losses_history.setdefault("corr", []).append(epoch_losses.get("corr", 0.0))
+            losses_history.setdefault("template", []).append(
+                epoch_losses.get("template", 0.0)
+            )
+            losses_history.setdefault("activity", []).append(
+                epoch_losses.get("activity", 0.0)
+            )
+            losses_history.setdefault("rv_true", []).append(
+                epoch_losses.get("rv_true", 0.0)
+            )
             losses_history["total"].append(total_loss)
             losses_history["lr"].append(float(optimizer.param_groups[0]["lr"]))
 
@@ -943,7 +975,8 @@ def train_phase(
                 fmt(epoch_losses["smooth"]),
                 fmt(epoch_losses["template"]),  # OK
                 fmt(epoch_losses["activity"]),  # OK
-                fmt(epoch_losses["corr"]),  # OK
+                fmt(epoch_losses.get("corr", 0.0)),  # OK
+                fmt(epoch_losses.get("rv_true", 0.0)),
                 fmt(total_loss),
             )
             console.print(row_table)
@@ -1072,6 +1105,7 @@ def train_phase(
                             yact_true,
                             activity_proxies_norm,
                             batch_yact_noised,
+                            batch_vobs_true,
                         ) = _batch
 
                         # Move to model device for safety
@@ -1421,7 +1455,9 @@ def main(
     if checkpoint_path:
         # Cas 2 ou 3: Reprendre depuis checkpoint
         console.log(f"🔄 Loading checkpoint: {checkpoint_path}")
-        exp_data = load_experiment_checkpoint(checkpoint_path, device)
+        exp_data = load_experiment_checkpoint(
+            checkpoint_path, device, dataset_filepath=dataset_filepath
+        )
 
         if config_path:
             # Cas 3: Reprendre avec nouvelle config
@@ -1460,6 +1496,7 @@ def main(
     # Apply overrides from function parameters: prefer explicit function args over config file
     if dataset_filepath is not None:
         config["dataset_filepath"] = dataset_filepath
+    print(config)
     if output_root_dir is not None:
         config["output_root_dir"] = output_root_dir
     if experiment_name is not None:
@@ -1669,6 +1706,8 @@ def main(
             encode_in_rest_frame=config.get("encode_in_rest_frame", True),
             interp_method=config.get("interpolate", "linear"),
             loss_fid_in_rest_frame=config.get("loss_fid_in_rest_frame", False),
+            loss_rv_true=config.get("loss_rv_true", False),
+            sigma_rv_true=config.get("sigma_rv_true", 1.0),
         )
         console.log(
             f"✅ Modèle créé avec succès (include_activity_proxies={model.include_activity_proxies})"
@@ -2033,7 +2072,7 @@ def main(
 
     console.print("📋 [bold]Fichiers générés:[/]")
     console.print(f"   • Modèle final: [green]{os.path.basename(final_model_path)}[/]")
-    console.print(f"   • Configuration: [green]config.yaml[/]")
+    console.print("   • Configuration: [green]config.yaml[/]")
     console.print("   • Checkpoints intermédiaires dans [green]models/[/]")
     console.print("   • Figures de suivi dans [green]figures/[/]")
     console.print()
@@ -2046,15 +2085,15 @@ def main(
 
 
 if __name__ == "__main__":
-    main(
-        config_path="src/modeling/configs/aestra_baseline_1000_spectra.yaml",
-        dataset_filepath="data/npz_datasets/soapgpu_ns1275_5000-5010_snr2000_p100_k0p5_phi0.npz",
-        output_root_dir="experiments",
-        experiment_name="aestra_baseline_noise",
-        checkpoint_path="experiments/aestra_baseline_noise/models/model_joint_epoch_200.pth",
-    )
+    # main(
+    #     config_path="src/modeling/configs/aestra_baseline_1000_spectra.yaml",
+    #     dataset_filepath="data/npz_datasets/soapgpu_ns1275_5000-5010_snr2000_p100_k0p5_phi0.npz",
+    #     output_root_dir="experiments",
+    #     experiment_name="aestra_baseline_noise",
+    #     checkpoint_path="experiments/aestra_baseline_noise/models/model_joint_epoch_200.pth",
+    # )
 
-    clear_gpu_memory()
+    # clear_gpu_memory()
 
     # main(
     #     config_path="src/modeling/configs/aestra_baseline_1000_spectra_s_5.yaml",
@@ -2080,3 +2119,11 @@ if __name__ == "__main__":
     #     output_root_dir="experiments",
     #     experiment_name="aestra_baseline_encode_in_restframe",
     # )
+
+    main(
+        config_path="src/modeling/configs/aestra_baseline_1000_spectra_exp_final_1.yaml",
+        output_root_dir="experiments",
+        # checkpoint_path="experiments/aestra_baseline_1000_spectra_colab/models/aestra_final.pth",
+        dataset_filepath="data/npz_datasets/soapgpu_ns1275_5000-5010_snr2000_p100_k0p5_phi0.npz",
+        experiment_name="perfect_exp",
+    )

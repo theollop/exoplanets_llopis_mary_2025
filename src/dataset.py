@@ -590,6 +590,15 @@ def generate_collate_fn(
             batch_device,
         )
 
+        batch_vobs_true = _take_opt(
+            dataset,
+            "v_true",
+            True,
+            batch_indices,
+            MB,
+            batch_device,
+        )
+
         return (
             batch_yobs,  # [M*B, n_pix]
             batch_yaug,  # [M*B, n_pix]
@@ -600,6 +609,7 @@ def generate_collate_fn(
             batch_yact_true,  # [M*B, n_pix] ou None
             batch_activity_proxies_norm,  # [M*B, P] ou None
             batch_yact_noised,  # [M*B, n_pix] ou None
+            batch_vobs_true,
         )
 
     return collate_fn

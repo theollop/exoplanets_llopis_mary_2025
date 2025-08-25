@@ -398,6 +398,8 @@ class AESTRA(nn.Module):
         encode_in_rest_frame: bool = True,
         interp_method: str = "linear",
         loss_fid_in_rest_frame: bool = False,
+        loss_rv_true: bool = False,
+        sigma_rv_true: float = 1.0,
     ):
         """
         Args:
@@ -435,6 +437,8 @@ class AESTRA(nn.Module):
         self.alpha_act = alpha_act
         self.beta_brest = beta_brest
         self.consistency_mode = consistency_mode
+        self.loss_rv_true = bool(loss_rv_true)
+        self.sigma_rv_true = sigma_rv_true
 
         self.spender = SPENDER(
             n_pixels_in=n_pixels,
@@ -526,6 +530,7 @@ class AESTRA(nn.Module):
         extrapolate="linear",
         iteration_count=None,
         get_aug_data=True,
+        losses_enabled=None,
     ):
         (
             batch_yobs,
@@ -537,14 +542,41 @@ class AESTRA(nn.Module):
             batch_yact_true,
             batch_activity_proxies_norm,
             batch_yact_noised,
+            batch_vobs_true,
         ) = batch
 
         device, dtype = batch_yobs.device, batch_yobs.dtype
-        zeros = lambda: torch.zeros((), device=device, dtype=dtype)
+
+        def zeros():
+            return torch.zeros((), device=device, dtype=dtype)
+
+        # Configuration par défaut des losses si non spécifiée
+        if losses_enabled is None:
+            losses_enabled = {
+                "L_fid": True,
+                "L_rv": True,
+                "L_rv_supervised": self.loss_rv_true,
+                "L_reg": True,
+                "L_consistency": True,
+                "L_activity": self.loss_activity,
+                "L_brest": self.b_rest_true is not None,
+                "L_smooth": self.smooth_alpha > 0.0,
+                "L_corr": self.sigma_corr > 0.0,
+            }
 
         losses = {
             k: zeros()
-            for k in ["fid", "c", "reg", "rv", "smooth", "corr", "activity", "template"]
+            for k in [
+                "fid",
+                "c",
+                "reg",
+                "rv",
+                "smooth",
+                "corr",
+                "activity",
+                "template",
+                "rv_true",
+            ]
         }
 
         # --- RV head ---
@@ -556,11 +588,25 @@ class AESTRA(nn.Module):
                 batch_yaug=batch_yaug,
             )
             batch_voffset_pred = batch_vaug_pred - batch_vobs_pred
-            losses["rv"] = loss_rv(
-                batch_voffset_true=batch_voffset_true,
-                batch_voffset_pred=batch_voffset_pred,
-                sigma_v=self.sigma_v,
-            )
+
+            # L_rv: Loss sur l'offset de vitesse radiale
+            if losses_enabled.get("L_rv", True):
+                losses["rv"] = loss_rv(
+                    batch_voffset_true=batch_voffset_true,
+                    batch_voffset_pred=batch_voffset_pred,
+                    sigma_v=self.sigma_v,
+                )
+
+            # L_rv_supervised: Supervision RV true (optionnelle)
+            if (
+                losses_enabled.get("L_rv_supervised", False)
+                and batch_vobs_true is not None
+            ):
+                losses["rv_true"] = loss_rv_true(
+                    batch_vobs_pred=batch_vobs_pred,
+                    batch_vobs_true=batch_vobs_true,
+                    sigma_rv_true=self.sigma_rv_true,
+                )
         else:
             # sécurité si la tête RV est gelée
             B = batch_yobs.size(0)
@@ -580,46 +626,58 @@ class AESTRA(nn.Module):
                 include_activity_proxies=self.include_activity_proxies,
             )
 
-            losses["fid"] = loss_fid(
-                batch_yobs_prime=batch_yobs_prime,
-                batch_yobs=batch_yobs,
-                batch_weights=batch_weights_fid,
-                sigma_l=self.sigma_l,
-            )
+            # L_fid: Loss de fidélité (reconstruction)
+            if losses_enabled.get("L_fid", True):
+                losses["fid"] = loss_fid(
+                    batch_yobs_prime=batch_yobs_prime,
+                    batch_yobs=batch_yobs,
+                    batch_weights=batch_weights_fid,
+                    sigma_l=self.sigma_l,
+                )
 
-            # Consistency sur les latents (dépend de get_aug_data)
-            if get_aug_data and s is not None and s_aug is not None:
+            # L_consistency: Consistency sur les latents (dépend de get_aug_data)
+            if (
+                losses_enabled.get("L_consistency", True)
+                and get_aug_data
+                and s is not None
+                and s_aug is not None
+            ):
                 if self.consistency_mode == "mse":
                     losses["c"] = loss_c_mse(s, s_aug, sigma_s=self.sigma_s)
                 elif self.consistency_mode == "sigmoid":
                     losses["c"] = loss_c(s, s_aug, sigma_s=self.sigma_s)
 
             # --- Ces pertes DOIVENT être calculées indépendamment de get_aug_data ---
-            # Régularisation L2 sur y_act
-            losses["reg"] = loss_reg(
-                batch_yact,
-                k_reg_init=self.k_reg_init,
-                sigma_y=self.sigma_y,
-                iteration_count=iteration_count,
-                cycle_length=self.cycle_length,
-            )
+            # L_reg: Régularisation L2 sur y_act
+            if losses_enabled.get("L_reg", True):
+                losses["reg"] = loss_reg(
+                    batch_yact,
+                    k_reg_init=self.k_reg_init,
+                    sigma_y=self.sigma_y,
+                    iteration_count=iteration_count,
+                    cycle_length=self.cycle_length,
+                )
 
-            # Lissage éventuel de y_act
-            if self.smooth_alpha is not None and float(self.smooth_alpha) > 0.0:
+            # L_smooth: Lissage éventuel de y_act
+            if (
+                losses_enabled.get("L_smooth", False)
+                and self.smooth_alpha is not None
+                and float(self.smooth_alpha) > 0.0
+            ):
                 losses["smooth"] = loss_smooth(
                     batch_yact, alpha=self.smooth_alpha, order=self.smooth_order
                 )
 
-            # Supervision b_rest (template)
-            if self.b_rest_true is not None:
+            # L_brest: Supervision b_rest (template)
+            if losses_enabled.get("L_brest", False) and self.b_rest_true is not None:
                 losses["template"] = loss_b_rest(
                     b_rest_true=self.b_rest_true,
                     b_rest_pred=self.b_rest,
                     beta_brest=self.beta_brest,
                 )
 
-            # Supervision activité y_act (si GT dispo)
-            if batch_yact_true is not None and self.loss_activity:
+            # L_activity: Supervision activité y_act (si GT dispo)
+            if losses_enabled.get("L_activity", False) and batch_yact_true is not None:
                 losses["activity"] = loss_activity(
                     batch_yact=batch_yact,
                     batch_yact_true=batch_yact_true,
@@ -627,9 +685,10 @@ class AESTRA(nn.Module):
                     batch_weights_fid=batch_weights_fid,
                 )
 
-        # Corrélation latents / RV (optionnelle)
+        # L_corr: Corrélation latents / RV (optionnelle)
         if (
-            self.sigma_corr > 0.0
+            losses_enabled.get("L_corr", False)
+            and self.sigma_corr > 0.0
             and self.rvestimator_trainable
             and self.spender_trainable
             and get_aug_data
@@ -691,7 +750,9 @@ class AESTRA(nn.Module):
         # ------------------------------------------------------------
         # Helper: préparation des proxies (broadcast + dtype/device)
         # ------------------------------------------------------------
-        def _prep_proxies(proxies: Optional[Tensor], target: Tensor) -> Optional[Tensor]:
+        def _prep_proxies(
+            proxies: Optional[Tensor], target: Tensor
+        ) -> Optional[Tensor]:
             if not include_activity_proxies or proxies is None:
                 return None
             if proxies.ndim == 1:
@@ -742,7 +803,9 @@ class AESTRA(nn.Module):
         if get_aug_data:
             if self.encode_in_rest_frame:
                 # IMPORTANT: pour l'augment en rest-frame, il faut aussi -v_aug_pred
-                yaug_rest = shift(batch_yaug, batch_wavegrid, -batch_vaug_pred, extrapolate)
+                yaug_rest = shift(
+                    batch_yaug, batch_wavegrid, -batch_vaug_pred, extrapolate
+                )
                 raug = yaug_rest - self.b_obs.unsqueeze(0)
             else:
                 raug = batch_yaug - self.b_obs.unsqueeze(0)
@@ -753,6 +816,7 @@ class AESTRA(nn.Module):
             yact_aug, s_aug = None, None
 
         return yobs_prime, yact, yact_aug, s, s_aug
+
 
 def loss_rv(batch_voffset_true, batch_voffset_pred, sigma_v=1.0):
     return torch.mean((batch_voffset_true - batch_voffset_pred) ** 2 / (sigma_v**2))
@@ -923,6 +987,24 @@ def loss_b_rest(b_rest_true, b_rest_pred, beta_brest=1.0):
         return b_rest_true.new_tensor(0.0)
 
     return beta_brest * torch.mean((b_rest_true - b_rest_pred) ** 2)
+
+
+def loss_rv_true(batch_vobs_pred, batch_vobs_true, sigma_rv_true=1.0):
+    """
+    Loss de supervision RV true: L2 entre RV prédite et RV vraie.
+
+    Args:
+        batch_vobs_pred: RV prédites [B]
+        batch_vobs_true: RV vraies [B]
+        sigma_rv_true: poids de la loss
+
+    Returns:
+        scalar tensor
+    """
+    if batch_vobs_true is None:
+        return torch.tensor(0.0, device=batch_vobs_pred.device)
+
+    return sigma_rv_true * torch.mean((batch_vobs_pred - batch_vobs_true) ** 2)
 
 
 def save_checkpoint(

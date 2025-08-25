@@ -564,6 +564,7 @@ def predict(model, dataset, batch_size=64, perturbation_value=1.0):
                 batch_yact_true,
                 batch_activity_proxies_norm,
                 batch_yact_noised,
+                batch_vobs_true,
             ) = batch
 
             batch_vobs_pred, batch_vaug_pred = model.get_rvestimator_pred(

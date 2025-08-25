@@ -693,7 +693,7 @@ def plot_activity(
 ):
     """
     Plot l'activité prédite vs l'activité réelle pour comparaison.
-    
+
     Args:
         batch: Batch d'entraînement contenant yact_true
         dataset: Dataset utilisé
@@ -706,7 +706,7 @@ def plot_activity(
     """
     # Créer le sous-dossier organisé par type
     typed_plot_dir = create_typed_plot_dir(plot_dir, phase_name, "activity")
-    
+
     # Extraire les données du batch
     (
         yobs,
@@ -718,22 +718,23 @@ def plot_activity(
         yact_true,
         activity_proxies_norm,
         yact_noised,
+        vobs_true,
     ) = batch
-    
+
     # Si pas d'activité vraie, pas de plot
     if yact_true is None:
         return
-    
+
     # Mode évaluation pour les prédictions
     was_training = model.training
     model.eval()
-    
+
     with torch.no_grad():
         # Prédictions RV
         vobs_pred, vaug_pred = model.get_rvestimator_pred(
             batch_yobs=yobs, batch_yaug=yaug
         )
-        
+
         # Prédictions SPENDER pour obtenir yact
         yobs_prime, yact_pred, yact_aug, s, s_aug = model.get_spender_pred(
             batch_yobs=yobs,
@@ -745,43 +746,49 @@ def plot_activity(
             batch_activity_proxies_norm=activity_proxies_norm,
             include_activity_proxies=model.include_activity_proxies,
         )
-    
+
     # Restaurer l'état du modèle
     if was_training:
         model.train()
-    
+
     # Conversion en numpy
     yact_true_np = yact_true.detach().cpu().numpy()
     yact_pred_np = yact_pred.detach().cpu().numpy()
-    
+
     # Sélectionner quelques spectres pour le plot (max 4)
     n_samples = min(4, yact_true_np.shape[0])
     indices_plot = np.linspace(0, yact_true_np.shape[0] - 1, n_samples, dtype=int)
-    
+
     # Créer le plot
     fig, axes = plt.subplots(2, 2, figsize=(15, 10))
-    fig.suptitle(f"Activité Prédite vs Réelle - {phase_name} Epoch {epoch}", fontsize=16)
-    
+    fig.suptitle(
+        f"Activité Prédite vs Réelle - {phase_name} Epoch {epoch}", fontsize=16
+    )
+
     axes = axes.flatten()
-    
+
     for i, idx in enumerate(indices_plot):
         ax = axes[i]
-        
-        # Plot activité vraie vs prédite
-        ax.plot(yact_true_np[idx], 'b-', label='Activité vraie', alpha=0.8, linewidth=1.5)
-        ax.plot(yact_pred_np[idx], 'r--', label='Activité prédite', alpha=0.8, linewidth=1.5)
-        
-        # Calcul MSE pour ce spectre
-        mse = np.mean((yact_true_np[idx] - yact_pred_np[idx])**2)
 
-        ax.set_title(f'Spectre {idx} - MSE: {mse:.4e} indice global : {indices[idx]}')
-        ax.set_xlabel('Pixel')
-        ax.set_ylabel('Flux d\'activité')
+        # Plot activité vraie vs prédite
+        ax.plot(
+            yact_true_np[idx], "b-", label="Activité vraie", alpha=0.8, linewidth=1.5
+        )
+        ax.plot(
+            yact_pred_np[idx], "r--", label="Activité prédite", alpha=0.8, linewidth=1.5
+        )
+
+        # Calcul MSE pour ce spectre
+        mse = np.mean((yact_true_np[idx] - yact_pred_np[idx]) ** 2)
+
+        ax.set_title(f"Spectre {idx} - MSE: {mse:.4e} indice global : {indices[idx]}")
+        ax.set_xlabel("Pixel")
+        ax.set_ylabel("Flux d'activité")
         ax.legend()
         ax.grid(True, alpha=0.3)
-    
+
     plt.tight_layout()
-    
+
     # Sauvegarde
     filename = f"activity_comparison_epoch_{epoch}.png"
     filepath = os.path.join(typed_plot_dir, filename)

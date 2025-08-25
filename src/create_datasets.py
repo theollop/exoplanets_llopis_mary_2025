@@ -817,7 +817,7 @@ def create_soap_gpu_paper_dataset(
 
             # Utiliser la même méthode d'interpolation pour template et spectres
             # pour éviter les inconsistances aux bords
-            
+
             # interpolate template
             try:
                 # Utiliser np.interp qui est plus conservateur aux bords
@@ -841,27 +841,35 @@ def create_soap_gpu_paper_dataset(
                     )
                 except Exception:
                     # if interpolation fails for a spectrum, fill with template values
-                    print(f"⚠️  Erreur interpolation spectre {i}, utilisation du template")
+                    print(
+                        f"⚠️  Erreur interpolation spectre {i}, utilisation du template"
+                    )
                     spect_interp[i] = template_masked.copy()
 
             spectra = spect_interp
             # replace the masked wavegrid with the new one for downstream ops
             wavegrid_masked = new_wavegrid_masked
-            
+
             # Vérification de cohérence après interpolation
-            activity_check = np.mean(np.abs(spectra - template_masked.reshape(1, -1)), axis=0)
+            activity_check = np.mean(
+                np.abs(spectra - template_masked.reshape(1, -1)), axis=0
+            )
             edge_pixels = 10
-            edge_activity = np.mean([
-                activity_check[:edge_pixels].mean(), 
-                activity_check[-edge_pixels:].mean()
-            ])
+            edge_activity = np.mean(
+                [
+                    activity_check[:edge_pixels].mean(),
+                    activity_check[-edge_pixels:].mean(),
+                ]
+            )
             center_activity = activity_check[edge_pixels:-edge_pixels].mean()
-            
+
             if edge_activity > 3 * center_activity:
-                print(f"⚠️  Activité élevée aux bords après interpolation: "
-                      f"bords={edge_activity:.6f}, centre={center_activity:.6f}")
+                print(
+                    f"⚠️  Activité élevée aux bords après interpolation: "
+                    f"bords={edge_activity:.6f}, centre={center_activity:.6f}"
+                )
                 print("   Cela peut indiquer un problème d'interpolation")
-            
+
             print(
                 f"Interpolated spectra and template on new grid (n_pix={wavegrid_masked.size})"
             )
@@ -872,7 +880,7 @@ def create_soap_gpu_paper_dataset(
         template_ds = downscale_mean_1d(template_masked, downscaling_factor)
         spectra_ds, n_bins = downscale_mean_2d(spectra, downscaling_factor)
         print(f"📐 Downscaling: {Npix} → {n_bins} (factor {downscaling_factor})")
-    else :
+    else:
         wavegrid_ds = wavegrid_masked
         template_ds = template_masked
         spectra_ds = spectra
@@ -1431,56 +1439,56 @@ def create_rvdatachallenge_dataset(
 if __name__ == "__main__":
     clear_gpu_memory()
 
-    # create_rvdatachallenge_dataset(
-    #     flux_path="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/rv_datachallenge/Sun_B57001_E61001_planet-FallChallenge1/HARPN/STAR1136_HPN_flux_YVA.npy",
-    #     summary_csv_path="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/rv_datachallenge/Sun_B57001_E61001_planet-FallChallenge1/HARPN/STAR1136_HPN_Analyse_summary.csv",
-    #     material_pkl_path="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/rv_datachallenge/Sun_B57001_E61001_planet-FallChallenge1/HARPN/STAR1136_HPN_Analyse_material.p",
-    #     idx_start=None,
-    #     idx_end=None,
-    #     wavemin=5000,
-    #     wavemax=5050,
-    #     downscaling_factor=1,
-    #     smooth_after_downscaling=False,
-    #     smooth_kernel_size=3,
-    #     planets_amplitudes=None,
-    #     planets_periods=None,
-    #     planets_phases=None,
-    #     output_dir="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/npz_datasets",
-    # )
+    create_rvdatachallenge_dataset(
+        flux_path="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/rv_datachallenge/Sun_B57000_E61000_planet-FallChallenge3/HARPN/STAR1134_HPN_flux_YVA.npy",
+        summary_csv_path="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/rv_datachallenge/Sun_B57000_E61000_planet-FallChallenge3/HARPN/STAR1134_HPN_Analyse_summary.csv",
+        material_pkl_path="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/rv_datachallenge/Sun_B57000_E61000_planet-FallChallenge3/HARPN/STAR1134_HPN_Analyse_material.p",
+        idx_start=None,
+        idx_end=None,
+        wavemin=5000,
+        wavemax=5050,
+        downscaling_factor=1,
+        smooth_after_downscaling=False,
+        smooth_kernel_size=0,
+        # planets_amplitudes=[0.5],
+        # planets_periods=[100],
+        # planets_phases=[0],
+        output_dir="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/npz_datasets",
+    )
 
     # create_soap_gpu_paper_dataset(
 
     # )
 
-    create_soap_gpu_paper_dataset(
-        spectra_filepath="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/soap_gpu_paper/soap_equiv_for_harps.h5",
-        template_filepath="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/soap_gpu_paper/template.npy",
-        wavegrid_filepath="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/soap_gpu_paper/wavegrid.npy",
-        new_wavegrid_filepath="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/soap_gpu_paper/new_wavegrid.npy",
-        time_values_filepath="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/soap_gpu_paper/time_values_soap_equiv_for_harps.npy",
-        output_dir="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/npz_datasets",
-        idx_start=0,
-        idx_end=1275,
-        wavemin=5000,
-        wavemax=5010,
-        downscaling_factor=1,
-        smooth_after_downscaling=False,
-        smooth_kernel_size=1,
-        add_photon_noise=True,
-        snr_target=2000,
-        noise_seed=42,
-        # use_realistic_harps_noise=False,
-        # harps_material_path="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/rv_datachallenge/Sun_B57000_E61000_planet-FallChallenge3/HARPN/STAR1134_HPN_Analyse_material.p",
-        # snr_scaling=1,
-        planets_amplitudes=[0.5],
-        planets_periods=[100],
-        planets_phases=[0],
-        batch_size=100,
-        use_rassine=False,
-        storage_dtype=np.float32,
-        compute_ccf_proxies=True,
-        interpolate_method="linear",
-    )
+    # create_soap_gpu_paper_dataset(
+    #     spectra_filepath="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/soap_gpu_paper/soap_equiv_for_harps.h5",
+    #     template_filepath="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/soap_gpu_paper/template.npy",
+    #     wavegrid_filepath="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/soap_gpu_paper/wavegrid.npy",
+    #     new_wavegrid_filepath="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/soap_gpu_paper/new_wavegrid.npy",
+    #     time_values_filepath="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/soap_gpu_paper/time_values_soap_equiv_for_harps.npy",
+    #     output_dir="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/npz_datasets",
+    #     idx_start=0,
+    #     idx_end=1275,
+    #     wavemin=5000,
+    #     wavemax=5050,
+    #     downscaling_factor=1,
+    #     smooth_after_downscaling=False,
+    #     smooth_kernel_size=1,
+    #     add_photon_noise=True,
+    #     snr_target=2000,
+    #     noise_seed=42,
+    #     # use_realistic_harps_noise=False,
+    #     # harps_material_path="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/rv_datachallenge/Sun_B57000_E61000_planet-FallChallenge3/HARPN/STAR1134_HPN_Analyse_material.p",
+    #     # snr_scaling=1,
+    #     planets_amplitudes=[0.5],
+    #     planets_periods=[100],
+    #     planets_phases=[0],
+    #     batch_size=100,
+    #     use_rassine=False,
+    #     storage_dtype=np.float32,
+    #     compute_ccf_proxies=True,
+    #     interpolate_method="linear",
+    # )
 
     # create_soap_gpu_paper_dataset(
     #     spectra_filepath="/home/tliopis/Codes/exoplanets_llopis_mary_2025/data/soap_gpu_paper/spec_cube_tot_filtered_normalized_float32.h5",
