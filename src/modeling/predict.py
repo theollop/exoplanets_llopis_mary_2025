@@ -651,8 +651,17 @@ def get_vapparent(dataset, CCF_params):
 
 
 def get_vref(dataset, CCF_params):
+    # spectra_no_activity may be optional on some datasets; fall back to spectra
+    if getattr(dataset, "spectra_no_activity", None) is not None:
+        spectra_tensor = dataset.spectra_no_activity
+    else:
+        print(
+            "⚠️  dataset.spectra_no_activity is None — falling back to dataset.spectra for reference CCF"
+        )
+        spectra_tensor = dataset.spectra
+
     full_analysis = get_full_ccf_analysis(
-        spectra=dataset.spectra_no_activity.cpu().detach().numpy(),
+        spectra=spectra_tensor.cpu().detach().numpy(),
         wavegrid=dataset.wavegrid.cpu().detach().numpy(),
         **CCF_params,
     )
@@ -833,6 +842,7 @@ def main(
     zoom_frac: float = 0.15,
     batch_size: int = 64,
     perturbation_value: float = 0.02,
+    injected_periods=None,
     **overrides,
 ):
     """
@@ -897,6 +907,26 @@ def main(
     model = exp["model"]
     dataset = exp["dataset"]
     dataset.move_to_cuda()
+
+    # Determine planet periods to use: prefer dataset's own list; if absent,
+    # fall back to the injected_periods argument passed to main.
+    ds_periods = getattr(dataset, "planet_periods", None)
+    if ds_periods:
+        print(f"🔎 Using dataset.planet_periods: {ds_periods}")
+    else:
+        if injected_periods is not None:
+            # coerce a single float/int to list
+            if isinstance(injected_periods, (int, float)):
+                P_list = [float(injected_periods)]
+            else:
+                try:
+                    P_list = [float(x) for x in injected_periods]
+                except Exception:
+                    P_list = []
+            print(f"🔁 No dataset periods found — using injected_periods: {P_list}")
+            dataset.planet_periods = P_list
+        else:
+            dataset.planet_periods = []
 
     # Predefine expected artifact paths
     overlay_path = os.path.join(fig_timeseries, "v_apparent_vs_v_correct.png")
@@ -1895,10 +1925,11 @@ def main(
 if __name__ == "__main__":
     clear_gpu_memory()
     main(
-        experiment_dir="experiments/aestra_baseline_noise",
-        dataset_filepath="data/npz_datasets/soapgpu_ns1275_5000-5010_snr2000_p100_k0p5_phi0.npz",
+        experiment_dir="experiments/fine_tuned_final",
+        # dataset_filepath="data/npz_datasets/soapgpu_ns1275_5000-5010_snr2000_p100_k0p5_phi0.npz",
         perturbation_value=0.001,
         batch_size=32,
+        injected_periods=[41.215, 52.10008, 90.74876],
     )
     # clear_gpu_memory()
     # main(

@@ -200,6 +200,8 @@ phases:
 per_phase_overrides:
   ft_warmup:
     beta_brest: 0.2   # tether un peu plus fort au début (stabilise brest)
+    M_aug: 0
+    get_aug_data: false
   ft_joint_lowlr:
     beta_brest: 0.1
   ft_joint_finish:

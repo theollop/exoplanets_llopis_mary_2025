@@ -2163,9 +2163,10 @@ if __name__ == "__main__":
     # )
 
     main(
-        config_path="src/modeling/configs/aestra_baseline_1000_spectra_exp_final_1.yaml",
+        config_path="src/modeling/configs/aestra_baseline_1000_spectra_exp_final_2.yaml",
         output_root_dir="experiments",
         # checkpoint_path="experiments/aestra_baseline_1000_spectra_colab/models/aestra_final.pth",
-        dataset_filepath="data/npz_datasets/soapgpu_ns1275_5000-5010_snr2000_p100_k0p5_phi0.npz",
-        experiment_name="perfect_exp",
+        dataset_filepath="data/npz_datasets/rvdatachallenge_ns1275_5000-5010.npz",
+        experiment_name="fine_tuned_final",
+        checkpoint_path="experiments/perfect_exp/models/aestra_final.pth",
     )
