@@ -69,7 +69,7 @@
 
   # Proxies d’activité (désactivés)
   include_activity_proxies: true
-  activity_proxies_dim: 0
+  activity_proxies_dim: 3
   proxies_proj_dim: 32
   conditioning_mode: "concat"
 

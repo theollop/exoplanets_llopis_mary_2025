@@ -1980,7 +1980,8 @@ def main(
 if __name__ == "__main__":
     clear_gpu_memory()
     main(
-        experiment_dir="experiments/fine_tuned_final",
+        experiment_dir="experiments/exp_finale_rv_datachallenge",
+        dataset_filepath="data/npz_datasets/rvdatachallenge_ns1275_5000-5050.npz",
         # dataset_filepath="data/npz_datasets/soapgpu_ns1275_5000-5010_snr2000_p100_k0p5_phi0.npz",
         perturbation_value=0.001,
         batch_size=32,
