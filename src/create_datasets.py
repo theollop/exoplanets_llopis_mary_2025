@@ -786,12 +786,12 @@ def create_soap_gpu_paper_dataset(
 
     # ---- Load spectra selection (+ time)
     with h5py.File(spectra_filepath, "r") as f:
-        n_file_total = f["spec_sel"].shape[0]
+        n_file_total = f["spec_cube"].shape[0]
         if idx_start < 0 or idx_end > n_file_total:
             raise ValueError(
                 f"Index range [{idx_start}:{idx_end}] out of bounds for file with {n_file_total} spectra."
             )
-        spectra = f["spec_sel"][idx_start:idx_end, :][:, mask]
+        spectra = f["spec_cube"][idx_start:idx_end, :][:, mask]
         time_values = time_values[idx_start:idx_end]
 
     n_spectra = spectra.shape[0]
